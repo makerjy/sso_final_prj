@@ -1,0 +1,8 @@
+﻿oracledb
+fastapi
+uvicorn
+pandas
+plotly
+python-dotenv
+pytest
+openai
