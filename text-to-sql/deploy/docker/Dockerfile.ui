@@ -1,0 +1,15 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+ARG API_BASE_URL
+ENV API_BASE_URL=$API_BASE_URL
+
+COPY ui/package.json /app/package.json
+RUN npm install
+
+COPY ui /app
+RUN npm run build
+
+EXPOSE 3000
+CMD ["npm", "start"]

@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    env_file:
+      - ../../.env
+    environment:
+      - ORACLE_LIB_DIR=/opt/oracle/instantclient
+      - LD_LIBRARY_PATH=/opt/oracle/instantclient
+      # Set if wallet/tnsnames is required
+      # - ORACLE_TNS_ADMIN=/opt/oracle/wallet
+    volumes:
+      - ../../oracle/instantclient_23_26:/opt/oracle/instantclient:ro
+      # - ../../oracle/wallet:/opt/oracle/wallet:ro
+      - ../../var/metadata:/app/var/metadata
+      - ../../var/cache:/app/var/cache
+      - ../../var/logs:/app/var/logs
+      - ../../var/chroma:/app/var/chroma
+    ports:
+      - "8001:8000"
+
+  ui:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.ui
+      args:
+        - API_BASE_URL=http://api:8000
+    env_file:
+      - ../../.env
+    environment:
+      - API_BASE_URL=http://api:8000
+    ports:
+      - "3000:3000"
