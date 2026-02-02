@@ -5,7 +5,10 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-
+# 입력: chart_type, x, y, group, agg
+# 출력: ChartSpec 모델
+# 차트 스펙 모델
+# 차트 타입과 축/그룹/집계 정보를 담는다
 class ChartSpec(BaseModel):
     # 차트 타입 (line, bar, hist, scatter, box 등)
     chart_type: str
@@ -16,6 +19,10 @@ class ChartSpec(BaseModel):
     agg: Optional[str] = None
 
 
+# 입력: chart_spec, reason, figure_json, code, summary
+# 출력: AnalysisCard 모델
+# 분석 카드 모델
+# 하나의 시각화 추천 단위를 나타낸다
 class AnalysisCard(BaseModel):
     # 차트 스펙
     chart_spec: ChartSpec
@@ -28,7 +35,9 @@ class AnalysisCard(BaseModel):
     # 자연어 요약(선택)
     summary: Optional[str] = None
 
-
+# 입력: sql, table_preview, analyses
+# 출력: VisualizationResponse 모델
+# 시각화 응답 모델
 class VisualizationResponse(BaseModel):
     # 원본 SQL
     sql: str

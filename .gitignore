@@ -1,0 +1,6 @@
+# Virtualenv
+.venv/
+venv/
+
+# Local workspace
+9team/

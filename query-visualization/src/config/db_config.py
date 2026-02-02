@@ -9,6 +9,8 @@ import oracledb
 
 # DSN 생성 함수
 # DSN: Data Source Name (Oracle DB 접속 대상 정보를 담은 문자열)
+# 입력: 없음
+# 출력: DSN 문자열 또는 None
 def _build_dsn() -> Optional[str]:
     # 1) ORACLE_DSN이 있으면 그대로 사용
     dsn = os.getenv("ORACLE_DSN")
@@ -23,7 +25,9 @@ def _build_dsn() -> Optional[str]:
         return oracledb.makedsn(host, int(port), service_name=service_name)
     return None
 
-
+# 입력: 없음
+# 출력: Oracle connection parameters: user, password, dsn
+# 계정/비밀번호/DSN을 환경변수에서 읽어온다
 def get_oracle_config() -> Dict[str, str]:
     """Return Oracle connection parameters: user, password, dsn."""
     # 계정/비밀번호/DSN을 환경변수에서 읽어온다

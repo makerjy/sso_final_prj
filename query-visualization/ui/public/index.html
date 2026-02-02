@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Query Visualization UI</title>
+    <style>
+      :root {
+        --bg: #f6f3ee;
+        --ink: #1b1b1b;
+        --muted: #6b6b6b;
+        --card: #ffffff;
+        --accent: #1c7ed6;
+        --border: #e3ded6;
+      }
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", system-ui, sans-serif;
+        background: radial-gradient(1200px 600px at 10% 10%, #fff8e7, var(--bg));
+        color: var(--ink);
+      }
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 20px 60px;
+      }
+      h1 {
+        font-size: 28px;
+        margin: 0 0 8px;
+      }
+      .sub {
+        color: var(--muted);
+        margin-bottom: 20px;
+      }
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1fr;
+      }
+      @media (min-width: 900px) {
+        .grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+      textarea, input {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 14px;
+        box-sizing: border-box;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 14px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .plot {
+        min-height: 300px;
+      }
+      .reason {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 6px 0 12px;
+      }
+      .error {
+        color: #b00020;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.30.0/plotly.min.js"></script>
+
+    <script type="text/babel">
+      const { useEffect, useState } = React;
+
+      const sampleRows = [
+        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-18", HEART_RATE: 103.0 },
+        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-18", HEART_RATE: 105.0 },
+        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-19", HEART_RATE: 95.0 },
+        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-19", HEART_RATE: 99.0 }
+      ];
+
+      function PlotCard({ analysis, idx }) {
+        useEffect(() => {
+          const el = document.getElementById(`plot-${idx}`);
+          if (el && analysis.figure_json) {
+            const { data, layout, config } = analysis.figure_json;
+            Plotly.react(el, data, layout, config);
+          }
+        }, [analysis, idx]);
+
+        return (
+          <div className="card">
+            <h3>{analysis.chart_spec?.chart_type || "chart"}</h3>
+            <div className="reason">{analysis.reason}</div>
+            <div id={`plot-${idx}`} className="plot"></div>
+          </div>
+        );
+      }
+
+      function App() {
+        const [userQuery, setUserQuery] = useState("수술 환자의 ICU 입실 후 7일간 심박수 변화가 어떻게 되나요?");
+        const [sql, setSql] = useState("SELECT ...");
+        const [rows, setRows] = useState(JSON.stringify(sampleRows, null, 2));
+        const [resp, setResp] = useState(null);
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState("");
+
+        const run = async () => {
+          setLoading(true);
+          setError("");
+          setResp(null);
+          try {
+            const payload = {
+              user_query: userQuery,
+              sql,
+              rows: JSON.parse(rows)
+            };
+            const r = await fetch("/visualize", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            const data = await r.json();
+            if (!r.ok) {
+              throw new Error(JSON.stringify(data, null, 2));
+            }
+            setResp(data);
+          } catch (e) {
+            setError(String(e));
+          } finally {
+            setLoading(false);
+          }
+        };
+
+        return (
+          <div className="wrap">
+            <h1>Visualization Response Viewer</h1>
+            <div className="sub">추천 플랜 결과를 바로 UI에서 확인합니다.</div>
+
+            <div className="grid">
+              <div className="card">
+                <h3>Input</h3>
+                <div style={{ marginBottom: 10 }}>
+                  <input value={userQuery} onChange={(e) => setUserQuery(e.target.value)} />
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <input value={sql} onChange={(e) => setSql(e.target.value)} />
+                </div>
+                <textarea rows="10" value={rows} onChange={(e) => setRows(e.target.value)} />
+                <div style={{ marginTop: 10 }}>
+                  <button onClick={run} disabled={loading}>
+                    {loading ? "Running..." : "Run"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="card">
+                <h3>Response (raw)</h3>
+                <pre style={{ whiteSpace: "pre-wrap" }}>
+                  {resp ? JSON.stringify(resp, null, 2) : "No response yet"}
+                </pre>
+                {error && <div className="error">{error}</div>}
+              </div>
+            </div>
+
+            {resp && resp.analyses && (
+              <>
+                <h2 style={{ marginTop: 28 }}>추천 시각화</h2>
+                <div className="grid">
+                  {resp.analyses.map((a, i) => (
+                    <PlotCard key={i} analysis={a} idx={i} />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>

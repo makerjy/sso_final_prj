@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 from typing import Any, Dict
+import json
 
 import pandas as pd
 import plotly.express as px
+import plotly.io as pio
 
 from src.utils.logging import log_event
 
@@ -63,7 +65,8 @@ def generate_chart(
         log_event("codegen.noop", {"chart_type": chart_type})
         return {"figure_json": None, "code": _build_code(chart_spec)}
 
-    fig_json = fig.to_plotly_json()
+    # Numpy types in figure JSON can break Pydantic serialization
+    fig_json = json.loads(pio.to_json(fig))
     log_event("codegen.success", {"chart_type": chart_type})
 
     return {

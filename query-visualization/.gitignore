@@ -9,6 +9,9 @@ __pycache__/
 .venv/
 venv/
 
+# Node
+ui/node_modules/
+
 # Environment variables
 .env
 
