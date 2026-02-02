@@ -21,6 +21,43 @@ def summarize_schema(df: pd.DataFrame) -> Dict[str, Any]:
     """데이터프레임 스키마를 간단히 요약."""
     return summarize_dataframe_schema(df)
 
+# 입력: df
+# 출력: df
+# 경과시간 파생 컬럼을 조건부로 생성
+def _add_elapsed_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # 대소문자/스네이크케이스/카멜케이스 대응
+    cols = {c.lower(): c for c in df.columns}
+
+    def _col(*names: str) -> str | None:
+        for n in names:
+            if n in cols:
+                return cols[n]
+        return None
+
+    chart_col = _col("charttime", "chart_time", "charttimestamp")
+    intime_col = _col("intime", "in_time", "icu_intime")
+    admittime_col = _col("admittime", "admit_time")
+
+    # ICU 경과시간: charttime - intime
+    if chart_col and intime_col:
+        try:
+            ct = pd.to_datetime(df[chart_col], errors="coerce")
+            it = pd.to_datetime(df[intime_col], errors="coerce")
+            df["elapsed_icu_days"] = (ct - it).dt.total_seconds() / 86400.0
+        except Exception:
+            pass
+
+    # 입원 경과시간: charttime - admittime
+    if chart_col and admittime_col:
+        try:
+            ct = pd.to_datetime(df[chart_col], errors="coerce")
+            at = pd.to_datetime(df[admittime_col], errors="coerce")
+            df["elapsed_admit_days"] = (ct - at).dt.total_seconds() / 86400.0
+        except Exception:
+            pass
+
+    return df
+
 # 입력: user_query, sql, df
 # 출력: VisualizationResponse
 # 질문과 데이터프레임을 받아 시각화 추천 결과를 생성
@@ -28,6 +65,9 @@ def summarize_schema(df: pd.DataFrame) -> Dict[str, Any]:
 def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> VisualizationResponse:
     """질문과 데이터프레임을 받아 시각화 추천 결과를 생성."""
     log_event("analysis.start", {"user_query": user_query, "sql": sql})
+
+    # 0) 경과시간 파생 컬럼 추가 (가능한 경우에만)
+    df = _add_elapsed_columns(df)
 
     # 1) 스키마 요약
     df_schema = summarize_schema(df)

@@ -207,6 +207,7 @@ def extract_intent(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, Any]
             "agg": llm_result.agg,
             "recommended_chart": llm_result.recommended_chart,
             "extra_analyses": [],
+            "user_query": user_query,
         }
     except Exception as exc:
         # LLM 실패 시 규칙 기반 fallback
@@ -236,4 +237,5 @@ def extract_intent(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, Any]
             "time_var": time_var,
             "group_var": group_var,
             "extra_analyses": [],
+            "user_query": user_query,
         }

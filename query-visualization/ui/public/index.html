@@ -105,6 +105,60 @@
         { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-19", HEART_RATE: 99.0 }
       ];
 
+      const ruleCards = [
+        {
+          title: "0. 전제",
+          items: [
+            "중심 테이블: ADMISSIONS / ICUSTAYS",
+            "이벤트는 HADM_ID / STAY_ID에 종속",
+            "PATIENTS는 속성 테이블(기준 아님)"
+          ]
+        },
+        {
+          title: "1. Grain 규칙",
+          items: [
+            "trend(ICU/입실 후): STAY_ID만 허용",
+            "trend(입원 후): HADM_ID만 허용",
+            "distribution: SUBJECT_ID/HADM_ID (group 금지)",
+            "comparison: low-cardinality만",
+            "correlation: 식별자 제외"
+          ]
+        },
+        {
+          title: "2. 시간 축 규칙",
+          items: [
+            "ICU: charttime - intime (경과시간)",
+            "입원: charttime - admittime (경과시간)",
+            "‘후 N일’이면 경과시간 파생 필수",
+            "단순 추세만 calendar time 허용"
+          ]
+        },
+        {
+          title: "3. 그룹 규칙",
+          items: [
+            "금지: SUBJECT_ID/HADM_ID/STAY_ID/ICD/ITEMID/EMAR_ID/POE_ID",
+            "허용: GENDER, ADMISSION_TYPE, INSURANCE, RACE, CAREUNIT 등",
+            "low-cardinality 조건 충족 필수"
+          ]
+        },
+        {
+          title: "4. Trend 플랜",
+          items: [
+            "ICU: line(x=elapsed, group=STAY_ID), box(분포)",
+            "입원: line(x=elapsed, group=HADM_ID)",
+            "calendar time line 금지(ICU)"
+          ]
+        },
+        {
+          title: "5. 기타 플랜",
+          items: [
+            "distribution: hist, (group 있으면 box)",
+            "comparison: box (low-card group)",
+            "correlation: scatter (식별자 제외)"
+          ]
+        }
+      ];
+
       function PlotCard({ analysis, idx }) {
         useEffect(() => {
           const el = document.getElementById(`plot-${idx}`);
@@ -187,6 +241,20 @@
                 </pre>
                 {error && <div className="error">{error}</div>}
               </div>
+            </div>
+
+            <h2 style={{ marginTop: 28 }}>Rule Summary</h2>
+            <div className="grid">
+              {ruleCards.map((c, i) => (
+                <div className="card" key={i}>
+                  <h3>{c.title}</h3>
+                  <ul>
+                    {c.items.map((it, j) => (
+                      <li key={j} style={{ marginBottom: 6 }}>{it}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
 
             {resp && resp.analyses && (
