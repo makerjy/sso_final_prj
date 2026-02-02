@@ -20,8 +20,6 @@ export default function AskPage() {
   const [pageSize, setPageSize] = useState(10);
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
   const [budget, setBudget] = useState<any>(null);
-  const [budgetDraft, setBudgetDraft] = useState({ limit: '', alert: '' });
-  const [budgetSaving, setBudgetSaving] = useState(false);
 
   const previewData = (() => {
     const payload = result?.payload;
@@ -111,14 +109,6 @@ export default function AskPage() {
       .catch(() => setBudget(null));
   }, []);
 
-  useEffect(() => {
-    if (budget) {
-      setBudgetDraft({
-        limit: String(budget.budget_limit_krw ?? ''),
-        alert: String(budget.cost_alert_threshold_krw ?? ''),
-      });
-    }
-  }, [budget?.budget_limit_krw, budget?.cost_alert_threshold_krw]);
 
   const columns = previewData?.preview?.columns || [];
   const rows = previewData?.preview?.rows || [];
@@ -222,28 +212,6 @@ export default function AskPage() {
     }
   };
 
-  const saveBudget = async () => {
-    setBudgetSaving(true);
-    try {
-      const limit = budgetDraft.limit ? Number(budgetDraft.limit) : null;
-      const alert = budgetDraft.alert ? Number(budgetDraft.alert) : null;
-      const res = await fetch('/admin/budget/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ budget_limit_krw: limit, cost_alert_threshold_krw: alert }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Request failed: ${res.status}`);
-      }
-      const data = await res.json();
-      setBudget(data);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to save budget config');
-    } finally {
-      setBudgetSaving(false);
-    }
-  };
 
   return (
     <main className="page">
@@ -295,35 +263,6 @@ export default function AskPage() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-title">Budget Settings</div>
-            <div className="budget-grid">
-              <label>
-                Limit (KRW)
-                <input
-                  className="input"
-                  type="number"
-                  value={budgetDraft.limit}
-                  onChange={(e) => setBudgetDraft({ ...budgetDraft, limit: e.target.value })}
-                />
-              </label>
-              <label>
-                Alert (KRW)
-                <input
-                  className="input"
-                  type="number"
-                  value={budgetDraft.alert}
-                  onChange={(e) => setBudgetDraft({ ...budgetDraft, alert: e.target.value })}
-                />
-              </label>
-            </div>
-            <div className="actions">
-              <button className="ghost-btn" onClick={saveBudget} disabled={budgetSaving}>
-                {budgetSaving ? 'Saving…' : 'Save Budget'}
-              </button>
-              <span className="helper">Saved to server and applied immediately.</span>
-            </div>
-          </div>
 
           {error && (
             <div className="card error-card">

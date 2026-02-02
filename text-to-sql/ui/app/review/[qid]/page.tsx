@@ -3,20 +3,15 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 
-type HistoryItem = { ts: number; sql: string };
-
 export default function ReviewPage() {
   const params = useParams();
   const qid = Array.isArray(params?.qid) ? params.qid[0] : (params?.qid as string);
   const [sql, setSql] = useState('');
-  const [originalSql, setOriginalSql] = useState('');
-  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [payload, setPayload] = useState<any>(null);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [ack, setAck] = useState(false);
   const [budget, setBudget] = useState<any>(null);
-  const [diffMode, setDiffMode] = useState<'inline' | 'side'>('side');
 
   useEffect(() => {
     fetch(`/query/get?qid=${qid}`)
@@ -26,8 +21,6 @@ export default function ReviewPage() {
           setPayload(data.payload);
           const finalSql = data.payload?.final?.final_sql || data.payload?.draft?.final_sql || '';
           setSql(finalSql);
-          setOriginalSql(finalSql);
-          setHistory([{ ts: Date.now(), sql: finalSql }]);
         }
       })
       .catch(() => {});
@@ -83,49 +76,6 @@ export default function ReviewPage() {
     return hints;
   };
 
-  const recordChange = (nextSql: string) => {
-    setHistory((prev) => {
-      const last = prev[prev.length - 1];
-      if (!last || last.sql !== nextSql) {
-        return [...prev, { ts: Date.now(), sql: nextSql }];
-      }
-      return prev;
-    });
-  };
-
-  const diffLines = (fromSql: string, toSql: string) => {
-    const aLines = fromSql.split(/\r?\n/);
-    const bLines = toSql.split(/\r?\n/);
-    const max = Math.max(aLines.length, bLines.length);
-    const out: { type: 'same' | 'add' | 'del'; text: string }[] = [];
-    for (let i = 0; i < max; i += 1) {
-      const a = aLines[i];
-      const b = bLines[i];
-      if (a === b) {
-        if (a !== undefined) out.push({ type: 'same', text: a });
-        continue;
-      }
-      if (a !== undefined) out.push({ type: 'del', text: a });
-      if (b !== undefined) out.push({ type: 'add', text: b });
-    }
-    return out;
-  };
-
-  const sideBySide = () => {
-    const left = originalSql.split(/\r?\n/);
-    const right = sql.split(/\r?\n/);
-    const max = Math.max(left.length, right.length);
-    const rows = [];
-    for (let i = 0; i < max; i += 1) {
-      rows.push({
-        left: left[i] ?? '',
-        right: right[i] ?? '',
-        changed: (left[i] ?? '') !== (right[i] ?? ''),
-        line: i + 1,
-      });
-    }
-    return rows;
-  };
 
   const run = async () => {
     setError(null);
@@ -147,7 +97,6 @@ export default function ReviewPage() {
       }
       const data = await res.json();
       setResult(data);
-      recordChange(sql);
       fetch('/admin/budget/status')
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => setBudget(d))
@@ -231,7 +180,6 @@ export default function ReviewPage() {
               rows={8}
               value={sql}
               onChange={(e) => setSql(e.target.value)}
-              onBlur={(e) => recordChange(e.target.value)}
             />
             <div className="actions">
               <button className="primary-btn" disabled={!ack || !sql.trim()} onClick={run}>
@@ -239,77 +187,6 @@ export default function ReviewPage() {
               </button>
               <span className="helper">Execution requires acknowledgment.</span>
             </div>
-          </div>
-
-          <div className="card">
-            <div className="card-title">SQL Diff</div>
-            <div className="toolbar">
-              <label className="select-label">
-                View
-                <select value={diffMode} onChange={(e) => setDiffMode(e.target.value as 'inline' | 'side')}>
-                  <option value="side">Side-by-side</option>
-                  <option value="inline">Inline</option>
-                </select>
-              </label>
-            </div>
-            {diffMode === 'side' ? (
-              <div className="diff-grid">
-                <div className="diff-col">
-                  <div className="diff-col-title">Original</div>
-                  <pre className="diff">
-                    {sideBySide().map((row, idx) => (
-                      <span key={idx} className={`diff-line ${row.changed ? 'diff-del' : ''}`}>
-                        {String(row.line).padStart(2, '0')} {row.left || ' '}
-                        {'\n'}
-                      </span>
-                    ))}
-                  </pre>
-                </div>
-                <div className="diff-col">
-                  <div className="diff-col-title">Current</div>
-                  <pre className="diff">
-                    {sideBySide().map((row, idx) => (
-                      <span key={idx} className={`diff-line ${row.changed ? 'diff-add' : ''}`}>
-                        {String(row.line).padStart(2, '0')} {row.right || ' '}
-                        {'\n'}
-                      </span>
-                    ))}
-                  </pre>
-                </div>
-              </div>
-            ) : (
-              <pre className="diff">
-                {diffLines(originalSql, sql).map((line, idx) => (
-                  <span key={idx} className={`diff-line diff-${line.type}`}>
-                    {line.type === 'add' ? '+ ' : line.type === 'del' ? '- ' : '  '}
-                    {line.text}
-                    {'\n'}
-                  </span>
-                ))}
-              </pre>
-            )}
-          </div>
-
-          <div className="card">
-            <div className="card-title">Change History</div>
-            {history.length <= 1 ? (
-              <p className="helper">No edits yet.</p>
-            ) : (
-              <ul className="history-list">
-                {history
-                  .slice()
-                  .reverse()
-                  .map((item, idx) => (
-                    <li key={idx}>
-                      <span>{new Date(item.ts).toLocaleTimeString()}</span>
-                      <button className="ghost-btn" onClick={() => setSql(item.sql)}>
-                        Restore
-                      </button>
-                      <code>{item.sql.split(/\s+/).slice(0, 6).join(' ')}...</code>
-                    </li>
-                  ))}
-              </ul>
-            )}
           </div>
 
           {result && (
