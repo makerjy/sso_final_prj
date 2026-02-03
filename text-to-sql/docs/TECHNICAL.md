@@ -175,6 +175,7 @@ Generated/managed under `var/metadata`:
 - `join_graph.json`
 - `sql_examples.jsonl` (50+ recommended)
 - `join_templates.jsonl` (5+ recommended)
+- `sql_templates.jsonl` (optional)
 - `glossary_docs.jsonl`
 - `demo_questions.jsonl`
 
@@ -302,4 +303,3 @@ python scripts/eval_report_summary.py \
 - Add CI pipeline for eval scripts
 - Expand glossary and example coverage
 - Add advanced UI filters and chart summaries
-

@@ -93,6 +93,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     glossary_items = _load_jsonl(base / "glossary_docs.jsonl")
     example_items = _load_jsonl(base / "sql_examples.jsonl")
     template_items = _load_jsonl(base / "join_templates.jsonl")
+    template_items.extend(_load_jsonl(base / "sql_templates.jsonl"))
 
     docs: list[dict[str, Any]] = []
     docs.extend(_schema_docs(schema_catalog))

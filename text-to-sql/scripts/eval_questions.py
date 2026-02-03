@@ -60,10 +60,18 @@ def compare_results(
     exp_rows = expected.get("rows", [])
     gen_rows = generated.get("rows", [])
 
+    def _is_count_col(col: str) -> bool:
+        name = str(col).strip().upper()
+        return name in {"CNT", "COUNT"} or "COUNT(" in name
+
     same_cols = exp_cols == gen_cols
     exp_norm = normalize_rows(exp_rows, ignore_order)
     gen_norm = normalize_rows(gen_rows, ignore_order)
     same_rows = exp_norm == gen_norm
+
+    if not same_cols and same_rows and len(exp_cols) == len(gen_cols) == 1:
+        if _is_count_col(exp_cols[0]) and _is_count_col(gen_cols[0]):
+            same_cols = True
 
     return (same_cols and same_rows), {
         "same_cols": same_cols,

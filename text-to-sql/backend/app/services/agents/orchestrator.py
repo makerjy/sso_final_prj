@@ -8,6 +8,7 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.services.agents.sql_engineer import generate_sql
 from app.services.agents.sql_expert import review_sql
+from app.services.agents.sql_postprocess import postprocess_sql
 from app.services.cost_tracker import get_cost_tracker
 from app.services.policy.gate import precheck_sql
 from app.services.runtime.context_builder import build_context_payload
@@ -71,10 +72,15 @@ def run_oneshot(question: str, *, skip_policy: bool = False) -> dict[str, Any]:
             usage = final_payload.get("usage", {})
             get_cost_tracker().add_cost(0, {"usage": usage, "stage": "oneshot"})
 
-            if not skip_policy:
-                final_sql = final_payload.get("final_sql") or ""
-                if final_sql:
-                    precheck_sql(final_sql)
+            final_sql = final_payload.get("final_sql") or ""
+            if final_sql:
+                final_sql, rules = postprocess_sql(question, final_sql)
+                if rules:
+                    final_payload["final_sql"] = final_sql
+                    final_payload["postprocess"] = rules
+
+            if not skip_policy and final_sql:
+                precheck_sql(final_sql)
             return {
                 "mode": "advanced",
                 "question": question,

@@ -1,0 +1,3 @@
+{"name": "template_sample_rows_two_cols", "sql": "SELECT SUBJECT_ID, HADM_ID FROM ADMISSIONS WHERE SUBJECT_ID IS NOT NULL AND ROWNUM <= 100"}
+{"name": "template_count_rows_sampled", "sql": "SELECT COUNT(*) AS cnt FROM ADMISSIONS WHERE ROWNUM <= 1000"}
+{"name": "template_distinct_sample", "sql": "SELECT DISTINCT SUBJECT_ID FROM ADMISSIONS WHERE SUBJECT_ID IS NOT NULL AND ROWNUM <= 50"}

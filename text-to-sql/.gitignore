@@ -4,6 +4,9 @@ __pycache__/
 ui/node_modules/
 ui/.next/
 var/
+!var/
+!var/metadata/
+!var/metadata/sql_templates.jsonl
 oracle/
 .env
 .env copy.example
