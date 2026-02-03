@@ -51,6 +51,8 @@ class Settings:
     demo_mode: bool
     budget_limit_krw: int
     cost_alert_threshold_krw: int
+    llm_cost_per_1k_tokens_krw: int
+    sql_run_cost_krw: int
 
     engineer_model: str
     expert_model: str
@@ -96,6 +98,8 @@ def load_settings() -> Settings:
         demo_mode=_bool(os.getenv("DEMO_MODE"), True),
         budget_limit_krw=_int(os.getenv("BUDGET_LIMIT_KRW"), 10000),
         cost_alert_threshold_krw=_int(os.getenv("COST_ALERT_THRESHOLD_KRW"), 8000),
+        llm_cost_per_1k_tokens_krw=_int(os.getenv("LLM_COST_PER_1K_TOKENS_KRW"), 1),
+        sql_run_cost_krw=_int(os.getenv("SQL_RUN_COST_KRW"), 1),
         engineer_model=_str(os.getenv("ENGINEER_MODEL"), "gpt-4o"),
         expert_model=_str(os.getenv("EXPERT_MODEL"), "gpt-4o-mini"),
         intent_model=_str(os.getenv("INTENT_MODEL"), "local"),

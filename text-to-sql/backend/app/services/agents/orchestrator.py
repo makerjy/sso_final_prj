@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 import json
 import re
 from pathlib import Path
@@ -70,7 +71,11 @@ def run_oneshot(question: str, *, skip_policy: bool = False) -> dict[str, Any]:
                 final_payload = expert
 
             usage = final_payload.get("usage", {})
-            get_cost_tracker().add_cost(0, {"usage": usage, "stage": "oneshot"})
+            total_tokens = int(usage.get("total_tokens") or 0)
+            cost = 0
+            if settings.llm_cost_per_1k_tokens_krw > 0 and total_tokens > 0:
+                cost = int(math.ceil((total_tokens / 1000) * settings.llm_cost_per_1k_tokens_krw))
+            get_cost_tracker().add_cost(cost, {"usage": usage, "stage": "oneshot", "source": "llm"})
 
             final_sql = final_payload.get("final_sql") or ""
             if final_sql:

@@ -50,6 +50,7 @@ File: `backend/app/core/config.py`
 - Central config for models, budgets, Oracle, RAG
 - Important env keys:
   - `DEMO_MODE`, `BUDGET_LIMIT_KRW`, `COST_ALERT_THRESHOLD_KRW`
+  - `LLM_COST_PER_1K_TOKENS_KRW`, `SQL_RUN_COST_KRW`
   - `ENGINEER_MODEL`, `EXPERT_MODEL`, `INTENT_MODEL`
   - `CONTEXT_TOKEN_BUDGET`, `EXAMPLES_PER_QUERY`, `TEMPLATES_PER_QUERY`
   - `MAX_RETRY_ATTEMPTS`, `EXPERT_SCORE_THRESHOLD`

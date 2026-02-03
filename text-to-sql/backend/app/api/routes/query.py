@@ -8,6 +8,7 @@ import json
 
 from app.services.agents.orchestrator import run_oneshot
 from app.services.budget_gate import ensure_budget_ok
+from app.services.cost_tracker import get_cost_tracker
 from app.services.oracle.executor import execute_sql
 from app.services.policy.gate import precheck_sql
 from app.core.config import get_settings
@@ -61,6 +62,8 @@ def run_query(req: RunRequest):
 
     precheck_sql(sql)
     result = execute_sql(sql)
+    if settings.sql_run_cost_krw > 0:
+        get_cost_tracker().add_cost(settings.sql_run_cost_krw, {"stage": "run"})
     return {"sql": sql, "result": result}
 
 
