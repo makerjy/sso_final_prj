@@ -376,11 +376,16 @@ def derive_time_var(
 # intent_info 기반으로 분석 플랜 여러 개 생성
 
 
-def plan_analyses(intent_info: Dict[str, Any], df: pd.DataFrame) -> List[Dict[str, Any]]:
+def plan_analyses(
+    intent_info: Dict[str, Any],
+    df: pd.DataFrame,
+    retrieved_context: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """intent_info를 기반으로 분석 플랜 여러 개를 반환."""
     intent = intent_info.get("analysis_intent")
     primary = intent_info.get("primary_outcome")
     user_query = intent_info.get("user_query")
+    _ = retrieved_context
     context_flags = intent_info.get("context_flags") or _infer_context_flags(
         user_query, list(df.columns))
 

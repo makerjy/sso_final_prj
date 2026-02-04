@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from src.agent import chart_rule_engine, code_generator, intent_extractor
+from src.agent import chart_rule_engine, code_generator, intent_extractor, retrieval
 from src.db.schema_introspect import summarize_dataframe_schema
 from src.models.chart_spec import AnalysisCard, ChartSpec, VisualizationResponse
 from src.utils.logging import log_event
@@ -73,12 +73,17 @@ def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> Visual
     df_schema = summarize_schema(df)
     log_event("analysis.schema", {"columns": df_schema.get("columns", [])})
 
-    # 2) 의도 추출
-    intent_info = intent_extractor.extract_intent(user_query, df_schema)
+    # 2) RAG 컨텍스트 검색
+    rag = retrieval.retrieve_context(user_query, df_schema)
+    rag_context = rag.get("context_text", "")
+    log_event("analysis.rag", {"context_size": len(rag_context)})
+
+    # 3) 의도 추출
+    intent_info = intent_extractor.extract_intent(user_query, df_schema, rag_context)
     log_event("analysis.intent", intent_info)
 
-    # 3) 분석 플랜 생성 (여러 개)
-    plans = chart_rule_engine.plan_analyses(intent_info, df)
+    # 4) 분석 플랜 생성 (여러 개)
+    plans = chart_rule_engine.plan_analyses(intent_info, df, rag_context)
     log_event("analysis.plans", {"count": len(plans)})
 
     analyses: List[AnalysisCard] = []

@@ -136,7 +136,11 @@ def _normalize_intent(intent: str) -> str:
 # 출력: IntentResult 객체
 
 
-def _llm_extract_intent(user_query: str, df_schema: Dict[str, Any]) -> IntentResult:
+def _llm_extract_intent(
+    user_query: str,
+    df_schema: Dict[str, Any],
+    retrieved_context: str | None = None,
+) -> IntentResult:
     import os
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -150,10 +154,15 @@ def _llm_extract_intent(user_query: str, df_schema: Dict[str, Any]) -> IntentRes
         "결정해 JSON으로만 답한다."
     )
 
+    context_block = ""
+    if retrieved_context:
+        context_block = f"\n\n참고 컨텍스트:\n{retrieved_context}\n"
+
     user_prompt = (
         "사용자 질문과 데이터 스키마는 아래와 같다.\n"
         f"- 질문: {user_query}\n"
-        f"- 스키마: {df_schema}\n\n"
+        f"- 스키마: {df_schema}\n"
+        f"{context_block}\n"
         "다음 필드를 가진 JSON으로만 답해라:\n"
         "{analysis_intent, x, y, group_by, agg, recommended_chart}\n"
         "analysis_intent 후보: trend, distribution, proportion, comparison, correlation, summary\n"
@@ -175,7 +184,11 @@ def _llm_extract_intent(user_query: str, df_schema: Dict[str, Any]) -> IntentRes
 # 출력: Dict[str, Any]
 
 
-def extract_intent(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, Any]:
+def extract_intent(
+    user_query: str,
+    df_schema: Dict[str, Any],
+    retrieved_context: str | None = None,
+) -> Dict[str, Any]:
     """질문 의도와 핵심 변수를 추출한다."""
     columns = df_schema.get("columns", [])
     dtypes = df_schema.get("dtypes", {})
@@ -186,7 +199,7 @@ def extract_intent(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, Any]
     categorical_columns = column_roles.get("categorical", [])
 
     try:
-        llm_result = _llm_extract_intent(user_query, df_schema)
+        llm_result = _llm_extract_intent(user_query, df_schema, retrieved_context)
         analysis_intent = _normalize_intent(llm_result.analysis_intent)
         primary_outcome = (
             llm_result.y

@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Iterable, List
+from uuid import uuid4
+
+from openai import OpenAI
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+sys.path.append(str(BASE_DIR))
+
+from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE
+from src.db.vector_store import ensure_collection, get_qdrant_client, upsert_embeddings
+
+
+def _load_jsonl(path: Path) -> List[dict]:
+    rows: List[dict] = []
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
+def _iter_seed_docs(data_dir: Path) -> Iterable[dict]:
+    for path in sorted(data_dir.glob("*.jsonl")):
+        yield from _load_jsonl(path)
+
+
+def _embed_texts(texts: List[str]) -> List[List[float]]:
+    client = OpenAI()
+    response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    return [item.embedding for item in response.data]
+
+
+def _batch(iterable: List[str], size: int) -> Iterable[List[str]]:
+    for i in range(0, len(iterable), size):
+        yield iterable[i : i + size]
+
+
+def build_index() -> None:
+    data_dir = BASE_DIR / "data"
+    docs = list(_iter_seed_docs(data_dir))
+
+    if not docs:
+        raise RuntimeError("RAG 시드 데이터가 없습니다. data/*.jsonl 을 확인하세요.")
+
+    texts = [d["text"] for d in docs]
+    metadatas = [d.get("metadata", {}) | {"text": d["text"]} for d in docs]
+    ids = [d.get("id") or str(uuid4()) for d in docs]
+
+    client = get_qdrant_client()
+
+    # 첫 배치로 벡터 크기 확보 후 컬렉션 생성
+    first_embeddings = _embed_texts(texts[:1])
+    ensure_collection(client, vector_size=len(first_embeddings[0]))
+    upsert_embeddings(client, first_embeddings, metadatas[:1], ids[:1])
+
+    # 나머지 배치 업서트
+    start_idx = 1
+    for batch_texts in _batch(texts[start_idx:], RAG_BATCH_SIZE):
+        batch_embeddings = _embed_texts(batch_texts)
+        batch_size = len(batch_texts)
+        batch_metadatas = metadatas[start_idx : start_idx + batch_size]
+        batch_ids = ids[start_idx : start_idx + batch_size]
+        upsert_embeddings(client, batch_embeddings, batch_metadatas, batch_ids)
+        start_idx += batch_size
+
+
+if __name__ == "__main__":
+    build_index()
