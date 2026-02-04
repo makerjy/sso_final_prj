@@ -1,52 +1,52 @@
-# Text-to-SQL Demo (RAG + Oracle)
+# Text-to-SQL 데모 (RAG + Oracle)
 
-This is a demo stack for converting natural language questions into safe Oracle SQL with RAG context, policy gating, and budget tracking. It includes a simple UI with Demo and Advanced flows.
+자연어 질문을 안전한 Oracle SQL로 변환하는 데모 스택입니다. RAG 컨텍스트, 정책 게이팅, 예산 추적을 포함하며, Demo/Advanced 흐름을 제공하는 간단한 UI가 있습니다.
 
-## Project Layout
+## 프로젝트 구조
 
-- `backend/` FastAPI API (RAG, Oracle, policy, budget)
+- `backend/` FastAPI API (RAG, Oracle, 정책, 예산)
 - `ui/` Next.js UI
-- `scripts/` validation + demo cache generation
-- `deploy/` Docker compose + Dockerfiles
-- `var/` runtime data (metadata, chroma, cache, logs) (ignored by git)
+- `scripts/` 검증 + 데모 캐시 생성
+- `deploy/` Docker Compose + Dockerfiles
+- `var/` 런타임 데이터 (metadata, chroma, cache, logs) (git에서 제외)
 
-## Quickstart (Docker Compose)
+## 빠른 시작 (Docker Compose)
 
-1) Create `.env` (copy from `.env.example`) and set Oracle credentials:
+1) `.env` 생성 (`.env.example` 복사) 후 Oracle 자격증명 설정:
 
 ```
 ORACLE_DSN=host:1521/service_name
 ORACLE_USER=...
 ORACLE_PASSWORD=...
 ORACLE_DEFAULT_SCHEMA=SSO
-OPENAI_API_KEY=...  # only needed for Advanced mode
+OPENAI_API_KEY=...  # Advanced 모드에서만 필요
 ```
 
-2) If your Oracle DB requires Thick mode (NNE/TCPS), download **Linux x64 Instant Client** and unzip to:
+2) Oracle DB가 Thick 모드(NNE/TCPS)를 요구한다면 **Linux x64 Instant Client**를 내려받아 아래 경로에 압축 해제:
 
 ```
 oracle/instantclient_23_26/
 ```
 
-Ensure `libclntsh.so` exists (create symlink if needed):
+`libclntsh.so`가 존재하는지 확인하고(필요 시 심볼릭 링크 생성):
 
 ```
 ln -s libclntsh.so.23.1 libclntsh.so
 ```
 
-3) Run:
+3) 실행:
 
 ```
 docker compose -f deploy/compose/docker-compose.yml up -d --build
 ```
 
-Services:
+서비스:
 - API: `http://localhost:8001`
 - UI: `http://localhost:3000`
 
-## Initial Data Setup
+## 초기 데이터 설정
 
-1) Sync Oracle metadata (owner/schema):
+1) Oracle 메타데이터(소유자/스키마) 동기화:
 
 ```
 curl -X POST http://localhost:8001/admin/metadata/sync \
@@ -54,16 +54,16 @@ curl -X POST http://localhost:8001/admin/metadata/sync \
   -d '{"owner":"SSO"}'
 ```
 
-2) RAG reindex:
+2) RAG 재색인:
 
 ```
 curl -X POST http://localhost:8001/admin/rag/reindex
 curl http://localhost:8001/admin/rag/status
 ```
 
-## Demo Cache (Optional but Recommended)
+## 데모 캐시 (선택이지만 권장)
 
-Local run (requires Python + deps):
+로컬 실행 (Python + 의존성 필요):
 
 ```
 python -m venv .venv
@@ -74,30 +74,29 @@ export LD_LIBRARY_PATH=$PWD/oracle/instantclient_23_26
 python scripts/pregen_demo_cache.py
 ```
 
-This produces `var/cache/demo_cache.json` used by Demo mode.
+이 과정에서 `var/cache/demo_cache.json`이 생성되며 Demo 모드에서 사용됩니다.
 
-## UI Flow
+## UI 흐름
 
-- `/ask` Demo buttons use cached answers.
-- Advanced questions link to `/review/{qid}` for user acknowledgment.
-- Review page shows SQL diff and change history, then executes with `user_ack=true`.
+- `/ask` Demo 버튼은 캐시된 답변을 사용합니다.
+- Advanced 질문은 사용자 확인을 위해 `/review/{qid}`로 이동합니다.
+- Review 페이지는 SQL diff 및 변경 이력을 보여주고, `user_ack=true`로 실행합니다.
 
-## Budget Settings
+## 예산 설정
 
-Budget is tracked in `var/logs/cost_state.json`.
-You can update thresholds in the UI (Ask page) which are persisted to:
+예산은 `var/logs/cost_state.json`에서 추적됩니다.
+Ask 페이지 UI에서 임계값을 변경하면 아래 파일에 저장됩니다:
 
 ```
 var/logs/budget_config.json
 ```
 
-API endpoints:
+API 엔드포인트:
 - `GET /admin/budget/status`
 - `POST /admin/budget/config`
 
-## Troubleshooting
+## 트러블슈팅
 
-- `DPY-4011` when connecting: enable Thick mode with Instant Client.
-- `DPI-1047 libaio.so.1 missing`: ensure `libaio` is installed on host, or run in Docker.
-- `ORA-00942 table or view does not exist`: verify schema owner and `ORACLE_DEFAULT_SCHEMA`.
-
+- `DPY-4011` 연결 오류: Instant Client로 Thick 모드 활성화
+- `DPI-1047 libaio.so.1 missing`: 호스트에 `libaio` 설치 또는 Docker 사용
+- `ORA-00942 table or view does not exist`: 스키마/소유자 및 `ORACLE_DEFAULT_SCHEMA` 확인
