@@ -9,7 +9,11 @@ COPY ui/package.json /app/package.json
 RUN npm install
 
 COPY ui /app
-RUN npm run build
+RUN npm run build \
+  && mkdir -p /app/.next/standalone/.next \
+  && cp -r /app/.next/static /app/.next/standalone/.next/static
 
 EXPOSE 3000
-CMD ["npm", "start"]
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+CMD ["node", "/app/.next/standalone/server.js"]

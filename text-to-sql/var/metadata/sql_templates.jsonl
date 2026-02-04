@@ -1,3 +1,9 @@
 {"name": "template_sample_rows_two_cols", "sql": "SELECT SUBJECT_ID, HADM_ID FROM ADMISSIONS WHERE SUBJECT_ID IS NOT NULL AND ROWNUM <= 100"}
 {"name": "template_count_rows_sampled", "sql": "SELECT COUNT(*) AS cnt FROM ADMISSIONS WHERE ROWNUM <= 1000"}
 {"name": "template_distinct_sample", "sql": "SELECT DISTINCT SUBJECT_ID FROM ADMISSIONS WHERE SUBJECT_ID IS NOT NULL AND ROWNUM <= 50"}
+{"name": "template_count_by_gender", "sql": "SELECT GENDER, COUNT(*) AS cnt FROM PATIENTS WHERE GENDER IS NOT NULL GROUP BY GENDER ORDER BY cnt DESC"}
+{"name": "template_count_by_admission_type", "sql": "SELECT ADMISSION_TYPE, COUNT(*) AS cnt FROM ADMISSIONS WHERE ADMISSION_TYPE IS NOT NULL GROUP BY ADMISSION_TYPE ORDER BY cnt DESC"}
+{"name": "template_recent_admissions_30d", "sql": "SELECT * FROM ADMISSIONS WHERE ADMITTIME >= SYSDATE - INTERVAL '30' DAY AND ROWNUM <= 100"}
+{"name": "template_avg_icu_los", "sql": "SELECT AVG(LOS) AS avg_icu_los FROM ICUSTAYS WHERE LOS IS NOT NULL"}
+{"name": "template_top_n_ordered", "sql": "SELECT * FROM ( SELECT SUBJECT_ID, COUNT(*) AS cnt FROM ADMISSIONS WHERE SUBJECT_ID IS NOT NULL GROUP BY SUBJECT_ID ORDER BY cnt DESC ) WHERE ROWNUM <= 10"}
+{"name": "template_recent_admissions_7d", "sql": "SELECT * FROM ADMISSIONS WHERE ADMITTIME >= SYSDATE - INTERVAL '7' DAY AND ROWNUM <= 100"}

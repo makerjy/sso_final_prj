@@ -86,6 +86,14 @@ _TABLE_ALIASES = {
     "procedure_table": "PROCEDURES_ICD",
     "medical_procedures": "PROCEDURES_ICD",
     "prescription": "PRESCRIPTIONS",
+    "med_orders": "PRESCRIPTIONS",
+    "med_order": "PRESCRIPTIONS",
+    "medication_orders": "PRESCRIPTIONS",
+    "medication_order": "PRESCRIPTIONS",
+    "drug_orders": "PRESCRIPTIONS",
+    "drug_order": "PRESCRIPTIONS",
+    "pharmacy_orders": "PRESCRIPTIONS",
+    "pharmacy_order": "PRESCRIPTIONS",
     "medication_data": "PRESCRIPTIONS",
     "patient_admissions": "ADMISSIONS",
     "admission": "ADMISSIONS",
@@ -108,14 +116,49 @@ _TABLE_ALIASES = {
     "drugs": "PRESCRIPTIONS",
     "service_transitions": "SERVICES",
     "transitions": "SERVICES",
+    "service": "SERVICES",
+    "services_table": "SERVICES",
+    "transfer": "TRANSFERS",
+    "transfers_table": "TRANSFERS",
     "emar_details": "EMAR_DETAIL",
+    "emar_detail": "EMAR_DETAIL",
+    "emar_detail_table": "EMAR_DETAIL",
     "emar_events": "EMAR",
+    "emar": "EMAR",
+    "emar_table": "EMAR",
+    "emar_records": "EMAR",
+    "emar_record": "EMAR",
     "medication_records": "EMAR",
+    "med_admin": "EMAR",
+    "med_admins": "EMAR",
+    "med_admin_event": "EMAR",
+    "med_admin_events": "EMAR",
+    "med_admin_records": "EMAR",
+    "med_administration": "EMAR",
+    "medication_administration": "EMAR",
+    "medication_administration_records": "EMAR",
+    "med_admin_detail": "EMAR_DETAIL",
+    "med_admin_details": "EMAR_DETAIL",
+    "medication_administration_detail": "EMAR_DETAIL",
+    "medication_administration_details": "EMAR_DETAIL",
     "procedures_table": "PROCEDURES_ICD",
     "events": "CHARTEVENTS",
+    "vitals": "CHARTEVENTS",
+    "vital_signs": "CHARTEVENTS",
+    "vital_sign": "CHARTEVENTS",
+    "vitalsigns": "CHARTEVENTS",
     "input_events": "INPUTEVENTS",
+    "input_event": "INPUTEVENTS",
+    "inputevents": "INPUTEVENTS",
+    "intake_events": "INPUTEVENTS",
+    "infusion_events": "INPUTEVENTS",
+    "infusions": "INPUTEVENTS",
     "inputs": "INPUTEVENTS",
     "output_events": "OUTPUTEVENTS",
+    "output_event": "OUTPUTEVENTS",
+    "outputevents": "OUTPUTEVENTS",
+    "urine_output": "OUTPUTEVENTS",
+    "urine_outputs": "OUTPUTEVENTS",
     "production_data": "OUTPUTEVENTS",
 }
 
@@ -141,6 +184,7 @@ _COLUMN_ALIASES = {
     "ed_departure_time": "EDOUTTIME",
     "ed_departure_datetime": "EDOUTTIME",
     "admit_time": "ADMITTIME",
+    "admit_date_time": "ADMITTIME",
     "death_time": "DEATHTIME",
     "icu_stay_id": "STAY_ID",
     "icustay_id": "STAY_ID",
@@ -150,6 +194,9 @@ _COLUMN_ALIASES = {
     "formulation": "FORM_RX",
     "medication_name": "MEDICATION",
     "medication_id": "MEDICATION",
+    "med_admin_time": "CHARTTIME",
+    "administration_time": "CHARTTIME",
+    "admin_time": "CHARTTIME",
     "event_text": "EVENT_TXT",
     "antibiotic_name": "AB_NAME",
     "organism": "ORG_NAME",
@@ -182,6 +229,8 @@ _COLUMN_ALIASES = {
     "admission_type": "ADMISSION_TYPE",
     "admission_days": "ADMISSION_LENGTH",
     "icu_los": "LOS",
+    "icu_length_of_stay": "LOS",
+    "icu_length_of_stay_days": "LOS",
     "icu_admission_date": "INTIME",
     "icu_admission_time": "INTIME",
     "icu_discharge_date": "OUTTIME",
@@ -235,6 +284,9 @@ _COLUMN_ALIASES = {
     "stay_id": "STAY_ID",
     "hadm_id": "HADM_ID",
     "subject_id": "SUBJECT_ID",
+    "encounter_id": "HADM_ID",
+    "visit_id": "HADM_ID",
+    "hospitalization_id": "HADM_ID",
     "lab_specimen_id": "SPECIMEN_ID",
     "value_num": "VALUENUM",
     "numeric_value": "VALUENUM",
@@ -254,6 +306,11 @@ _COLUMN_ALIASES = {
     "lab_comment": "COMMENTS",
     "lab_comments": "COMMENTS",
     "doses_per_day": "DOSES_PER_24_HRS",
+    "dose_given": "DOSE_GIVEN",
+    "dose_given_unit": "DOSE_GIVEN_UNIT",
+    "dose_due": "DOSE_DUE",
+    "dose_due_unit": "DOSE_DUE_UNIT",
+    "administration_type": "ADMINISTRATION_TYPE",
     "output_value": "VALUE",
     "micro_specimen_id": "MICRO_SPECIMEN_ID",
     "micro_event_id": "MICROEVENT_ID",
@@ -899,7 +956,8 @@ def _ensure_inputevents_table(question: str, sql: str) -> tuple[str, list[str]]:
     if re.search(r"\bINPUTEVENTS\b", text, re.IGNORECASE):
         return text, rules
     q = question.lower()
-    if "input event" not in q and "input events" not in q and "input amount" not in q:
+    triggers = ("input event", "input events", "input amount", "intake", "fluid intake", "infusion", "infusions")
+    if not any(t in q for t in triggers):
         return text, rules
     if "ingredient" in q:
         return text, rules
@@ -922,7 +980,8 @@ def _ensure_outputevents_table(question: str, sql: str) -> tuple[str, list[str]]
     if re.search(r"\bOUTPUTEVENTS\b", text, re.IGNORECASE):
         return text, rules
     q = question.lower()
-    if "output event" not in q and "output events" not in q and "output value" not in q:
+    triggers = ("output event", "output events", "output value", "output volume", "urine output", "drain output")
+    if not any(t in q for t in triggers):
         return text, rules
 
     m = re.search(r"\bfrom\s+([A-Za-z0-9_]+)(?:\s+([A-Za-z0-9_]+))?", text, re.IGNORECASE)
@@ -941,10 +1000,12 @@ def _ensure_emar_table(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
     q = question.lower()
-    if "emar" not in q:
+    triggers = ("emar", "med admin", "medication administration", "administration record", "dose given", "dose due")
+    if not any(t in q for t in triggers):
         return text, rules
 
-    target = "EMAR_DETAIL" if ("detail" in q or "administration type" in q) else "EMAR"
+    detail_triggers = ("detail", "administration type", "dose given", "dose due", "barcode")
+    target = "EMAR_DETAIL" if any(t in q for t in detail_triggers) else "EMAR"
     if re.search(rf"\b{target}\b", text, re.IGNORECASE):
         return text, rules
 
