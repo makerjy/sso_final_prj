@@ -1,0 +1,175 @@
+{"term": "LOS", "definition": "length of stay"}
+{"term": "ICU", "definition": "intensive care unit"}
+{"term": "HADM_ID", "definition": "hospital admission identifier"}
+{"term": "SUBJECT_ID", "definition": "patient identifier"}
+{"term": "ADMITTIME", "definition": "admission timestamp"}
+{"term": "DISCHTIME", "definition": "discharge timestamp"}
+{"term": "DIAGNOSIS", "definition": "primary diagnosis description"}
+{"term": "PROCEDURE", "definition": "procedure or intervention"}
+{"term": "READMISSION", "definition": "a subsequent admission after discharge"}
+{"term": "MORTALITY", "definition": "death outcome"}
+{"term": "VENT", "definition": "mechanical ventilation"}
+{"term": "SEPSIS", "definition": "systemic infection diagnosis"}
+{"term": "LAB", "definition": "laboratory measurement"}
+{"term": "VITALS", "definition": "vital signs"}
+{"term": "admission_id", "definition": "same as HADM_ID (hospital admission identifier) in ADMISSIONS"}
+{"term": "hospital_admission_id", "definition": "same as HADM_ID (hospital admission identifier) in ADMISSIONS"}
+{"term": "patient_id", "definition": "same as SUBJECT_ID (patient identifier) in PATIENTS"}
+{"term": "stay_id", "definition": "ICUSTAYS stay identifier (ICUSTAYS.STAY_ID)"}
+{"term": "icu stay", "definition": "ICUSTAYS table (ICU admission and length of stay)"}
+{"term": "icu length of stay", "definition": "LOS in ICUSTAYS"}
+{"term": "admit time", "definition": "ADMISSIONS.ADMITTIME (admission timestamp)"}
+{"term": "admission time", "definition": "ADMISSIONS.ADMITTIME (admission timestamp)"}
+{"term": "discharge time", "definition": "ADMISSIONS.DISCHTIME (discharge timestamp)"}
+{"term": "discharge date", "definition": "ADMISSIONS.DISCHTIME (discharge timestamp)"}
+{"term": "death time", "definition": "ADMISSIONS.DEATHTIME or PATIENTS.DOD (death time/date)"}
+{"term": "ed registration time", "definition": "ADMISSIONS.EDREGTIME (ED arrival/registration time)"}
+{"term": "ed out time", "definition": "ADMISSIONS.EDOUTTIME (ED departure time)"}
+{"term": "admission type", "definition": "ADMISSIONS.ADMISSION_TYPE"}
+{"term": "admission location", "definition": "ADMISSIONS.ADMISSION_LOCATION"}
+{"term": "discharge location", "definition": "ADMISSIONS.DISCHARGE_LOCATION"}
+{"term": "insurance", "definition": "ADMISSIONS.INSURANCE"}
+{"term": "marital status", "definition": "ADMISSIONS.MARITAL_STATUS"}
+{"term": "ethnicity", "definition": "ADMISSIONS.RACE"}
+{"term": "race", "definition": "ADMISSIONS.RACE"}
+{"term": "primary language", "definition": "ADMISSIONS.LANGUAGE"}
+{"term": "gender", "definition": "PATIENTS.GENDER (same as sex)"}
+{"term": "sex", "definition": "PATIENTS.GENDER (same as gender)"}
+{"term": "age", "definition": "PATIENTS.ANCHOR_AGE (approximate age)"}
+{"term": "anchor year", "definition": "PATIENTS.ANCHOR_YEAR"}
+{"term": "anchor year group", "definition": "PATIENTS.ANCHOR_YEAR_GROUP (year bin/range)"}
+{"term": "chart time", "definition": "CHARTEVENTS.CHARTTIME or LABEVENTS.CHARTTIME"}
+{"term": "store time", "definition": "CHARTEVENTS.STORETIME or LABEVENTS.STORETIME"}
+{"term": "lab events", "definition": "LABEVENTS table (lab results)"}
+{"term": "lab item", "definition": "D_LABITEMS table; ITEMID in LABEVENTS"}
+{"term": "lab item id", "definition": "LABEVENTS.ITEMID (links to D_LABITEMS)"}
+{"term": "lab value", "definition": "LABEVENTS.VALUE (text) or LABEVENTS.VALUENUM (numeric)"}
+{"term": "lab unit", "definition": "LABEVENTS.VALUEUOM"}
+{"term": "lab abnormal flag", "definition": "LABEVENTS.FLAG"}
+{"term": "lab reference range", "definition": "LABEVENTS.REF_RANGE_LOWER/REF_RANGE_UPPER"}
+{"term": "microbiology", "definition": "MICROBIOLOGYEVENTS table"}
+{"term": "micro specimen", "definition": "MICROBIOLOGYEVENTS.MICRO_SPECIMEN_ID"}
+{"term": "specimen type", "definition": "MICROBIOLOGYEVENTS.SPEC_TYPE_DESC"}
+{"term": "micro test", "definition": "MICROBIOLOGYEVENTS.TEST_NAME or TEST_ITEMID"}
+{"term": "organism", "definition": "MICROBIOLOGYEVENTS.ORG_NAME or ORG_ITEMID"}
+{"term": "antibiotic", "definition": "MICROBIOLOGYEVENTS.AB_NAME or AB_ITEMID"}
+{"term": "diagnosis code", "definition": "DIAGNOSES_ICD.ICD_CODE (ICD diagnosis code)"}
+{"term": "procedure code", "definition": "PROCEDURES_ICD.ICD_CODE (ICD procedure code)"}
+{"term": "icd description", "definition": "D_ICD_DIAGNOSES.LONG_TITLE or D_ICD_PROCEDURES.LONG_TITLE"}
+{"term": "medication", "definition": "PRESCRIPTIONS table (drug orders) or EMAR/EMAR_DETAIL (med admin)"}
+{"term": "prescription", "definition": "PRESCRIPTIONS table (drug orders)"}
+{"term": "transfer", "definition": "TRANSFERS table (care unit movement)"}
+{"term": "service", "definition": "SERVICES table (CURR_SERVICE/PREV_SERVICE)"}
+{"term": "caregiver", "definition": "CAREGIVER table (caregiver identifiers)"}
+{"term": "caregiver id", "definition": "CAREGIVER_ID (links to CAREGIVER table)"}
+{"term": "chart events", "definition": "CHARTEVENTS table (time-stamped charted data)"}
+{"term": "datetime events", "definition": "DATETIMEEVENTS table (time-stamped events similar to CHARTEVENTS)"}
+{"term": "chart item", "definition": "D_ITEMS table (ITEMID/labels for charted events)"}
+{"term": "chart item id", "definition": "ITEMID in CHARTEVENTS or DATETIMEEVENTS (links to D_ITEMS)"}
+{"term": "item id", "definition": "ITEMID (links to D_ITEMS or D_LABITEMS depending on table)"}
+{"term": "item label", "definition": "D_ITEMS.LABEL or D_LABITEMS.LABEL"}
+{"term": "item abbreviation", "definition": "D_ITEMS.ABBREVIATION"}
+{"term": "item category", "definition": "D_ITEMS.CATEGORY or D_LABITEMS.CATEGORY"}
+{"term": "item unit", "definition": "D_ITEMS.UNITNAME"}
+{"term": "parameter type", "definition": "D_ITEMS.PARAM_TYPE"}
+{"term": "normal range low", "definition": "D_ITEMS.LOWNORMALVALUE"}
+{"term": "normal range high", "definition": "D_ITEMS.HIGHNORMALVALUE"}
+{"term": "linksto", "definition": "D_ITEMS.LINKSTO (source table for ITEMID)"}
+{"term": "value num", "definition": "VALUENUM (numeric value in CHARTEVENTS/LABEVENTS)"}
+{"term": "value unit", "definition": "VALUEUOM (unit of measure for VALUE/VALUENUM)"}
+{"term": "input events", "definition": "INPUTEVENTS table (inputs/infusions)"}
+{"term": "input amount", "definition": "INPUTEVENTS.AMOUNT"}
+{"term": "input amount unit", "definition": "INPUTEVENTS.AMOUNTUOM"}
+{"term": "input rate", "definition": "INPUTEVENTS.RATE"}
+{"term": "input rate unit", "definition": "INPUTEVENTS.RATEUOM"}
+{"term": "output events", "definition": "OUTPUTEVENTS table (outputs such as urine)"}
+{"term": "output value", "definition": "OUTPUTEVENTS.VALUE"}
+{"term": "output unit", "definition": "OUTPUTEVENTS.VALUEUOM"}
+{"term": "ingredient events", "definition": "INGREDIENTEVENTS table (infusion ingredient details)"}
+{"term": "procedure events", "definition": "PROCEDUREEVENTS table (procedural events)"}
+{"term": "order id", "definition": "ORDERID (input/ingredient/procedure events order identifier)"}
+{"term": "link order id", "definition": "LINKORDERID (links related orders)"}
+{"term": "start time", "definition": "STARTTIME (event start timestamp)"}
+{"term": "end time", "definition": "ENDTIME (event end timestamp)"}
+{"term": "stop time", "definition": "STOPTIME (prescription stop timestamp)"}
+{"term": "order time", "definition": "POE.ORDERTIME (order entry time)"}
+{"term": "order type", "definition": "POE.ORDER_TYPE"}
+{"term": "order subtype", "definition": "POE.ORDER_SUBTYPE"}
+{"term": "order status", "definition": "POE.ORDER_STATUS"}
+{"term": "transaction type", "definition": "POE.TRANSACTION_TYPE"}
+{"term": "poe id", "definition": "POE_ID (physician order entry id)"}
+{"term": "poe seq", "definition": "POE_SEQ (order sequence)"}
+{"term": "order provider id", "definition": "ORDER_PROVIDER_ID (ordering provider identifier)"}
+{"term": "admit provider id", "definition": "ADMISSIONS.ADMIT_PROVIDER_ID"}
+{"term": "pharmacy id", "definition": "PHARMACY_ID (links to pharmacy order in EMAR/PRESCRIPTIONS)"}
+{"term": "med administration", "definition": "EMAR / EMAR_DETAIL tables (medication administration)"}
+{"term": "emar id", "definition": "EMAR.EMAR_ID"}
+{"term": "emar seq", "definition": "EMAR.EMAR_SEQ"}
+{"term": "schedule time", "definition": "EMAR.SCHEDULETIME"}
+{"term": "dose due", "definition": "EMAR_DETAIL.DOSE_DUE"}
+{"term": "dose due unit", "definition": "EMAR_DETAIL.DOSE_DUE_UNIT"}
+{"term": "dose given", "definition": "EMAR_DETAIL.DOSE_GIVEN"}
+{"term": "dose given unit", "definition": "EMAR_DETAIL.DOSE_GIVEN_UNIT"}
+{"term": "administration type", "definition": "EMAR_DETAIL.ADMINISTRATION_TYPE"}
+{"term": "infusion rate", "definition": "EMAR_DETAIL.INFUSION_RATE"}
+{"term": "infusion rate unit", "definition": "EMAR_DETAIL.INFUSION_RATE_UNIT"}
+{"term": "product code", "definition": "EMAR_DETAIL.PRODUCT_CODE"}
+{"term": "product description", "definition": "EMAR_DETAIL.PRODUCT_DESCRIPTION"}
+{"term": "route", "definition": "EMAR_DETAIL.ROUTE or PRESCRIPTIONS.ROUTE"}
+{"term": "prescription start", "definition": "PRESCRIPTIONS.STARTTIME"}
+{"term": "prescription stop", "definition": "PRESCRIPTIONS.STOPTIME"}
+{"term": "drug type", "definition": "PRESCRIPTIONS.DRUG_TYPE"}
+{"term": "formulary code", "definition": "PRESCRIPTIONS.FORMULARY_DRUG_CD"}
+{"term": "gsn", "definition": "PRESCRIPTIONS.GSN"}
+{"term": "ndc", "definition": "PRESCRIPTIONS.NDC"}
+{"term": "dose value", "definition": "PRESCRIPTIONS.DOSE_VAL_RX"}
+{"term": "dose unit rx", "definition": "PRESCRIPTIONS.DOSE_UNIT_RX"}
+{"term": "form value disp", "definition": "PRESCRIPTIONS.FORM_VAL_DISP"}
+{"term": "form unit disp", "definition": "PRESCRIPTIONS.FORM_UNIT_DISP"}
+{"term": "doses per day", "definition": "PRESCRIPTIONS.DOSES_PER_24_HRS"}
+{"term": "admitted date", "definition": "ADMISSIONS.ADMITTIME (admission timestamp)"}
+{"term": "admitted time", "definition": "ADMISSIONS.ADMITTIME (admission timestamp)"}
+{"term": "lab flag", "definition": "LABEVENTS.FLAG (abnormal flag)"}
+{"term": "MIMIC-IV hosp module", "definition": "Hospital-wide EHR module: patients, admissions, transfers, labs, microbiology, orders, medication admin, prescriptions, diagnoses/procedures, services, and OMR."}
+{"term": "MIMIC-IV icu module", "definition": "ICU module sourced from MetaVision; icustays/d_items link to event tables like chartevents, datetimeevents, inputevents, outputevents, procedureevents, ingredientevents."}
+{"term": "MIMIC-IV v3.1 changes", "definition": "Bug-fix release: corrected d_labitems/labevents itemid consistency with v2.2 and removed invalid subject_id rows; limited table updates."}
+{"term": "MIMIC-IV v3.0 changes", "definition": "Added stays from 2020-2022; out-of-hospital mortality up to 1 year post discharge; row counts increased; admissions.language standardized; admissions.insurance categories expanded."}
+{"term": "MIMIC-IV v2.2 changes", "definition": "Added provider identifiers, imputed hadm_id for emar rows, and changed the held-out subject_id set."}
+{"term": "MIMIC-IV v2.1 changes", "definition": "Removed a subset of subject_id/hadm_id/stay_id as a held-out test set."}
+{"term": "MIMIC-IV v2.0 changes", "definition": "Core module removed (admissions/patients/transfers moved to hosp); neonates removed; ingredientevents added; some inputevents/procedureevents columns removed; out-of-hospital dod added."}
+{"term": "MIMIC-IV deidentified dates", "definition": "All dates shifted to 2100-2200 per-patient; time differences preserved within a patient but not comparable across patients."}
+{"term": "MIMIC-IV anchor_year", "definition": "Deidentified year between 2100-2200 used with anchor_year_group to infer approximate care year."}
+{"term": "MIMIC-IV anchor_year_group", "definition": "Three-year buckets (2008-2010, 2011-2013, 2014-2016, 2017-2019; 2020-2022 in v3.0+)."}
+{"term": "MIMIC-IV anchor_age", "definition": "Age in anchor_year; if over 89 then anchor_age is set to 91."}
+{"term": "MIMIC-IV out-of-hospital mortality", "definition": "patients.dod includes state records; dates are censored after 1 year post discharge (dod null after that)."}
+{"term": "MIMIC-IV demo dataset", "definition": "Open demo subset of 100 patients, same schema as full MIMIC-IV, excludes free-text clinical notes."}
+{"term": "MIMIC Code Repository", "definition": "Open source repository for shared MIMIC analysis code, derived concepts, and tutorials."}
+{"term": "transfer id", "definition": "TRANSFERS.TRANSFER_ID"}
+{"term": "transfer event type", "definition": "TRANSFERS.EVENTTYPE"}
+{"term": "care unit", "definition": "TRANSFERS.CAREUNIT"}
+{"term": "icu intime", "definition": "ICUSTAYS.INTIME"}
+{"term": "icu outtime", "definition": "ICUSTAYS.OUTTIME"}
+{"term": "first care unit", "definition": "ICUSTAYS.FIRST_CAREUNIT"}
+{"term": "last care unit", "definition": "ICUSTAYS.LAST_CAREUNIT"}
+{"term": "icd version", "definition": "ICD_VERSION (ICD coding version) in DIAGNOSES_ICD/PROCEDURES_ICD"}
+{"term": "icd sequence", "definition": "SEQ_NUM in DIAGNOSES_ICD/PROCEDURES_ICD"}
+{"term": "icd description", "definition": "LONG_TITLE in D_ICD_DIAGNOSES/D_ICD_PROCEDURES"}
+{"term": "procedure date", "definition": "PROCEDURES_ICD.CHARTDATE"}
+{"term": "icu patients", "definition": "ICUSTAYS table (ICU stay records)"}
+{"term": "service transitions", "definition": "SERVICES table (PREV_SERVICE/CURR_SERVICE)"}
+{"term": "transitions", "definition": "SERVICES table (service transitions) or TRANSFERS table (location transfers) depending on context"}
+{"term": "lab results", "definition": "LABEVENTS table (lab results) with ITEMID linking to D_LABITEMS"}
+{"term": "lab table", "definition": "LABEVENTS table (lab results)"}
+{"term": "medication data", "definition": "PRESCRIPTIONS table (drug orders) or EMAR/EMAR_DETAIL for administrations"}
+{"term": "emar events", "definition": "EMAR table (medication administration records)"}
+{"term": "input events", "definition": "INPUTEVENTS table (inputs/infusions)"}
+{"term": "output events", "definition": "OUTPUTEVENTS table (outputs)"}
+{"term": "production data", "definition": "OUTPUTEVENTS table (outputs) in this schema"}
+{"term": "diagnosis table", "definition": "DIAGNOSES_ICD table (ICD diagnosis codes)"}
+{"term": "procedure table", "definition": "PROCEDURES_ICD table (ICD procedure codes)"}
+{"term": "medical procedures", "definition": "PROCEDURES_ICD table (ICD procedure codes)"}
+{"term": "organisms table", "definition": "MICROBIOLOGYEVENTS table (organism info)"}
+{"term": "antibiotics table", "definition": "MICROBIOLOGYEVENTS table (AB_NAME/AB_ITEMID)"}
+{"term": "icu admission date", "definition": "ICUSTAYS.INTIME"}
+{"term": "icu discharge date", "definition": "ICUSTAYS.OUTTIME"}
+{"term": "doses per day", "definition": "PRESCRIPTIONS.DOSES_PER_24_HRS"}
