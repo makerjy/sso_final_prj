@@ -51,6 +51,8 @@ def run_query(req: RunRequest):
     if not req.user_ack:
         raise HTTPException(status_code=400, detail="user_ack is required")
 
+    settings = get_settings()
+
     sql = req.sql
     if not sql and req.qid:
         stored = _QUERY_STORE.get(req.qid)
