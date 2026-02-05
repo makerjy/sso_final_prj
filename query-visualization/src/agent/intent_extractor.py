@@ -102,6 +102,20 @@ def _infer_intent(user_query: str) -> str:
         return "correlation"
     return "overview"
 
+
+def _infer_intent_from_glossary(user_query: str, retrieved_context: str | None) -> str | None:
+    if not retrieved_context:
+        return None
+    q = (user_query or "").lower()
+    # Expect glossary entries like:
+    # Term: change
+    # Intent: trend
+    import re
+
+    for term, intent in re.findall(r"Term:\s*(.+?)\nIntent:\s*(\w+)", retrieved_context):
+        if term.lower() in q:
+            return intent
+    return None
 # LLM 응답 모델
 # 분석 의도, 축, 그룹, 집계, 추천 차트 타입
 # 모두 Optional
@@ -198,9 +212,13 @@ def extract_intent(
     time_columns = column_roles.get("time", [])
     categorical_columns = column_roles.get("categorical", [])
 
+    glossary_intent = _infer_intent_from_glossary(user_query, retrieved_context)
+
     try:
         llm_result = _llm_extract_intent(user_query, df_schema, retrieved_context)
         analysis_intent = _normalize_intent(llm_result.analysis_intent)
+        if glossary_intent and analysis_intent in ("summary", "overview"):
+            analysis_intent = glossary_intent
         primary_outcome = (
             llm_result.y
             or llm_result.x
@@ -227,7 +245,7 @@ def extract_intent(
         log_event("intent.llm.error", {"error": str(exc)})
         print("LLM ERROR:", repr(exc))
 
-        analysis_intent = _infer_intent(user_query)
+        analysis_intent = glossary_intent or _infer_intent(user_query)
         primary_outcome = _find_column_in_query(user_query, columns) or _pick_numeric_column(
             dtypes,
             numeric_columns,

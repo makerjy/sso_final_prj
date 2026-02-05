@@ -51,9 +51,10 @@ def search_embeddings(
     query_embedding: List[float],
     limit: int,
 ) -> list:
-    return client.search(
+    response = client.query_points(
         collection_name=RAG_COLLECTION,
-        query_vector=query_embedding,
+        query=query_embedding,
         limit=limit,
         with_payload=True,
     )
+    return response.points

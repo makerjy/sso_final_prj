@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -60,6 +62,90 @@ _CLINICAL_HINTS = [
     "lab",
     "vital",
 ]
+
+
+def _extract_chart_spec_from_context(
+    retrieved_context: Optional[str],
+    df: pd.DataFrame,
+) -> Optional[Dict[str, Any]]:
+    if not retrieved_context:
+        return None
+    # 간단한 패턴: "chart_spec: { ... }"
+    match = re.search(r"chart_spec:\s*(\{.*?\})", retrieved_context)
+    if not match:
+        return None
+    try:
+        spec = json.loads(match.group(1))
+    except Exception:
+        return None
+
+    chart_type = spec.get("chart_type")
+    x = spec.get("x")
+    y = spec.get("y")
+    group = spec.get("group")
+
+    # 최소 유효성: 컬럼이 실제로 존재하는지 확인
+    cols = set(df.columns)
+    for col in (x, y, group):
+        if col and col not in cols:
+            return None
+
+    return {
+        "chart_spec": {k: v for k, v in spec.items() if v is not None},
+        "reason": "RAG 예시 기반 추천 플랜입니다.",
+    }
+
+
+def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """Infer a chart spec using only result columns."""
+    cols = list(df.columns)
+    lower = {c.lower(): c for c in cols}
+
+    # Alias-based hints (from SQL templates)
+    if "x_time" in lower and "y_value" in lower:
+        return {
+            "chart_spec": {"chart_type": "line", "x": lower["x_time"], "y": lower["y_value"]},
+            "reason": "Result aliases indicate a time-series aggregate.",
+        }
+    if "x_group" in lower and "y_value" in lower:
+        return {
+            "chart_spec": {"chart_type": "bar", "x": lower["x_group"], "y": lower["y_value"]},
+            "reason": "Result aliases indicate a grouped aggregate.",
+        }
+
+    # Time-series heuristics
+    time_cols = [c for c in cols if any(t in c.lower() for t in ("time", "date", "day", "month", "year"))]
+    numeric_cols = [c for c in cols if df[c].dtype != "object"]
+    categorical_cols = [c for c in cols if df[c].dtype == "object"]
+
+    if time_cols and numeric_cols:
+        return {
+            "chart_spec": {"chart_type": "line", "x": time_cols[0], "y": numeric_cols[0]},
+            "reason": "Detected time-like and numeric columns for a trend chart.",
+        }
+
+    # Two numeric columns -> scatter
+    if len(numeric_cols) >= 2:
+        return {
+            "chart_spec": {"chart_type": "scatter", "x": numeric_cols[0], "y": numeric_cols[1]},
+            "reason": "Detected multiple numeric columns for correlation.",
+        }
+
+    # Categorical + numeric -> bar
+    if categorical_cols and numeric_cols:
+        return {
+            "chart_spec": {"chart_type": "bar", "x": categorical_cols[0], "y": numeric_cols[0]},
+            "reason": "Detected category + numeric for comparison.",
+        }
+
+    # Single numeric -> histogram
+    if len(numeric_cols) == 1:
+        return {
+            "chart_spec": {"chart_type": "hist", "x": numeric_cols[0]},
+            "reason": "Detected a single numeric column for distribution.",
+        }
+
+    return None
 
 # 입력: df, col, max_groups
 # 출력: bool
@@ -385,7 +471,9 @@ def plan_analyses(
     intent = intent_info.get("analysis_intent")
     primary = intent_info.get("primary_outcome")
     user_query = intent_info.get("user_query")
-    _ = retrieved_context
+    # RAG 컨텍스트에서 예시 chart_spec 추출 (가능하면 우선 제안)
+    suggested_plan = _extract_chart_spec_from_context(retrieved_context, df)
+    column_only_plan = _infer_chart_from_columns(df)
     context_flags = intent_info.get("context_flags") or _infer_context_flags(
         user_query, list(df.columns))
 
@@ -420,6 +508,27 @@ def plan_analyses(
     )
 
     plans: List[Dict[str, Any]] = []
+    if suggested_plan:
+        spec = suggested_plan.get("chart_spec", {})
+        if intent == "trend":
+            # trend는 시간축 정합성 확인
+            if time_info and spec.get("x") == time_info.get("expr"):
+                try:
+                    validate_plan(
+                        intent,
+                        spec.get("group"),
+                        time_info,
+                        list(df.columns),
+                        context_flags,
+                    )
+                except Exception:
+                    pass
+                else:
+                    plans.append(suggested_plan)
+        else:
+            plans.append(suggested_plan)
+    elif column_only_plan:
+        plans.append(column_only_plan)
 
     if intent == "trend" and time_var and primary:
         try:

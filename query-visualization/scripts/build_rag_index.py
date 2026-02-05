@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 from uuid import uuid4
 
 from openai import OpenAI
@@ -33,6 +33,49 @@ def _iter_seed_docs(data_dir: Path) -> Iterable[dict]:
         yield from _load_jsonl(path)
 
 
+def _normalize_doc(doc: dict) -> Tuple[str, dict]:
+    """Normalize heterogeneous docs into (text, metadata)."""
+    if "text" in doc:
+        return doc["text"], doc.get("metadata", {})
+
+    # SQL templates (visualization-first)
+    if "template_id" in doc and "sql" in doc:
+        template_id = doc.get("template_id")
+        x_alias = doc.get("x_alias")
+        y_alias = doc.get("y_alias")
+        chart_candidates = doc.get("chart_candidates", [])
+        chart_type = chart_candidates[0] if chart_candidates else "bar"
+        text = (
+            f"Template: {template_id}\n"
+            f"x_alias: {x_alias}\n"
+            f"y_alias: {y_alias}\n"
+            f"chart_candidates: {chart_candidates}\n"
+            f"SQL: {doc.get('sql')}\n"
+            f"chart_spec: {{\"chart_type\": \"{chart_type}\", \"x\": \"{x_alias}\", \"y\": \"{y_alias}\"}}"
+        )
+        metadata = doc.get("metadata", {}) | {
+            "type": "template",
+            "template_id": template_id,
+        }
+        return text, metadata
+
+    # SQL examples (question -> visualization)
+    if "question" in doc and "sql" in doc:
+        text = (
+            f"Question: {doc.get('question')}\n"
+            f"Intent: {doc.get('intent')}\n"
+            f"X meaning: {doc.get('x_meaning')}\n"
+            f"Y meaning: {doc.get('y_meaning')}\n"
+            f"Chart: {doc.get('chart_type')}\n"
+            f"SQL: {doc.get('sql')}"
+        )
+        metadata = doc.get("metadata", {}) | {"type": "example"}
+        return text, metadata
+
+    # Fallback
+    return json.dumps(doc, ensure_ascii=False), doc.get("metadata", {})
+
+
 def _embed_texts(texts: List[str]) -> List[List[float]]:
     client = OpenAI()
     response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
@@ -51,9 +94,12 @@ def build_index() -> None:
     if not docs:
         raise RuntimeError("RAG 시드 데이터가 없습니다. data/*.jsonl 을 확인하세요.")
 
-    texts = [d["text"] for d in docs]
-    metadatas = [d.get("metadata", {}) | {"text": d["text"]} for d in docs]
-    ids = [d.get("id") or str(uuid4()) for d in docs]
+    normalized = [_normalize_doc(d) for d in docs]
+    texts = [text for text, _ in normalized]
+    metadatas = [meta | {"text": text} for text, meta in normalized]
+    ids = [str(uuid4()) for _ in docs]
+    for doc, doc_id in zip(docs, ids):
+        doc["metadata"] = doc.get("metadata", {}) | {"doc_id": doc.get("id")}
 
     client = get_qdrant_client()
 
