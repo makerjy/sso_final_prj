@@ -82,6 +82,11 @@ class Settings:
 
     rag_persist_dir: str
     rag_top_k: int
+    rag_embedding_dim: int
+    mongo_uri: str
+    mongo_db: str
+    mongo_collection: str
+    mongo_vector_index: str
 
     events_log_path: str
     cost_state_path: str
@@ -121,8 +126,13 @@ def load_settings() -> Settings:
         oracle_pool_max=_int(os.getenv("ORACLE_POOL_MAX"), 4),
         oracle_pool_inc=_int(os.getenv("ORACLE_POOL_INC"), 1),
         oracle_pool_timeout_sec=_int(os.getenv("ORACLE_POOL_TIMEOUT_SEC"), 10),
-        rag_persist_dir=_str(os.getenv("RAG_PERSIST_DIR"), "var/chroma"),
+        rag_persist_dir=_str(os.getenv("RAG_PERSIST_DIR"), "var/rag"),
         rag_top_k=_int(os.getenv("RAG_TOP_K"), 5),
+        rag_embedding_dim=_int(os.getenv("RAG_EMBEDDING_DIM"), 128),
+        mongo_uri=_str(os.getenv("MONGO_URI"), ""),
+        mongo_db=_str(os.getenv("MONGO_DB"), "text_to_sql"),
+        mongo_collection=_str(os.getenv("MONGO_COLLECTION"), "rag_docs"),
+        mongo_vector_index=_str(os.getenv("MONGO_VECTOR_INDEX"), ""),
         events_log_path=_str(os.getenv("EVENTS_LOG_PATH"), "var/logs/events.jsonl"),
         cost_state_path=_str(os.getenv("COST_STATE_PATH"), "var/logs/cost_state.json"),
         budget_config_path=_str(os.getenv("BUDGET_CONFIG_PATH"), "var/logs/budget_config.json"),

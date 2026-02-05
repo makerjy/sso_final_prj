@@ -310,8 +310,8 @@ Observability Layer(비용/이벤트 로깅)
 
 Storage/Index Layer(RAG 저장소)
 - 역할: 스키마/용어/예시/템플릿 문서를 벡터 스토어에 저장 및 검색
-- 구현: `backend/app/services/rag/chroma_store.py`, `backend/app/services/rag/indexer.py`
-- 특징: Chroma 사용 가능 시 영속 저장소, 미설치 시 SimpleStore 사용
+- 구현: `backend/app/services/rag/mongo_store.py`, `backend/app/services/rag/indexer.py`
+- 특징: MongoDB 저장소 사용, 설정이 없으면 SimpleStore 사용
 
 ---
 
@@ -327,7 +327,7 @@ Storage/Index Layer(RAG 저장소)
 RAG 재색인
 - 구현: `backend/app/services/rag/indexer.py`
 - 트리거: `backend/app/api/routes/admin_metadata.py`의 `/admin/rag/reindex`
-- 산출물: `var/chroma/*` (또는 `var/chroma/simple_store.json`)
+- 산출물: MongoDB 컬렉션 (또는 `var/rag/simple_store.json`)
 
 메타데이터 추출 과정 흐름도(개념):
 ```
@@ -348,8 +348,8 @@ RAG 재색인
 [Optional] RAG Reindex
   │  POST /admin/rag/reindex
   ▼
-[Chroma Store Update]
-     var/chroma/* or simple_store.json
+[Mongo Store Update]
+     MongoDB collection or var/rag/simple_store.json
 ```
 
 메타데이터 추출 과정 흐름 상세:
@@ -419,20 +419,20 @@ A. RAG는 “질문과 관련된 참고자료를 먼저 찾아서 LLM에 같이 
 예: “입원 환자 수” 질문 → admissions 스키마 + 관련 예시 SQL + 용어 설명을 함께 제공.
 
 Q. 벡터 DB는 무엇을 쓰고, 임베딩은 어떻게 만드나요?  
-A. 기본은 Chroma(`backend/app/services/rag/chroma_store.py`)를 사용합니다. Chroma가 없으면 `SimpleStore`를 사용해 최소 기능만 제공합니다. 임베딩은 “텍스트를 숫자 벡터로 바꾸는 과정”인데, Chroma 사용 시 기본 임베딩을 그대로 쓰고, SimpleStore 사용 시 해시 기반의 간단한 bag-of-words 임베딩을 사용합니다.  
-예: Chroma 설치 환경이면 벡터 DB 사용, 미설치 환경이면 SimpleStore로 자동 전환.
+A. 기본은 MongoDB(`backend/app/services/rag/mongo_store.py`)를 사용합니다. `MONGO_URI`가 없으면 `SimpleStore`를 사용해 최소 기능만 제공합니다. 임베딩은 코드 내에서 해시 기반의 간단한 bag-of-words 임베딩(128차원)을 만들어 저장합니다.  
+예: Mongo 설정이 있으면 MongoDB, 없으면 SimpleStore로 자동 전환.
 
-Q. Chroma를 쓸 때 임베딩/검색은 어떻게 동작하나요?  
-A. Chroma는 컬렉션에 문서를 넣고(`upsert`) 질의 텍스트로 유사 문서를 찾습니다(`query`). 코드에서 임베딩 모델을 명시하지 않으므로 Chroma 기본 임베딩이 사용됩니다. 현재 환경에서는 로그상 `all-MiniLM-L6-v2` 모델 다운로드가 보였고, 이는 기본 임베딩으로 동작 중임을 의미합니다(버전/환경에 따라 달라질 수 있음). 검색 결과의 `distances`가 점수로 그대로 반환됩니다.  
-예: `query_texts=[질문]`, `n_results=5`로 유사 스키마 문서 5개 반환.
+Q. MongoDB를 쓸 때 임베딩/검색은 어떻게 동작하나요?  
+A. 문서를 upsert할 때 해시 기반 임베딩을 계산해 MongoDB에 저장합니다. `MONGO_VECTOR_INDEX`가 설정되어 있으면 `$vectorSearch`를 사용하고, 없거나 지원되지 않으면 Python에서 코사인 유사도를 계산해 상위 k개를 반환합니다.  
+예: `MONGO_VECTOR_INDEX` 설정 시 Atlas Vector Search로 유사 문서 5개 반환.
 
 Q. SimpleStore는 어떤 방식인가요?  
-A. SimpleStore는 빠르고 가벼운 대체재입니다. 텍스트를 단어 단위로 쪼갠 뒤 해시(md5)로 128차원 벡터를 만들고 L2 정규화합니다. 검색은 코사인 유사도로 수행합니다. 정확도는 Chroma보다 낮을 수 있지만, 외부 의존성 없이 동작합니다.  
+A. SimpleStore는 빠르고 가벼운 대체재입니다. 텍스트를 단어 단위로 쪼갠 뒤 해시(md5)로 128차원 벡터를 만들고 L2 정규화합니다. 검색은 코사인 유사도로 수행합니다. 정확도는 MongoDB 벡터 검색보다 낮을 수 있지만, 외부 의존성 없이 동작합니다.  
 예: 인터넷이 막힌 환경에서도 최소한의 검색 기능을 제공합니다.
 
 Q. 임베딩 모델을 직접 지정하나요?  
-A. 현재는 코드에서 직접 지정하지 않습니다. 그래서 Chroma가 있으면 Chroma 기본 임베딩을 쓰고, 없으면 SimpleStore로 자동 전환됩니다. 임베딩을 고정하고 싶다면 `chroma_store.py`에 명시적으로 임베딩 함수를 추가해야 합니다.  
-예: 특정 임베딩 모델을 쓰려면 `ChromaStore`에 임베딩 함수 주입 필요.
+A. 현재는 코드에서 해시 기반 임베딩을 직접 생성합니다. 다른 임베딩 모델을 쓰고 싶다면 `mongo_store.py`의 `_embed_texts()` 부분을 교체하거나 외부 임베딩 호출을 추가해야 합니다.  
+예: 특정 임베딩 모델을 쓰려면 `MongoStore`에 임베딩 함수 주입 필요.
 
 Q. 임베딩/벡터 검색 품질은 어디에서 영향을 받나요?  
 A. 가장 큰 요인은 입력 문서 품질입니다. `glossary_docs.jsonl`, `sql_examples.jsonl`, `join_templates.jsonl`, `sql_templates.jsonl`, `schema_catalog.json`이 좋아질수록 검색이 좋아집니다. 그 다음은 검색 범위를 결정하는 파라미터(`RAG_TOP_K`, `EXAMPLES_PER_QUERY`, `TEMPLATES_PER_QUERY`, `CONTEXT_TOKEN_BUDGET`)입니다.  

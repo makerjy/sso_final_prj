@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import get_settings
-from app.services.rag.chroma_store import ChromaStore
+from app.services.rag.mongo_store import MongoStore
 from app.services.runtime.context_budget import trim_context_to_budget
 
 
@@ -18,7 +18,7 @@ class CandidateContext:
 
 def build_candidate_context(question: str) -> CandidateContext:
     settings = get_settings()
-    store = ChromaStore()
+    store = MongoStore()
 
     schema_hits = store.search(question, k=settings.rag_top_k, where={"type": "schema"})
     example_hits = store.search(question, k=settings.examples_per_query, where={"type": "example"})

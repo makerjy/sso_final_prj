@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 import json
 
-from app.services.rag.chroma_store import ChromaStore
+from app.services.rag.mongo_store import MongoStore
 
 
 def _load_json(path: Path) -> Any:
@@ -101,7 +101,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     docs.extend(_example_docs(example_items))
     docs.extend(_template_docs(template_items))
 
-    store = ChromaStore()
+    store = MongoStore()
     store.upsert_documents(docs)
 
     return {

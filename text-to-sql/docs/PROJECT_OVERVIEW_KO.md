@@ -50,8 +50,8 @@
   - `var/metadata/*` 문서를 색인에 적재
 - `backend/app/services/rag/retrieval.py`
   - 질문에 관련된 스키마/예시/템플릿/용어집을 검색
-- `backend/app/services/rag/chroma_store.py`
-  - Chroma 또는 SimpleStore 기반 검색 저장소
+- `backend/app/services/rag/mongo_store.py`
+  - MongoDB 또는 SimpleStore 기반 검색 저장소
 - `backend/app/services/runtime/context_budget.py`
   - 토큰 예산에 맞춰 컨텍스트를 잘라냄
 
@@ -132,7 +132,8 @@
 - `var/metadata/` : 스키마/예시/용어집/템플릿 등 RAG 문서
 - `var/cache/` : Demo 캐시
 - `var/logs/` : 실행 로그, 비용, 평가 결과 등
-- `var/chroma/` : Chroma 또는 SimpleStore 저장소
+- `var/rag/` : SimpleStore 저장소 (Mongo 설정이 없을 때 사용)
+- `var/mongo/` : Docker Compose MongoDB 데이터 디렉터리
 
 > 이 디렉토리는 **런타임 생성 데이터**가 많으므로 보통 git에서 제외합니다.
 

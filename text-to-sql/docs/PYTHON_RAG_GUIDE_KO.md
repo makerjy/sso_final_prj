@@ -86,7 +86,8 @@
 
 - `text-to-sql/backend/app/core/config.py`
   - **역할**: `.env` 로딩 + 설정값을 `Settings`로 제공
-  - **RAG 관련 주요 설정**: `RAG_PERSIST_DIR`, `RAG_TOP_K`, `CONTEXT_TOKEN_BUDGET`
+  - **RAG 관련 주요 설정**: `RAG_PERSIST_DIR`, `RAG_TOP_K`, `RAG_EMBEDDING_DIM`, `CONTEXT_TOKEN_BUDGET`
+  - **MongoDB 관련 설정**: `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION`, `MONGO_VECTOR_INDEX`
   - **Oracle 관련 설정**: `ORACLE_DSN`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ROW_CAP`, `DB_TIMEOUT_SEC`
 
 ---
@@ -190,18 +191,19 @@
 - `text-to-sql/backend/app/services/rag/indexer.py`
   - **역할**: metadata JSONL/JSON 파일을 읽어 문서화 후 벡터 저장
   - **입력**: `schema_catalog.json`, `glossary_docs.jsonl`, `sql_examples.jsonl`, `join_templates.jsonl`, `sql_templates.jsonl`
-  - **출력**: Chroma 벡터스토어에 저장
+  - **출력**: MongoDB 벡터스토어에 저장
   - **초보자 팁**: 여기서 “문서가 어떻게 텍스트로 변환되는지”가 검색 품질에 큰 영향을 줍니다.
 
 - `text-to-sql/backend/app/services/rag/retrieval.py`
   - **역할**: 질문에 대해 스키마/예시/템플릿/용어 문서를 **top-k**로 검색
   - **초보자 팁**: `RAG_TOP_K`, `EXAMPLES_PER_QUERY`, `TEMPLATES_PER_QUERY`가 직접적인 품질 파라미터입니다.
 
-- `text-to-sql/backend/app/services/rag/chroma_store.py`
+- `text-to-sql/backend/app/services/rag/mongo_store.py`
   - **역할**: 벡터스토어 래퍼
   - **특징**:
-    - `chromadb`가 있으면 실제 Chroma 사용
-    - 없으면 `SimpleStore`(해시 기반 임베딩)로 대체
+    - `MONGO_URI`가 있으면 MongoDB 저장소 사용
+    - `MONGO_VECTOR_INDEX` 설정 시 `$vectorSearch` 사용
+    - 설정이 없으면 `SimpleStore`(해시 기반 임베딩)로 대체
   - **초보자 팁**: SimpleStore는 가벼우나 검색 품질이 떨어질 수 있습니다.
 
 ---
@@ -294,16 +296,16 @@
 
 ---
 
-### 3.2 RAG 인덱스 저장소 (`var/chroma/`)
+### 3.2 RAG 인덱스 저장소 (MongoDB + `var/rag/`)
 
-- `text-to-sql/var/chroma/chroma.sqlite3`
-  - **Chroma가 있을 때** 사용하는 로컬 벡터 DB
+- `MongoDB` 컬렉션 (`MONGO_DB`, `MONGO_COLLECTION`)
+  - **기본 저장소**. Atlas Vector Search를 쓰면 `MONGO_VECTOR_INDEX` 설정
 
-- `text-to-sql/var/chroma/simple_store.json`
-  - **Chroma가 없을 때** 사용하는 간단 임베딩 저장소
+- `text-to-sql/var/rag/simple_store.json`
+  - **Mongo 설정이 없을 때** 사용하는 간단 임베딩 저장소
 
-- `text-to-sql/var/chroma/<uuid>/`
-  - Chroma 컬렉션 메타데이터 디렉터리
+- `text-to-sql/var/mongo/`
+  - Docker Compose로 띄운 MongoDB의 로컬 데이터 디렉터리
 
 ---
 

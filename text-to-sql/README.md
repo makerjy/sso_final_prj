@@ -1,4 +1,4 @@
-# Text-to-SQL 데모 (RAG + Oracle)
+# Text-to-SQL 데모 (RAG + MongoDB + Oracle)
 
 자연어 질문을 안전한 Oracle SQL로 변환하는 데모 스택입니다. RAG 컨텍스트, 정책 게이팅, 예산 추적을 포함하며, Demo/Advanced 흐름을 제공하는 간단한 UI가 있습니다.
 
@@ -8,7 +8,7 @@
 - `ui/` Next.js UI
 - `scripts/` 검증 + 데모 캐시 생성
 - `deploy/` Docker Compose + Dockerfiles
-- `var/` 런타임 데이터 (metadata, chroma, cache, logs) (git에서 제외)
+- `var/` 런타임 데이터 (metadata, rag, cache, logs, mongo) (git에서 제외)
 
 ## 빠른 시작 (Docker Compose)
 
@@ -19,6 +19,8 @@ ORACLE_DSN=host:1521/service_name
 ORACLE_USER=...
 ORACLE_PASSWORD=...
 ORACLE_DEFAULT_SCHEMA=SSO
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=text_to_sql
 OPENAI_API_KEY=...  # Advanced 모드에서만 필요
 ```
 
