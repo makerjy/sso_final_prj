@@ -62,6 +62,9 @@ class Settings:
     examples_per_query: int
     templates_per_query: int
     llm_max_output_tokens: int
+    llm_timeout_sec: int
+    translate_ko_to_en: bool
+    demo_cache_always: bool
 
     max_retry_attempts: int
     expert_trigger_mode: str
@@ -83,6 +86,7 @@ class Settings:
     rag_persist_dir: str
     rag_top_k: int
     rag_embedding_dim: int
+    rag_multi_query: bool
     mongo_uri: str
     mongo_db: str
     mongo_collection: str
@@ -112,6 +116,9 @@ def load_settings() -> Settings:
         examples_per_query=_int(os.getenv("EXAMPLES_PER_QUERY"), 2),
         templates_per_query=_int(os.getenv("TEMPLATES_PER_QUERY"), 1),
         llm_max_output_tokens=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS"), 500),
+        llm_timeout_sec=_int(os.getenv("LLM_TIMEOUT_SEC"), 30),
+        translate_ko_to_en=_bool(os.getenv("TRANSLATE_KO_TO_EN"), True),
+        demo_cache_always=_bool(os.getenv("DEMO_CACHE_ALWAYS"), False),
         max_retry_attempts=_int(os.getenv("MAX_RETRY_ATTEMPTS"), 1),
         expert_trigger_mode=_str(os.getenv("EXPERT_TRIGGER_MODE"), "score"),
         expert_score_threshold=_int(os.getenv("EXPERT_SCORE_THRESHOLD"), 3),
@@ -129,6 +136,7 @@ def load_settings() -> Settings:
         rag_persist_dir=_str(os.getenv("RAG_PERSIST_DIR"), "var/rag"),
         rag_top_k=_int(os.getenv("RAG_TOP_K"), 5),
         rag_embedding_dim=_int(os.getenv("RAG_EMBEDDING_DIM"), 128),
+        rag_multi_query=_bool(os.getenv("RAG_MULTI_QUERY"), True),
         mongo_uri=_str(os.getenv("MONGO_URI"), ""),
         mongo_db=_str(os.getenv("MONGO_DB"), "text_to_sql"),
         mongo_collection=_str(os.getenv("MONGO_COLLECTION"), "rag_docs"),

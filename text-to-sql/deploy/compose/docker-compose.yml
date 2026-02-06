@@ -3,8 +3,8 @@ version: '3.8'
 services:
   api:
     build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.api
+      context: ../../..
+      dockerfile: text-to-sql/deploy/docker/Dockerfile.api
     depends_on:
       - mongo
     env_file:
@@ -50,8 +50,8 @@ services:
 
   ui:
     build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.ui
+      context: ../../..
+      dockerfile: text-to-sql/deploy/docker/Dockerfile.ui
       args:
         - API_BASE_URL=http://api:8000
     env_file:

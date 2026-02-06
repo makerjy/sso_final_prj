@@ -5,7 +5,8 @@
 ## 프로젝트 구조
 
 - `backend/` FastAPI API (RAG, Oracle, 정책, 예산)
-- `ui/` Next.js UI
+- `../ui/` Next.js UI (repo root, 현재 연결 대상)
+- `ui/` 레거시 UI (text-to-sql 내부)
 - `scripts/` 검증 + 데모 캐시 생성
 - `deploy/` Docker Compose + Dockerfiles
 - `var/` 런타임 데이터 (metadata, rag, cache, logs, mongo) (git에서 제외)
@@ -78,7 +79,7 @@ python scripts/pregen_demo_cache.py
 
 이 과정에서 `var/cache/demo_cache.json`이 생성되며 Demo 모드에서 사용됩니다.
 
-## UI 흐름
+## UI 흐름 (레거시 UI 기준)
 
 - `/ask` Demo 버튼은 캐시된 답변을 사용합니다.
 - Advanced 질문은 사용자 확인을 위해 `/review/{qid}`로 이동합니다.

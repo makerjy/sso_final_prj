@@ -1,4 +1,11 @@
 {
+  "_aliases": {
+    "가장 흔한 진단은 무엇인가요?": "What are the most common diagnoses?",
+    "입원/퇴원 시간을 예시로 보여줘.": "Show sample admissions and discharge times.",
+    "성별별 입원 건수 보여줘.": "Count admissions by gender.",
+    "가장 흔한 시술은 무엇인가요?": "Which procedures are most frequent?",
+    "진단별 평균 재원일수 보여줘.": "Average length of stay by diagnosis."
+  },
   "What are the most common diagnoses?": {
     "sql": "SELECT b.LONG_TITLE, COUNT(*) as DIAGNOSIS_COUNT FROM DIAGNOSES_ICD a JOIN D_ICD_DIAGNOSES b ON a.ICD_CODE = b.ICD_CODE AND a.ICD_VERSION = b.ICD_VERSION WHERE a.ICD_CODE IS NOT NULL GROUP BY b.LONG_TITLE ORDER BY DIAGNOSIS_COUNT DESC",
     "preview": {

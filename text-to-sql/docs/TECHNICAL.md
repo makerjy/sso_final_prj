@@ -29,8 +29,10 @@
 
 - `backend/`
   - FastAPI API, RAG, Oracle 서비스, 정책, 예산, 로깅
+- `../ui/`
+  - Next.js UI (repo root, 현재 연결 대상)
 - `ui/`
-  - Next.js UI (Ask/Review/Admin)
+  - 레거시 UI (text-to-sql 내부, Ask/Review/Admin)
 - `scripts/`
   - 자산 검증, 데모 캐시, 평가 스크립트
 - `deploy/`

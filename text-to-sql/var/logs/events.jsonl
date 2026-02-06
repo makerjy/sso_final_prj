@@ -966,3 +966,48 @@
 {"type": "cost", "krw": 3, "total_krw": 1397, "meta": {"usage": {"prompt_tokens": 2121, "completion_tokens": 121, "total_tokens": 2242}, "stage": "oneshot", "source": "llm"}, "ts": 1770252539}
 {"type": "cost", "krw": 3, "total_krw": 1400, "meta": {"usage": {"prompt_tokens": 2122, "completion_tokens": 121, "total_tokens": 2243}, "stage": "oneshot", "source": "llm"}, "ts": 1770252641}
 {"type": "cost", "krw": 1, "total_krw": 1401, "meta": {"stage": "run"}, "ts": 1770252645}
+{"type": "cost", "krw": 5, "total_krw": 1406, "meta": {"usage": {"prompt_tokens": 4212, "completion_tokens": 154, "total_tokens": 4366}, "stage": "oneshot", "source": "llm"}, "ts": 1770338295}
+{"type": "cost", "krw": 1, "total_krw": 1407, "meta": {"stage": "run"}, "ts": 1770338297}
+{"type": "cost", "krw": 5, "total_krw": 1412, "meta": {"usage": {"prompt_tokens": 4212, "completion_tokens": 135, "total_tokens": 4347}, "stage": "oneshot", "source": "llm"}, "ts": 1770338370}
+{"type": "cost", "krw": 2, "total_krw": 1414, "meta": {"usage": {"prompt_tokens": 1709, "completion_tokens": 123, "total_tokens": 1832}, "stage": "oneshot", "source": "llm"}, "ts": 1770338439}
+{"type": "cost", "krw": 1, "total_krw": 1415, "meta": {"stage": "run"}, "ts": 1770338443}
+{"type": "cost", "krw": 4, "total_krw": 1419, "meta": {"usage": {"prompt_tokens": 3515, "completion_tokens": 78, "total_tokens": 3593}, "stage": "oneshot", "source": "llm"}, "ts": 1770339274}
+{"type": "cost", "krw": 4, "total_krw": 1423, "meta": {"usage": {"prompt_tokens": 3387, "completion_tokens": 112, "total_tokens": 3499}, "stage": "oneshot", "source": "llm"}, "ts": 1770339282}
+{"type": "cost", "krw": 5, "total_krw": 1428, "meta": {"usage": {"prompt_tokens": 4118, "completion_tokens": 130, "total_tokens": 4248}, "stage": "oneshot", "source": "llm"}, "ts": 1770339287}
+{"type": "cost", "krw": 3, "total_krw": 1431, "meta": {"usage": {"prompt_tokens": 2153, "completion_tokens": 97, "total_tokens": 2250}, "stage": "oneshot", "source": "llm"}, "ts": 1770340318}
+{"type": "cost", "krw": 4, "total_krw": 1435, "meta": {"usage": {"prompt_tokens": 3818, "completion_tokens": 86, "total_tokens": 3904}, "stage": "oneshot", "source": "llm"}, "ts": 1770340571}
+{"type": "cost", "krw": 1, "total_krw": 1436, "meta": {"stage": "run"}, "ts": 1770340575}
+{"type": "cost", "krw": 4, "total_krw": 1440, "meta": {"usage": {"prompt_tokens": 3286, "completion_tokens": 131, "total_tokens": 3417}, "stage": "oneshot", "source": "llm"}, "ts": 1770340618}
+{"type": "cost", "krw": 4, "total_krw": 1444, "meta": {"usage": {"prompt_tokens": 3014, "completion_tokens": 124, "total_tokens": 3138}, "stage": "oneshot", "source": "llm"}, "ts": 1770340627}
+{"type": "cost", "krw": 4, "total_krw": 1448, "meta": {"usage": {"prompt_tokens": 3014, "completion_tokens": 179, "total_tokens": 3193}, "stage": "oneshot", "source": "llm"}, "ts": 1770340630}
+{"type": "cost", "krw": 1, "total_krw": 1449, "meta": {"usage": {"prompt_tokens": 52, "completion_tokens": 9, "total_tokens": 61}, "stage": "translate", "source": "llm"}, "ts": 1770342552}
+{"type": "cost", "krw": 4, "total_krw": 1453, "meta": {"usage": {"prompt_tokens": 3628, "completion_tokens": 85, "total_tokens": 3713}, "stage": "oneshot", "source": "llm"}, "ts": 1770342555}
+{"type": "cost", "krw": 4, "total_krw": 1457, "meta": {"usage": {"prompt_tokens": 3818, "completion_tokens": 95, "total_tokens": 3913}, "stage": "oneshot", "source": "llm"}, "ts": 1770342913}
+{"type": "cost", "krw": 1, "total_krw": 1458, "meta": {"stage": "run"}, "ts": 1770342916}
+{"type": "cost", "krw": 4, "total_krw": 1462, "meta": {"usage": {"prompt_tokens": 3014, "completion_tokens": 158, "total_tokens": 3172}, "stage": "oneshot", "source": "llm"}, "ts": 1770342921}
+{"type": "cost", "krw": 3, "total_krw": 1465, "meta": {"usage": {"prompt_tokens": 2729, "completion_tokens": 89, "total_tokens": 2818}, "stage": "oneshot", "source": "llm"}, "ts": 1770342938}
+{"type": "cost", "krw": 1, "total_krw": 1466, "meta": {"stage": "run"}, "ts": 1770342941}
+{"type": "cost", "krw": 5, "total_krw": 1471, "meta": {"usage": {"prompt_tokens": 4212, "completion_tokens": 167, "total_tokens": 4379}, "stage": "oneshot", "source": "llm"}, "ts": 1770342991}
+{"type": "cost", "krw": 5, "total_krw": 1476, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 106, "total_tokens": 4215}, "stage": "oneshot", "source": "llm"}, "ts": 1770343449}
+{"type": "cost", "krw": 5, "total_krw": 1481, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 105, "total_tokens": 4214}, "stage": "oneshot", "source": "llm"}, "ts": 1770343452}
+{"type": "cost", "krw": 5, "total_krw": 1486, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 80, "total_tokens": 4189}, "stage": "oneshot", "source": "llm"}, "ts": 1770343459}
+{"type": "cost", "krw": 5, "total_krw": 1491, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 100, "total_tokens": 4209}, "stage": "oneshot", "source": "llm"}, "ts": 1770343461}
+{"type": "cost", "krw": 1, "total_krw": 1492, "meta": {"usage": {"prompt_tokens": 48, "completion_tokens": 9, "total_tokens": 57}, "stage": "translate", "source": "llm"}, "ts": 1770343634}
+{"type": "cost", "krw": 3, "total_krw": 1495, "meta": {"usage": {"prompt_tokens": 1975, "completion_tokens": 148, "total_tokens": 2123}, "stage": "oneshot", "source": "llm"}, "ts": 1770343639}
+{"type": "cost", "krw": 1, "total_krw": 1496, "meta": {"stage": "run"}, "ts": 1770343641}
+{"type": "cost", "krw": 1, "total_krw": 1497, "meta": {"usage": {"prompt_tokens": 52, "completion_tokens": 9, "total_tokens": 61}, "stage": "translate", "source": "llm"}, "ts": 1770343791}
+{"type": "cost", "krw": 5, "total_krw": 1502, "meta": {"usage": {"prompt_tokens": 4268, "completion_tokens": 125, "total_tokens": 4393}, "stage": "oneshot", "source": "llm"}, "ts": 1770343793}
+{"type": "cost", "krw": 1, "total_krw": 1503, "meta": {"usage": {"prompt_tokens": 52, "completion_tokens": 9, "total_tokens": 61}, "stage": "translate", "source": "llm"}, "ts": 1770343794}
+{"type": "cost", "krw": 4, "total_krw": 1507, "meta": {"usage": {"prompt_tokens": 3288, "completion_tokens": 88, "total_tokens": 3376}, "stage": "oneshot", "source": "llm"}, "ts": 1770343796}
+{"type": "cost", "krw": 1, "total_krw": 1508, "meta": {"usage": {"prompt_tokens": 52, "completion_tokens": 9, "total_tokens": 61}, "stage": "translate", "source": "llm"}, "ts": 1770343796}
+{"type": "cost", "krw": 5, "total_krw": 1513, "meta": {"usage": {"prompt_tokens": 4268, "completion_tokens": 131, "total_tokens": 4399}, "stage": "oneshot", "source": "llm"}, "ts": 1770343798}
+{"type": "cost", "krw": 1, "total_krw": 1514, "meta": {"usage": {"prompt_tokens": 52, "completion_tokens": 9, "total_tokens": 61}, "stage": "translate", "source": "llm"}, "ts": 1770343799}
+{"type": "cost", "krw": 4, "total_krw": 1518, "meta": {"usage": {"prompt_tokens": 3628, "completion_tokens": 96, "total_tokens": 3724}, "stage": "oneshot", "source": "llm"}, "ts": 1770343806}
+{"type": "cost", "krw": 1, "total_krw": 1519, "meta": {"usage": {"prompt_tokens": 52, "completion_tokens": 9, "total_tokens": 61}, "stage": "translate", "source": "llm"}, "ts": 1770343807}
+{"type": "cost", "krw": 4, "total_krw": 1523, "meta": {"usage": {"prompt_tokens": 3628, "completion_tokens": 84, "total_tokens": 3712}, "stage": "oneshot", "source": "llm"}, "ts": 1770343809}
+{"type": "cost", "krw": 5, "total_krw": 1528, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 96, "total_tokens": 4205}, "stage": "oneshot", "source": "llm"}, "ts": 1770343811}
+{"type": "cost", "krw": 5, "total_krw": 1533, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 99, "total_tokens": 4208}, "stage": "oneshot", "source": "llm"}, "ts": 1770343813}
+{"type": "cost", "krw": 5, "total_krw": 1538, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 106, "total_tokens": 4215}, "stage": "oneshot", "source": "llm"}, "ts": 1770343816}
+{"type": "cost", "krw": 5, "total_krw": 1543, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 81, "total_tokens": 4190}, "stage": "oneshot", "source": "llm"}, "ts": 1770343817}
+{"type": "cost", "krw": 5, "total_krw": 1548, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 105, "total_tokens": 4214}, "stage": "oneshot", "source": "llm"}, "ts": 1770343819}
+{"type": "cost", "krw": 5, "total_krw": 1553, "meta": {"usage": {"prompt_tokens": 4109, "completion_tokens": 90, "total_tokens": 4199}, "stage": "oneshot", "source": "llm"}, "ts": 1770343989}

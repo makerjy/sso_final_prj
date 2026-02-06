@@ -4,7 +4,8 @@
 
 - `(root)` 프로젝트 최상위 파일 (README, .gitignore 등)
 - `backend/` API 서버(FastAPI), RAG, Oracle, 정책, 예산, 로깅
-- `ui/` Next.js 기반 웹 UI
+- `../ui/` Next.js 기반 웹 UI (repo root, 현재 연결 대상)
+- `ui/` 레거시 UI (text-to-sql 내부)
 - `scripts/` 검증/평가/데모캐시 스크립트
 - `deploy/` Docker Compose 및 Dockerfile
 - `docs/` 문서 모음
@@ -90,6 +91,9 @@
 ---
 
 ### 2.3 UI (Next.js) 상세
+
+현재 사용 UI는 repo root `../ui/` 입니다.  
+아래 파일 경로는 레거시 UI(`text-to-sql/ui`) 기준입니다.
 
 - `ui/app/ask/page.tsx`
   - 질문 입력/데모 실행 화면

@@ -15,11 +15,11 @@ RUN apt-get update \
      fi \
   && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements.txt /app/requirements.txt
+COPY text-to-sql/backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY backend /app/backend
-COPY var /app/var
+COPY text-to-sql/backend /app/backend
+COPY text-to-sql/var /app/var
 
 ENV PYTHONPATH=/app/backend
 ENV LD_LIBRARY_PATH=/opt/oracle/instantclient

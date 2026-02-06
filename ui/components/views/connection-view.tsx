@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -30,10 +30,22 @@ interface TableScope {
   selected: boolean
 }
 
+interface PoolStatus {
+  open?: boolean
+  busy?: number | null
+  open_connections?: number | null
+  max?: number | null
+}
+
 export function ConnectionView() {
-  const [isConnected, setIsConnected] = useState(true)
+  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
+  const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const [isConnected, setIsConnected] = useState(false)
   const [isReadOnly, setIsReadOnly] = useState(true)
   const [isTesting, setIsTesting] = useState(false)
+  const [poolStatus, setPoolStatus] = useState<PoolStatus | null>(null)
+  const [statusError, setStatusError] = useState<string | null>(null)
+  const [lastChecked, setLastChecked] = useState<Date | null>(null)
   const [connectionConfig, setConnectionConfig] = useState({
     host: "mimic-iv.hospital.edu",
     port: "5432",
@@ -53,11 +65,38 @@ export function ConnectionView() {
     { id: "chartevents", name: "chartevents", schema: "mimiciv_icu", description: "차트 이벤트", rowCount: "329,499,788", selected: false },
   ])
 
-  const handleTestConnection = async () => {
+  const readError = async (res: Response) => {
+    const text = await res.text()
+    try {
+      const json = JSON.parse(text)
+      if (json?.detail) return String(json.detail)
+    } catch {}
+    return text || `${res.status} ${res.statusText}`
+  }
+
+  const fetchPoolStatus = async () => {
     setIsTesting(true)
-    await new Promise(resolve => setTimeout(resolve, 1500))
-    setIsConnected(true)
-    setIsTesting(false)
+    setStatusError(null)
+    try {
+      const res = await fetch(apiUrl("/admin/oracle/pool/status"))
+      if (!res.ok) {
+        throw new Error(await readError(res))
+      }
+      const data: PoolStatus = await res.json()
+      setPoolStatus(data)
+      setIsConnected(Boolean(data?.open))
+    } catch (err: any) {
+      setIsConnected(false)
+      setPoolStatus(null)
+      setStatusError(err?.message || "연결 상태를 확인할 수 없습니다.")
+    } finally {
+      setIsTesting(false)
+      setLastChecked(new Date())
+    }
+  }
+
+  const handleTestConnection = async () => {
+    await fetchPoolStatus()
   }
 
   const toggleTable = (id: string) => {
@@ -67,6 +106,10 @@ export function ConnectionView() {
   }
 
   const selectedCount = tableScopes.filter(t => t.selected).length
+
+  useEffect(() => {
+    fetchPoolStatus()
+  }, [])
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 max-w-5xl">
@@ -106,8 +149,19 @@ export function ConnectionView() {
                   )}
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  {isConnected ? `${connectionConfig.host}:${connectionConfig.port}/${connectionConfig.database}` : "데이터베이스에 연결되지 않았습니다"}
+                  {statusError
+                    ? statusError
+                    : isTesting && !lastChecked
+                      ? "연결 확인 중..."
+                      : isConnected
+                        ? `Oracle pool ${poolStatus?.open_connections ?? "-"} / ${poolStatus?.max ?? "-"} (busy ${poolStatus?.busy ?? "-"})`
+                        : "데이터베이스에 연결되지 않았습니다"}
                 </p>
+                {lastChecked && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    마지막 확인: {lastChecked.toLocaleTimeString()}
+                  </p>
+                )}
               </div>
             </div>
             <Button 
