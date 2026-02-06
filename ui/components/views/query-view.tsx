@@ -28,6 +28,7 @@ import {
   Download
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { SurvivalChart } from "@/components/survival-chart"
 
 interface ChatMessage {
   id: string
@@ -119,11 +120,71 @@ export function QueryView() {
   const previewRows = preview?.rows ?? []
   const previewRowCount = preview?.row_count ?? previewRows.length
   const previewRowCap = preview?.row_cap
+  const survivalChartData = buildSurvivalFromPreview(previewColumns, previewRows)
+  const totalPatients = survivalChartData?.length
+    ? Math.max(...survivalChartData.map((item) => item.atRisk)) || previewRowCount
+    : previewRowCount
+  const totalEvents = survivalChartData?.length
+    ? Math.max(...survivalChartData.map((item) => item.events))
+    : 0
+  const medianSurvival = (() => {
+    if (!survivalChartData?.length) return 0
+    const sorted = [...survivalChartData].sort((a, b) => a.time - b.time)
+    const hit = sorted.find((item) => item.survival <= 50)
+    return hit?.time ?? sorted[sorted.length - 1]?.time ?? 0
+  })()
   const summary = demoResult?.summary
   const source = demoResult?.source
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
   const appendSuggestions = (base: string) => base
+
+  const normalizeColumn = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "")
+  const findColumnIndex = (columns: string[], candidates: string[]) => {
+    const normalized = columns.map((col) => normalizeColumn(col))
+    for (const candidate of candidates) {
+      const idx = normalized.indexOf(normalizeColumn(candidate))
+      if (idx >= 0) return idx
+    }
+    return -1
+  }
+  const toNumber = (value: unknown) => {
+    if (value == null) return null
+    const num = Number(value)
+    return Number.isFinite(num) ? num : null
+  }
+  const buildSurvivalFromPreview = (columns: string[], rows: any[][]) => {
+    if (!columns.length || !rows.length) return null
+    const timeIdx = findColumnIndex(columns, ["time", "days", "day", "week", "weeks", "month", "months"])
+    const survivalIdx = findColumnIndex(columns, ["survival", "survivalrate", "rate", "prob", "probability"])
+    if (timeIdx < 0 || survivalIdx < 0) return null
+    const lowerIdx = findColumnIndex(columns, ["lowerci", "ci_lower", "lcl", "lower"])
+    const upperIdx = findColumnIndex(columns, ["upperci", "ci_upper", "ucl", "upper"])
+    const atRiskIdx = findColumnIndex(columns, ["atrisk", "at_risk", "risk"])
+    const eventsIdx = findColumnIndex(columns, ["events", "event", "death", "deaths"])
+
+    const data = rows
+      .map((row) => {
+        const time = toNumber(row[timeIdx])
+        const survival = toNumber(row[survivalIdx])
+        if (time == null || survival == null) return null
+        const lowerCI = toNumber(row[lowerIdx]) ?? survival
+        const upperCI = toNumber(row[upperIdx]) ?? survival
+        const atRisk = toNumber(row[atRiskIdx]) ?? 0
+        const events = toNumber(row[eventsIdx]) ?? 0
+        return { time, survival, lowerCI, upperCI, atRisk, events }
+      })
+      .filter(Boolean) as {
+        time: number
+        survival: number
+        lowerCI: number
+        upperCI: number
+        atRisk: number
+        events: number
+      }[]
+
+    return data.length ? data : null
+  }
 
   const buildSuggestions = (questionText: string, columns?: string[]) => {
     const suggestions: string[] = []

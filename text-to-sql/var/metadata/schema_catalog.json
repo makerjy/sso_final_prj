@@ -408,7 +408,7 @@
         },
         {
           "name": "MEDICATION",
-          "type": "CLOB",
+          "type": "VARCHAR2(1000 CHAR)",
           "nullable": true
         },
         {
@@ -471,7 +471,7 @@
         },
         {
           "name": "REASON_FOR_NO_BARCODE",
-          "type": "CLOB",
+          "type": "VARCHAR2(1000 CHAR)",
           "nullable": true
         },
         {
@@ -581,7 +581,7 @@
         },
         {
           "name": "RESTART_INTERVAL",
-          "type": "CLOB",
+          "type": "VARCHAR2(1000 CHAR)",
           "nullable": true
         },
         {
@@ -1030,7 +1030,7 @@
         },
         {
           "name": "COMMENTS",
-          "type": "CLOB",
+          "type": "VARCHAR2(4000 CHAR)",
           "nullable": true
         }
       ],
