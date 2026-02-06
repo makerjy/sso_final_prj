@@ -73,7 +73,7 @@ def _example_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return docs
 
 
-def _template_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _template_docs(items: list[dict[str, Any]], kind: str = "generic") -> list[dict[str, Any]]:
     docs = []
     for idx, item in enumerate(items):
         name = item.get("name", f"template_{idx}")
@@ -82,7 +82,7 @@ def _template_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         docs.append({
             "id": f"template::{idx}",
             "text": text,
-            "metadata": {"type": "template", "name": name},
+            "metadata": {"type": "template", "name": name, "kind": kind},
         })
     return docs
 
@@ -92,14 +92,15 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     schema_catalog = _load_json(base / "schema_catalog.json") or {"tables": {}}
     glossary_items = _load_jsonl(base / "glossary_docs.jsonl")
     example_items = _load_jsonl(base / "sql_examples.jsonl")
-    template_items = _load_jsonl(base / "join_templates.jsonl")
-    template_items.extend(_load_jsonl(base / "sql_templates.jsonl"))
+    join_template_items = _load_jsonl(base / "join_templates.jsonl")
+    sql_template_items = _load_jsonl(base / "sql_templates.jsonl")
 
     docs: list[dict[str, Any]] = []
     docs.extend(_schema_docs(schema_catalog))
     docs.extend(_glossary_docs(glossary_items))
     docs.extend(_example_docs(example_items))
-    docs.extend(_template_docs(template_items))
+    docs.extend(_template_docs(join_template_items, kind="join"))
+    docs.extend(_template_docs(sql_template_items, kind="sql"))
 
     store = MongoStore()
     store.upsert_documents(docs)
@@ -108,5 +109,5 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
         "schema_docs": len(_schema_docs(schema_catalog)),
         "glossary_docs": len(glossary_items),
         "sql_examples_docs": len(example_items),
-        "join_templates_docs": len(template_items),
+        "join_templates_docs": len(join_template_items) + len(sql_template_items),
     }

@@ -25,8 +25,8 @@ interface TableScope {
   id: string
   name: string
   schema: string
-  description: string
-  rowCount: string
+  description?: string
+  rowCount?: string
   selected: boolean
 }
 
@@ -37,33 +37,67 @@ interface PoolStatus {
   max?: number | null
 }
 
+interface ConnectionSettings {
+  host: string
+  port: string
+  database: string
+  username: string
+  password?: string
+  sslMode?: string
+}
+
+interface TableScopeSettings {
+  selected_ids: string[]
+}
+
+interface TableCatalogResponse {
+  owner?: string
+  tables?: { name: string; schema?: string; columns?: number; primary_keys?: string[] }[]
+}
+
+const DEFAULT_TABLE_SCOPES: TableScope[] = [
+  { id: "patients", name: "patients", schema: "mimiciv_hosp", description: "환자 기본 정보", rowCount: "382,278", selected: true },
+  { id: "admissions", name: "admissions", schema: "mimiciv_hosp", description: "입원 기록", rowCount: "524,520", selected: true },
+  { id: "diagnoses_icd", name: "diagnoses_icd", schema: "mimiciv_hosp", description: "ICD 진단 코드", rowCount: "5,280,857", selected: true },
+  { id: "procedures_icd", name: "procedures_icd", schema: "mimiciv_hosp", description: "ICD 시술 코드", rowCount: "704,124", selected: true },
+  { id: "labevents", name: "labevents", schema: "mimiciv_hosp", description: "검사 결과", rowCount: "122,103,667", selected: false },
+  { id: "prescriptions", name: "prescriptions", schema: "mimiciv_hosp", description: "처방 정보", rowCount: "17,021,399", selected: false },
+  { id: "icustays", name: "icustays", schema: "mimiciv_icu", description: "ICU 재원 기록", rowCount: "76,943", selected: true },
+  { id: "chartevents", name: "chartevents", schema: "mimiciv_icu", description: "차트 이벤트", rowCount: "329,499,788", selected: false },
+]
+
 export function ConnectionView() {
   const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const getTableColumns = (width: number) => {
+    if (width >= 1536) return 4
+    if (width >= 1024) return 3
+    if (width >= 640) return 2
+    return 1
+  }
   const [isConnected, setIsConnected] = useState(false)
   const [isReadOnly, setIsReadOnly] = useState(true)
   const [isTesting, setIsTesting] = useState(false)
   const [poolStatus, setPoolStatus] = useState<PoolStatus | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveMessage, setSaveMessage] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [tableColumns, setTableColumns] = useState(() =>
+    typeof window === "undefined" ? 1 : getTableColumns(window.innerWidth)
+  )
+  const [tablePage, setTablePage] = useState(1)
   const [lastChecked, setLastChecked] = useState<Date | null>(null)
   const [connectionConfig, setConnectionConfig] = useState({
     host: "mimic-iv.hospital.edu",
     port: "5432",
     database: "mimiciv",
     username: "researcher_01",
+    password: "",
     sslMode: "require"
   })
 
-  const [tableScopes, setTableScopes] = useState<TableScope[]>([
-    { id: "patients", name: "patients", schema: "mimiciv_hosp", description: "환자 기본 정보", rowCount: "382,278", selected: true },
-    { id: "admissions", name: "admissions", schema: "mimiciv_hosp", description: "입원 기록", rowCount: "524,520", selected: true },
-    { id: "diagnoses_icd", name: "diagnoses_icd", schema: "mimiciv_hosp", description: "ICD 진단 코드", rowCount: "5,280,857", selected: true },
-    { id: "procedures_icd", name: "procedures_icd", schema: "mimiciv_hosp", description: "ICD 시술 코드", rowCount: "704,124", selected: true },
-    { id: "labevents", name: "labevents", schema: "mimiciv_hosp", description: "검사 결과", rowCount: "122,103,667", selected: false },
-    { id: "prescriptions", name: "prescriptions", schema: "mimiciv_hosp", description: "처방 정보", rowCount: "17,021,399", selected: false },
-    { id: "icustays", name: "icustays", schema: "mimiciv_icu", description: "ICU 재원 기록", rowCount: "76,943", selected: true },
-    { id: "chartevents", name: "chartevents", schema: "mimiciv_icu", description: "차트 이벤트", rowCount: "329,499,788", selected: false },
-  ])
+  const [tableScopes, setTableScopes] = useState<TableScope[]>(DEFAULT_TABLE_SCOPES)
 
   const readError = async (res: Response) => {
     const text = await res.text()
@@ -99,6 +133,109 @@ export function ConnectionView() {
     await fetchPoolStatus()
   }
 
+  const loadSettings = async () => {
+    try {
+      const [connectionRes, scopeRes, tablesRes] = await Promise.all([
+        fetch(apiUrl("/admin/settings/connection")),
+        fetch(apiUrl("/admin/settings/table-scope")),
+        fetch(apiUrl("/admin/metadata/tables")),
+      ])
+      const fallbackSelected = new Set(
+        DEFAULT_TABLE_SCOPES.filter(table => table.selected).map(table => table.id)
+      )
+      let selectedIds = fallbackSelected
+      if (connectionRes.ok) {
+        const data: Partial<ConnectionSettings> = await connectionRes.json()
+        setConnectionConfig(prev => ({
+          ...prev,
+          ...data,
+          password: data.password ?? prev.password ?? ""
+        }))
+      }
+      if (scopeRes.ok) {
+        const data: TableScopeSettings = await scopeRes.json()
+        if (Array.isArray(data?.selected_ids) && data.selected_ids.length > 0) {
+          selectedIds = new Set(data.selected_ids.map(id => id.toLowerCase()))
+        }
+      }
+      if (tablesRes.ok) {
+        const data: TableCatalogResponse = await tablesRes.json()
+        if (Array.isArray(data?.tables) && data.tables.length > 0) {
+          const owner = String(data.owner || "")
+          const nextScopes = data.tables.map(table => {
+            const name = String(table.name || "")
+            const id = name.toLowerCase()
+            const schemaLabel = String(table.schema || owner || "")
+            const description =
+              typeof table.columns === "number" ? `컬럼 ${table.columns}개` : undefined
+            return {
+              id,
+              name: id,
+              schema: schemaLabel || "default",
+              description,
+              selected: selectedIds.has(id),
+            } as TableScope
+          })
+          setTableScopes(nextScopes)
+          return
+        }
+      }
+      setTableScopes(prev => prev.map(table => ({
+        ...table,
+        selected: selectedIds.has(table.id.toLowerCase()),
+      })))
+    } catch {}
+  }
+
+  const handleSaveSettings = async () => {
+    setIsSaving(true)
+    setSaveMessage(null)
+    setSaveError(null)
+    try {
+      const connectionPayload: ConnectionSettings = {
+        host: connectionConfig.host,
+        port: connectionConfig.port,
+        database: connectionConfig.database,
+        username: connectionConfig.username,
+        password: connectionConfig.password,
+        sslMode: connectionConfig.sslMode,
+      }
+      const tablePayload: TableScopeSettings = {
+        selected_ids: tableScopes.filter(t => t.selected).map(t => t.id),
+      }
+      const [connectionRes, scopeRes] = await Promise.all([
+        fetch(apiUrl("/admin/settings/connection"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(connectionPayload),
+        }),
+        fetch(apiUrl("/admin/settings/table-scope"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(tablePayload),
+        }),
+      ])
+      if (!connectionRes.ok) {
+        throw new Error(await readError(connectionRes))
+      }
+      if (!scopeRes.ok) {
+        throw new Error(await readError(scopeRes))
+      }
+      setSaveMessage("설정이 저장되었습니다.")
+      await fetchPoolStatus()
+    } catch (err: any) {
+      setSaveError(err?.message || "설정 저장에 실패했습니다.")
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleResetSettings = async () => {
+    setSaveMessage(null)
+    setSaveError(null)
+    await loadSettings()
+  }
+
   const toggleTable = (id: string) => {
     setTableScopes(prev => prev.map(t => 
       t.id === id ? { ...t, selected: !t.selected } : t
@@ -106,13 +243,37 @@ export function ConnectionView() {
   }
 
   const selectedCount = tableScopes.filter(t => t.selected).length
+  const allSelected = tableScopes.length > 0 && tableScopes.every(t => t.selected)
+  const anySelected = selectedCount > 0
+  const tablesPerPage = Math.max(1, tableColumns * 4)
+  const totalPages = Math.max(1, Math.ceil(tableScopes.length / tablesPerPage))
+  const pagedTables = tableScopes.slice(
+    (tablePage - 1) * tablesPerPage,
+    tablePage * tablesPerPage
+  )
 
   useEffect(() => {
     fetchPoolStatus()
+    loadSettings()
   }, [])
 
+  useEffect(() => {
+    const handleResize = () => {
+      setTableColumns(getTableColumns(window.innerWidth))
+    }
+    handleResize()
+    window.addEventListener("resize", handleResize)
+    return () => window.removeEventListener("resize", handleResize)
+  }, [])
+
+  useEffect(() => {
+    if (tablePage > totalPages) {
+      setTablePage(totalPages)
+    }
+  }, [tablePage, totalPages])
+
   return (
-    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 max-w-5xl">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 w-full max-w-none">
       <div>
         <h2 className="text-xl sm:text-2xl font-bold text-foreground">DB 연결 및 권한 설정</h2>
         <p className="text-muted-foreground mt-1">데이터베이스 연결을 구성하고 접근 권한을 관리합니다.</p>
@@ -176,9 +337,9 @@ export function ConnectionView() {
         </CardContent>
       </Card>
 
-      <div className="grid lg:grid-cols-2 gap-4 sm:gap-6">
+      <div className="grid lg:grid-cols-2 gap-4 sm:gap-6 items-stretch">
         {/* Connection Configuration */}
-        <Card>
+        <Card className="h-full">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
               <Server className="w-5 h-5" />
@@ -230,6 +391,8 @@ export function ConnectionView() {
               <Input 
                 id="password" 
                 type="password"
+                value={connectionConfig.password}
+                onChange={(e) => setConnectionConfig(prev => ({ ...prev, password: e.target.value }))}
                 placeholder="••••••••"
               />
             </div>
@@ -237,7 +400,7 @@ export function ConnectionView() {
         </Card>
 
         {/* Security Settings */}
-        <Card>
+        <Card className="h-full">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
               <Shield className="w-5 h-5" />
@@ -300,22 +463,40 @@ export function ConnectionView() {
       {/* Table Scope Selection */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-lg">
-            <Database className="w-5 h-5" />
-            테이블 스코프 선택
-          </CardTitle>
-          <CardDescription>
-            쿼리 대상 테이블을 선택하세요. 선택된 테이블만 NL2SQL 변환에 사용됩니다.
-            <Badge variant="secondary" className="ml-2">{selectedCount}개 선택됨</Badge>
-          </CardDescription>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <Database className="w-5 h-5" />
+                테이블 스코프 선택
+              </CardTitle>
+              <CardDescription>
+                쿼리 대상 테이블을 선택하세요. 선택된 테이블만 NL2SQL 변환에 사용됩니다.
+                <Badge variant="secondary" className="ml-2">{selectedCount}개 선택됨</Badge>
+                <span className="ml-2 text-xs text-muted-foreground">
+                  페이지 {tablePage}/{totalPages}
+                </span>
+              </CardDescription>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox
+                checked={allSelected ? true : anySelected ? "indeterminate" : false}
+                onCheckedChange={(checked) => {
+                  const shouldSelect = checked === true
+                  setTableScopes(prev => prev.map(table => ({ ...table, selected: shouldSelect })))
+                }}
+                aria-label="Select all tables"
+              />
+              Select all
+            </label>
+          </div>
         </CardHeader>
         <CardContent>
-          <div className="grid md:grid-cols-2 gap-3">
-            {tableScopes.map((table) => (
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3 items-stretch">
+            {pagedTables.map((table) => (
               <div 
                 key={table.id}
                 className={cn(
-                  "flex items-start gap-3 p-3 rounded-lg border transition-colors cursor-pointer",
+                  "flex items-start gap-3 p-3 rounded-lg border transition-colors cursor-pointer h-full",
                   table.selected 
                     ? "border-primary/50 bg-primary/5" 
                     : "border-border hover:border-primary/30"
@@ -332,19 +513,52 @@ export function ConnectionView() {
                     <span className="font-mono text-sm font-medium text-foreground">{table.name}</span>
                     <Badge variant="outline" className="text-[10px]">{table.schema}</Badge>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1">{table.description}</p>
-                  <p className="text-[10px] text-muted-foreground mt-1">{table.rowCount} rows</p>
+                  {table.description && (
+                    <p className="text-xs text-muted-foreground mt-1">{table.description}</p>
+                  )}
+                  {table.rowCount && (
+                    <p className="text-[10px] text-muted-foreground mt-1">{table.rowCount} rows</p>
+                  )}
                 </div>
               </div>
             ))}
           </div>
+          {totalPages > 1 && (
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTablePage(prev => Math.max(1, prev - 1))}
+                disabled={tablePage <= 1}
+              >
+                이전
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTablePage(prev => Math.min(totalPages, prev + 1))}
+                disabled={tablePage >= totalPages}
+              >
+                다음
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
       {/* Save Button */}
-      <div className="flex justify-end gap-3">
-        <Button variant="outline">취소</Button>
-        <Button>설정 저장</Button>
+      <div className="flex items-center justify-end gap-3">
+        {(saveMessage || saveError) && (
+          <span className={cn("text-xs mr-auto", saveError ? "text-destructive" : "text-primary")}>
+            {saveError ?? saveMessage}
+          </span>
+        )}
+        <Button variant="outline" onClick={handleResetSettings} disabled={isSaving}>
+          취소
+        </Button>
+        <Button onClick={handleSaveSettings} disabled={isSaving}>
+          {isSaving ? "저장 중..." : "설정 저장"}
+        </Button>
       </div>
     </div>
   )

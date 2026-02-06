@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -10,7 +10,6 @@ import {
   Clock, 
   User,
   Search,
-  Filter,
   Download,
   ChevronDown,
   ChevronRight,
@@ -29,6 +28,12 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -39,6 +44,7 @@ import {
 interface AuditLog {
   id: string
   timestamp: string
+  ts?: number
   user: {
     name: string
     role: string
@@ -60,124 +66,67 @@ interface AuditLog {
   }
 }
 
-const mockAuditLogs: AuditLog[] = [
-  {
-    id: "1",
-    timestamp: "2024-12-15 14:32:15",
-    user: { name: "김연구원", role: "연구원" },
-    query: {
-      original: "65세 이상 심부전 환자 코호트 만들어줘, 생존 곡선 그려줘",
-      sql: `SELECT DISTINCT p.subject_id, p.gender,
-  EXTRACT(YEAR FROM a.admittime) - p.anchor_year + p.anchor_age AS age
-FROM mimiciv_hosp.patients p
-INNER JOIN mimiciv_hosp.admissions a ON p.subject_id = a.subject_id
-WHERE d.icd_code IN ('I50', 'I500', 'I501', 'I509')
-  AND age >= 65
-LIMIT 100;`
-    },
-    appliedTerms: [
-      { term: "심부전", version: "v2.1" },
-      { term: "노인", version: "v1.3" }
-    ],
-    appliedMetrics: [
-      { name: "생존율", version: "v1.0" }
-    ],
-    execution: {
-      duration: "2.34초",
-      rowsReturned: 1247,
-      status: "success"
-    },
-    resultSnapshot: {
-      summary: "65세 이상 심부전 환자 1,247명 추출, 중앙 생존시간 82일",
-      downloadUrl: "#"
-    }
-  },
-  {
-    id: "2",
-    timestamp: "2024-12-15 11:45:22",
-    user: { name: "박교수", role: "관리자" },
-    query: {
-      original: "지난 달 재입원율 15일 기준으로 계산해줘",
-      sql: `SELECT COUNT(CASE WHEN readmit_days <= 15 THEN 1 END) * 100.0 / COUNT(*)
-FROM admissions
-WHERE dischtime >= '2024-11-01';`
-    },
-    appliedTerms: [
-      { term: "재입원", version: "v1.5" }
-    ],
-    appliedMetrics: [
-      { name: "재입원율", version: "v2.0" }
-    ],
-    execution: {
-      duration: "1.12초",
-      rowsReturned: 1,
-      status: "success"
-    },
-    resultSnapshot: {
-      summary: "15일 기준 재입원율: 8.7%",
-      downloadUrl: "#"
-    }
-  },
-  {
-    id: "3",
-    timestamp: "2024-12-14 16:20:08",
-    user: { name: "이의사", role: "연구원" },
-    query: {
-      original: "당뇨 환자 중 ICU 입실한 환자 목록",
-      sql: `SELECT p.*, i.intime, i.outtime
-FROM patients p
-INNER JOIN icustays i ON p.subject_id = i.subject_id
-WHERE diagnosis LIKE '%diabetes%';`
-    },
-    appliedTerms: [
-      { term: "당뇨", version: "v1.2" }
-    ],
-    appliedMetrics: [],
-    execution: {
-      duration: "3.56초",
-      rowsReturned: 4521,
-      status: "warning"
-    },
-    resultSnapshot: {
-      summary: "당뇨 환자 ICU 입실 4,521건 (결과 제한 적용)",
-      downloadUrl: "#"
-    }
-  },
-  {
-    id: "4",
-    timestamp: "2024-12-14 09:15:33",
-    user: { name: "최분석가", role: "연구원" },
-    query: {
-      original: "패혈증 환자 사망률 분석",
-      sql: `SELECT 
-  COUNT(CASE WHEN dod IS NOT NULL THEN 1 END) * 100.0 / COUNT(*) as mortality_rate
-FROM patients p
-WHERE diagnosis_code LIKE 'A41%';`
-    },
-    appliedTerms: [
-      { term: "패혈증", version: "v1.0" }
-    ],
-    appliedMetrics: [
-      { name: "사망률", version: "v1.1" }
-    ],
-    execution: {
-      duration: "1.89초",
-      rowsReturned: 1,
-      status: "success"
-    },
-    resultSnapshot: {
-      summary: "패혈증 환자 사망률: 31.2%",
-      downloadUrl: "#"
-    }
-  },
-]
+interface AuditStats {
+  total: number
+  today: number
+  active_users: number
+  success_rate: number
+}
 
 export function AuditView() {
-  const [logs, setLogs] = useState(mockAuditLogs)
+  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
+  const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 15000) => {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      return await fetch(input, { ...init, signal: controller.signal })
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  const [logs, setLogs] = useState<AuditLog[]>([])
+  const [stats, setStats] = useState<AuditStats | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState("")
   const [expandedLogs, setExpandedLogs] = useState<string[]>([])
   const [dateFilter, setDateFilter] = useState("all")
   const [userFilter, setUserFilter] = useState("all")
+
+  const readError = async (res: Response) => {
+    const text = await res.text()
+    try {
+      const json = JSON.parse(text)
+      if (json?.detail) return String(json.detail)
+    } catch {}
+    return text || `${res.status} ${res.statusText}`
+  }
+
+  const fetchLogs = async () => {
+    setIsLoading(true)
+    setLoadError(null)
+    try {
+      const res = await fetchWithTimeout(apiUrl("/audit/logs?limit=500"))
+      if (!res.ok) {
+        throw new Error(await readError(res))
+      }
+      const data = await res.json()
+      setLogs(Array.isArray(data?.logs) ? data.logs : [])
+      setStats(data?.stats || null)
+    } catch (err: any) {
+      setLoadError(err?.message || "감사 로그를 불러오지 못했습니다.")
+      setLogs([])
+      setStats(null)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchLogs()
+  }, [])
 
   const toggleExpand = (id: string) => {
     setExpandedLogs(prev => 
@@ -198,11 +147,139 @@ export function AuditView() {
     }
   }
 
+  const resolveTimestampMs = (log: AuditLog) => {
+    if (log.ts) return log.ts * 1000
+    if (!log.timestamp) return null
+    const parsed = Date.parse(log.timestamp.replace(" ", "T"))
+    return Number.isNaN(parsed) ? null : parsed
+  }
+
   const filteredLogs = logs.filter(log => {
-    const matchesSearch = log.query.original.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         log.user.name.toLowerCase().includes(searchTerm.toLowerCase())
-    return matchesSearch
+    const search = searchTerm.trim().toLowerCase()
+    const matchesSearch = !search ||
+      log.query.original.toLowerCase().includes(search) ||
+      log.query.sql.toLowerCase().includes(search) ||
+      log.user.name.toLowerCase().includes(search)
+
+    const role = (log.user.role || "").toLowerCase()
+    const matchesUser = userFilter === "all" ||
+      (userFilter === "researcher" && (role.includes("연구원") || role.includes("researcher"))) ||
+      (userFilter === "admin" && (role.includes("관리자") || role.includes("admin")))
+
+    const tsMs = resolveTimestampMs(log)
+    const now = Date.now()
+    const matchesDate = (() => {
+      if (dateFilter === "all") return true
+      if (!tsMs) return true
+      if (dateFilter === "today") {
+        const logDate = new Date(tsMs)
+        const nowDate = new Date(now)
+        return logDate.toDateString() === nowDate.toDateString()
+      }
+      if (dateFilter === "week") {
+        return tsMs >= now - 7 * 24 * 60 * 60 * 1000
+      }
+      if (dateFilter === "month") {
+        return tsMs >= now - 30 * 24 * 60 * 60 * 1000
+      }
+      return true
+    })()
+
+    return matchesSearch && matchesUser && matchesDate
   })
+
+  const derivedStats = (() => {
+    if (stats) return stats
+    const total = logs.length
+    const todayDate = new Date().toDateString()
+    let today = 0
+    let success = 0
+    const users = new Set<string>()
+    for (const log of logs) {
+      const tsMs = resolveTimestampMs(log)
+      if (tsMs && new Date(tsMs).toDateString() === todayDate) {
+        today += 1
+      }
+      if (log.execution.status === "success") {
+        success += 1
+      }
+      if (log.user?.name) {
+        users.add(log.user.name)
+      }
+    }
+    return {
+      total,
+      today,
+      active_users: users.size,
+      success_rate: total ? Math.round((success / total) * 1000) / 10 : 0,
+    }
+  })()
+
+  const escapeCsvCell = (value: string | number | null | undefined) => {
+    const text = value == null ? "" : String(value)
+    if (/[",\n]/.test(text)) {
+      return `"${text.replace(/"/g, '""')}"`
+    }
+    return text
+  }
+
+  const buildCsv = (items: AuditLog[]) => {
+    const header = [
+      "timestamp",
+      "user",
+      "role",
+      "question",
+      "sql",
+      "status",
+      "rows",
+      "duration",
+      "terms",
+      "metrics",
+      "summary",
+    ]
+    const rows = items.map((log) => {
+      const terms = log.appliedTerms
+        .map((term) => (term.version ? `${term.term}(${term.version})` : term.term))
+        .join("; ")
+      const metrics = log.appliedMetrics
+        .map((metric) => (metric.version ? `${metric.name}(${metric.version})` : metric.name))
+        .join("; ")
+      return [
+        log.timestamp,
+        log.user.name,
+        log.user.role,
+        log.query.original,
+        log.query.sql,
+        log.execution.status,
+        log.execution.rowsReturned,
+        log.execution.duration,
+        terms,
+        metrics,
+        log.resultSnapshot?.summary || "",
+      ]
+        .map(escapeCsvCell)
+        .join(",")
+    })
+    return `${header.join(",")}\n${rows.join("\n")}`
+  }
+
+  const buildJsonl = (items: AuditLog[]) => {
+    return items.map((log) => JSON.stringify(log)).join("\n")
+  }
+
+  const handleExport = (format: "csv" | "jsonl") => {
+    if (!filteredLogs.length) return
+    const content = format === "csv" ? buildCsv(filteredLogs) : buildJsonl(filteredLogs)
+    const mime = format === "csv" ? "text/csv;charset=utf-8;" : "application/jsonl;charset=utf-8;"
+    const blob = new Blob([content], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `audit-logs-${timestamp}.${format}`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
@@ -210,11 +287,30 @@ export function AuditView() {
         <div>
           <h2 className="text-xl sm:text-2xl font-bold text-foreground">감사 로그 (Audit Trail)</h2>
           <p className="text-sm text-muted-foreground mt-1">모든 쿼리 실행 기록과 의사결정 증적을 관리합니다</p>
+          {loadError && (
+            <p className="text-xs text-destructive mt-1">{loadError}</p>
+          )}
+          {!loadError && isLoading && (
+            <p className="text-xs text-muted-foreground mt-1">감사 로그를 불러오는 중...</p>
+          )}
         </div>
-        <Button variant="outline" className="gap-2 bg-transparent w-full sm:w-auto">
-          <Download className="w-4 h-4" />
-          로그 내보내기
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="outline"
+              className="gap-2 bg-transparent w-full sm:w-auto"
+              disabled={isLoading || filteredLogs.length === 0}
+            >
+              <Download className="w-4 h-4" />
+              로그 내보내기
+              <ChevronDown className="w-4 h-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => handleExport("csv")}>CSV</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => handleExport("jsonl")}>JSONL</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/* Filters */}
@@ -262,10 +358,10 @@ export function AuditView() {
       {/* Summary Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {[
-          { label: "총 쿼리 수", value: "1,247", icon: Database },
-          { label: "오늘 실행", value: "23", icon: Clock },
-          { label: "활성 사용자", value: "12", icon: User },
-          { label: "성공률", value: "98.2%", icon: CheckCircle2 },
+          { label: "총 쿼리 수", value: derivedStats.total.toLocaleString(), icon: Database },
+          { label: "오늘 실행", value: derivedStats.today.toLocaleString(), icon: Clock },
+          { label: "활성 사용자", value: derivedStats.active_users.toLocaleString(), icon: User },
+          { label: "성공률", value: `${derivedStats.success_rate.toFixed(1)}%`, icon: CheckCircle2 },
         ].map((stat) => (
           <Card key={stat.label}>
             <CardContent className="py-4">
@@ -293,115 +389,121 @@ export function AuditView() {
           <CardDescription>각 로그를 클릭하여 상세 정보를 확인하세요</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {filteredLogs.map((log) => (
-            <Collapsible 
-              key={log.id} 
-              open={expandedLogs.includes(log.id)}
-              onOpenChange={() => toggleExpand(log.id)}
-            >
-              <CollapsibleTrigger asChild>
-                <div className={cn(
-                  "flex items-center gap-4 p-4 rounded-lg border border-border cursor-pointer transition-colors hover:border-primary/30",
-                  expandedLogs.includes(log.id) && "bg-secondary/30 border-primary/30"
-                )}>
-                  {expandedLogs.includes(log.id) ? (
-                    <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />
-                  ) : (
-                    <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
-                  )}
-                  
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-sm font-medium text-foreground truncate">
-                        {log.query.original}
-                      </span>
-                      {getStatusBadge(log.execution.status)}
-                    </div>
-                    <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        {log.timestamp}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <User className="w-3 h-3" />
-                        {log.user.name} ({log.user.role})
-                      </span>
-                      <span>{log.execution.rowsReturned.toLocaleString()} rows</span>
-                      <span>{log.execution.duration}</span>
-                    </div>
-                  </div>
-                </div>
-              </CollapsibleTrigger>
-
-              <CollapsibleContent>
-                <div className="ml-8 mt-2 p-4 rounded-lg bg-secondary/20 border border-border space-y-4">
-                  {/* Applied Terms & Metrics */}
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div>
-                      <div className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1">
-                        <BookOpen className="w-3 h-3" />
-                        적용된 용어
+          {filteredLogs.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              {isLoading ? "감사 로그를 불러오는 중..." : "표시할 감사 로그가 없습니다."}
+            </div>
+          ) : (
+            filteredLogs.map((log) => (
+              <Collapsible 
+                key={log.id} 
+                open={expandedLogs.includes(log.id)}
+                onOpenChange={() => toggleExpand(log.id)}
+              >
+                <CollapsibleTrigger asChild>
+                  <div className={cn(
+                    "flex items-center gap-4 p-4 rounded-lg border border-border cursor-pointer transition-colors hover:border-primary/30",
+                    expandedLogs.includes(log.id) && "bg-secondary/30 border-primary/30"
+                  )}>
+                    {expandedLogs.includes(log.id) ? (
+                      <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                    )}
+                    
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-medium text-foreground truncate">
+                          {log.query.original}
+                        </span>
+                        {getStatusBadge(log.execution.status)}
                       </div>
-                      <div className="flex flex-wrap gap-1">
-                        {log.appliedTerms.map((term, idx) => (
-                          <Badge key={idx} variant="outline" className="text-[10px]">
-                            {term.term} <span className="text-muted-foreground ml-1">{term.version}</span>
-                          </Badge>
-                        ))}
-                        {log.appliedTerms.length === 0 && (
-                          <span className="text-xs text-muted-foreground">없음</span>
-                        )}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1">
-                        <Shield className="w-3 h-3" />
-                        적용된 지표
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {log.appliedMetrics.map((metric, idx) => (
-                          <Badge key={idx} variant="outline" className="text-[10px]">
-                            {metric.name} <span className="text-muted-foreground ml-1">{metric.version}</span>
-                          </Badge>
-                        ))}
-                        {log.appliedMetrics.length === 0 && (
-                          <span className="text-xs text-muted-foreground">없음</span>
-                        )}
+                      <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {log.timestamp}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <User className="w-3 h-3" />
+                          {log.user.name} ({log.user.role})
+                        </span>
+                        <span>{log.execution.rowsReturned.toLocaleString()} rows</span>
+                        <span>{log.execution.duration}</span>
                       </div>
                     </div>
                   </div>
+                </CollapsibleTrigger>
 
-                  {/* SQL Query */}
-                  <div>
-                    <div className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1">
-                      <Code className="w-3 h-3" />
-                      실행된 SQL
+                <CollapsibleContent>
+                  <div className="ml-8 mt-2 p-4 rounded-lg bg-secondary/20 border border-border space-y-4">
+                    {/* Applied Terms & Metrics */}
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1">
+                          <BookOpen className="w-3 h-3" />
+                          적용된 용어
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {log.appliedTerms.map((term, idx) => (
+                            <Badge key={idx} variant="outline" className="text-[10px]">
+                              {term.term} <span className="text-muted-foreground ml-1">{term.version}</span>
+                            </Badge>
+                          ))}
+                          {log.appliedTerms.length === 0 && (
+                            <span className="text-xs text-muted-foreground">없음</span>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1">
+                          <Shield className="w-3 h-3" />
+                          적용된 지표
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {log.appliedMetrics.map((metric, idx) => (
+                            <Badge key={idx} variant="outline" className="text-[10px]">
+                              {metric.name} <span className="text-muted-foreground ml-1">{metric.version}</span>
+                            </Badge>
+                          ))}
+                          {log.appliedMetrics.length === 0 && (
+                            <span className="text-xs text-muted-foreground">없음</span>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                    <pre className="p-3 rounded-lg bg-background text-[11px] font-mono text-foreground overflow-x-auto whitespace-pre-wrap border border-border">
-                      {log.query.sql}
-                    </pre>
-                  </div>
 
-                  {/* Result Snapshot */}
-                  {log.resultSnapshot && (
+                    {/* SQL Query */}
                     <div>
                       <div className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1">
-                        <Eye className="w-3 h-3" />
-                        결과 스냅샷
+                        <Code className="w-3 h-3" />
+                        실행된 SQL
                       </div>
-                      <div className="flex items-center justify-between p-3 rounded-lg bg-background border border-border">
-                        <span className="text-sm text-foreground">{log.resultSnapshot.summary}</span>
-                        <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs">
-                          <Download className="w-3 h-3" />
-                          다운로드
-                        </Button>
-                      </div>
+                      <pre className="p-3 rounded-lg bg-background text-[11px] font-mono text-foreground overflow-x-auto whitespace-pre-wrap border border-border">
+                        {log.query.sql}
+                      </pre>
                     </div>
-                  )}
-                </div>
-              </CollapsibleContent>
-            </Collapsible>
-          ))}
+
+                    {/* Result Snapshot */}
+                    {log.resultSnapshot && (
+                      <div>
+                        <div className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1">
+                          <Eye className="w-3 h-3" />
+                          결과 스냅샷
+                        </div>
+                        <div className="flex items-center justify-between p-3 rounded-lg bg-background border border-border">
+                          <span className="text-sm text-foreground">{log.resultSnapshot.summary}</span>
+                          <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs">
+                            <Download className="w-3 h-3" />
+                            다운로드
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            ))
+          )}
         </CardContent>
       </Card>
     </div>

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -25,7 +25,9 @@ import {
   FileText,
   RefreshCw,
   Copy,
-  Download
+  Download,
+  Trash2,
+  BookmarkPlus
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { SurvivalChart } from "@/components/survival-chart"
@@ -35,6 +37,13 @@ interface ChatMessage {
   role: "user" | "assistant"
   content: string
   timestamp: Date
+}
+
+interface PersistedChatMessage {
+  id: string
+  role: "user" | "assistant"
+  content: string
+  timestamp: string
 }
 
 interface PreviewData {
@@ -70,9 +79,90 @@ interface RunResponse {
   result: PreviewData
 }
 
+interface PersistedQueryState {
+  query: string
+  lastQuestion: string
+  messages: PersistedChatMessage[]
+  response: OneShotResponse | null
+  runResult: RunResponse | null
+  suggestedQuestions: string[]
+  showResults: boolean
+  editedSql: string
+  isEditing: boolean
+  isTechnicalMode: boolean
+}
+
+const MAX_PERSIST_ROWS = 200
+
+const trimPreview = (preview?: PreviewData): PreviewData | undefined => {
+  if (!preview) return preview
+  const rows = Array.isArray(preview.rows) ? preview.rows : []
+  const trimmedRows = rows.slice(0, MAX_PERSIST_ROWS)
+  return {
+    ...preview,
+    rows: trimmedRows,
+    row_count: trimmedRows.length,
+  }
+}
+
+const sanitizeRunResult = (runResult: RunResponse | null): RunResponse | null => {
+  if (!runResult) return null
+  return {
+    ...runResult,
+    result: trimPreview(runResult.result) || runResult.result,
+  }
+}
+
+const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | null => {
+  if (!response) return null
+  const payload = response.payload || ({} as OneShotPayload)
+  const result = payload.result
+    ? {
+        ...payload.result,
+        preview: trimPreview(payload.result.preview),
+      }
+    : undefined
+  const draft = payload.draft ? { final_sql: payload.draft.final_sql } : undefined
+  const final = payload.final
+    ? {
+        final_sql: payload.final.final_sql,
+        warnings: payload.final.warnings,
+        risk_score: payload.final.risk_score,
+        used_tables: payload.final.used_tables,
+      }
+    : undefined
+  return {
+    qid: response.qid,
+    payload: {
+      mode: payload.mode,
+      question: payload.question,
+      result,
+      risk: payload.risk,
+      draft,
+      final,
+    },
+  }
+}
+
+const serializeMessages = (messages: ChatMessage[]): PersistedChatMessage[] =>
+  messages.map((message) => ({
+    ...message,
+    timestamp: message.timestamp.toISOString(),
+  }))
+
+const deserializeMessages = (messages: PersistedChatMessage[]): ChatMessage[] =>
+  messages.map((message) => {
+    const parsed = new Date(message.timestamp)
+    return {
+      ...message,
+      timestamp: Number.isNaN(parsed.getTime()) ? new Date() : parsed,
+    }
+  })
+
 export function QueryView() {
   const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const chatUser = "김연구원"
   const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 45000) => {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -92,6 +182,8 @@ export function QueryView() {
   const [response, setResponse] = useState<OneShotResponse | null>(null)
   const [runResult, setRunResult] = useState<RunResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [boardSaving, setBoardSaving] = useState(false)
+  const [boardMessage, setBoardMessage] = useState<string | null>(null)
   const [lastQuestion, setLastQuestion] = useState<string>("")
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])
   const [quickQuestions, setQuickQuestions] = useState<string[]>([
@@ -99,6 +191,8 @@ export function QueryView() {
     "가장 흔한 진단 코드는 무엇인가요?",
     "ICU 재원일수가 가장 긴 환자는 누구인가요?",
   ])
+  const [isHydrated, setIsHydrated] = useState(false)
+  const saveTimerRef = useRef<number | null>(null)
 
   const payload = response?.payload
   const mode = payload?.mode
@@ -137,6 +231,8 @@ export function QueryView() {
   const source = demoResult?.source
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
+  const hasConversation =
+    messages.length > 0 || Boolean(response) || Boolean(runResult) || query.trim().length > 0
   const appendSuggestions = (base: string) => base
 
   const normalizeColumn = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "")
@@ -269,6 +365,81 @@ export function QueryView() {
   }
 
   useEffect(() => {
+    const loadChatState = async () => {
+      try {
+        const res = await fetchWithTimeout(
+          apiUrl(`/chat/history?user=${encodeURIComponent(chatUser)}`),
+          {},
+          12000
+        )
+        if (!res.ok) return
+        const data = await res.json()
+        const state = data?.state as Partial<PersistedQueryState> | null
+        if (!state) return
+        if (typeof state.query === "string") setQuery(state.query)
+        if (Array.isArray(state.messages)) setMessages(deserializeMessages(state.messages))
+        if (state.response) setResponse(state.response)
+        if (state.runResult) setRunResult(state.runResult)
+        if (typeof state.lastQuestion === "string") setLastQuestion(state.lastQuestion)
+        if (Array.isArray(state.suggestedQuestions)) setSuggestedQuestions(state.suggestedQuestions)
+        if (typeof state.showResults === "boolean") setShowResults(state.showResults)
+        if (typeof state.editedSql === "string") setEditedSql(state.editedSql)
+        if (typeof state.isEditing === "boolean") setIsEditing(state.isEditing)
+        if (typeof state.isTechnicalMode === "boolean") setIsTechnicalMode(state.isTechnicalMode)
+      } catch {
+        // ignore hydration errors
+      } finally {
+        setIsHydrated(true)
+      }
+    }
+    loadChatState()
+  }, [apiBaseUrl])
+
+  useEffect(() => {
+    if (!isHydrated) return
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current)
+    }
+    const state: PersistedQueryState = {
+      query,
+      lastQuestion,
+      messages: serializeMessages(messages),
+      response: sanitizeResponse(response),
+      runResult: sanitizeRunResult(runResult),
+      suggestedQuestions,
+      showResults,
+      editedSql,
+      isEditing,
+      isTechnicalMode,
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      fetch(apiUrl("/chat/history"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: chatUser, state })
+      }).catch(() => {})
+    }, 600)
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current)
+      }
+    }
+  }, [
+    isHydrated,
+    query,
+    lastQuestion,
+    messages,
+    response,
+    runResult,
+    suggestedQuestions,
+    showResults,
+    editedSql,
+    isEditing,
+    isTechnicalMode,
+    apiBaseUrl,
+  ])
+
+  useEffect(() => {
     const loadQuestions = async () => {
       try {
         const res = await fetchWithTimeout(apiUrl("/query/demo/questions"), {}, 15000)
@@ -288,6 +459,7 @@ export function QueryView() {
 
     setIsLoading(true)
     setError(null)
+    setBoardMessage(null)
     setResponse(null)
     setRunResult(null)
     setEditedSql("")
@@ -307,7 +479,11 @@ export function QueryView() {
       const res = await fetchWithTimeout(apiUrl("/query/oneshot"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: trimmed })
+        body: JSON.stringify({
+          question: trimmed,
+          user_name: chatUser,
+          user_role: "연구원",
+        })
       })
       if (!res.ok) {
         throw new Error(await readError(res))
@@ -360,17 +536,79 @@ export function QueryView() {
     await runQuery(text)
   }
 
+  const deriveDashboardCategory = (text: string) => {
+    const normalized = text.toLowerCase()
+    if (normalized.includes("생존") || normalized.includes("survival")) return "생존분석"
+    if (normalized.includes("재입원") || normalized.includes("readmission")) return "재입원"
+    if (normalized.includes("icu")) return "ICU"
+    if (normalized.includes("응급") || normalized.includes("emergency")) return "응급실"
+    if (normalized.includes("사망") || normalized.includes("mortality")) return "사망률"
+    return "전체"
+  }
+
+  const handleSaveToDashboard = async () => {
+    if (!displaySql && !currentSql) {
+      setBoardMessage("저장할 SQL이 없습니다.")
+      return
+    }
+    const title = (lastQuestion || query || "저장된 쿼리").trim() || "저장된 쿼리"
+    const category = deriveDashboardCategory(title)
+    const metrics = [
+      { label: "행 수", value: String(previewRowCount ?? 0) },
+      { label: "컬럼 수", value: String(previewColumns.length) },
+      { label: "ROW CAP", value: previewRowCap != null ? String(previewRowCap) : "-" },
+    ]
+    const newEntry = {
+      id: `dashboard-${Date.now()}`,
+      title,
+      description: summary || "쿼리 결과 저장",
+      query: displaySql || currentSql,
+      lastRun: "방금 저장",
+      isPinned: true,
+      category,
+      metrics,
+      chartType: "bar",
+    }
+    setBoardSaving(true)
+    setBoardMessage(null)
+    try {
+      const res = await fetchWithTimeout(apiUrl("/dashboard/queries"), {}, 15000)
+      const payload = res.ok ? await res.json() : null
+      const existing = Array.isArray(payload?.queries) ? payload.queries : []
+      const next = [newEntry, ...existing]
+      const saveRes = await fetchWithTimeout(apiUrl("/dashboard/queries"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ queries: next }),
+      }, 15000)
+      if (!saveRes.ok) {
+        throw new Error("save failed")
+      }
+      setBoardMessage("결과 보드에 저장했습니다.")
+    } catch (err) {
+      setBoardMessage("결과 보드 저장에 실패했습니다.")
+    } finally {
+      setBoardSaving(false)
+    }
+  }
+
   const handleExecuteEdited = async (overrideSql?: string) => {
     if (!response || mode !== "advanced") return
     setIsLoading(true)
     setError(null)
+    setBoardMessage(null)
     try {
       const sqlToRun = (overrideSql || editedSql || currentSql).trim()
-      const body: Record<string, any> = { user_ack: true }
+      const body: Record<string, any> = {
+        user_ack: true,
+        user_name: chatUser,
+        user_role: "연구원",
+      }
+      if (response.qid) {
+        body.qid = response.qid
+      }
       if (sqlToRun) {
         body.sql = sqlToRun
-      } else if (response.qid) {
-        body.qid = response.qid
       }
       const res = await fetchWithTimeout(apiUrl("/query/run"), {
         method: "POST",
@@ -451,6 +689,24 @@ export function QueryView() {
     URL.revokeObjectURL(url)
   }
 
+  const handleResetConversation = () => {
+    setMessages([])
+    setResponse(null)
+    setRunResult(null)
+    setShowResults(false)
+    setQuery("")
+    setEditedSql("")
+    setIsEditing(false)
+    setLastQuestion("")
+    setSuggestedQuestions([])
+    setError(null)
+    fetch(apiUrl("/chat/history"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user: chatUser, state: null })
+    }).catch(() => {})
+  }
+
   const validation = (() => {
     if (!payload) return null
     if (mode === "demo") {
@@ -508,6 +764,16 @@ export function QueryView() {
                 onCheckedChange={setIsTechnicalMode}
               />
             </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1"
+              onClick={handleResetConversation}
+              disabled={isLoading || !hasConversation}
+            >
+              <Trash2 className="w-3 h-3" />
+              대화 초기화
+            </Button>
           </div>
         </div>
       </div>
@@ -795,6 +1061,16 @@ export function QueryView() {
                           </Badge>
                         )}
                         <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 gap-1"
+                          onClick={handleSaveToDashboard}
+                          disabled={boardSaving || (!displaySql && !currentSql)}
+                        >
+                          <BookmarkPlus className="w-3 h-3" />
+                          결과 보드에 저장
+                        </Button>
+                        <Button
                           variant="ghost"
                           size="sm"
                           className="h-7 gap-1"
@@ -808,6 +1084,11 @@ export function QueryView() {
                     </div>
                   </CardHeader>
                   <CardContent>
+                    {boardMessage && (
+                      <div className="mb-3 rounded-lg border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
+                        {boardMessage}
+                      </div>
+                    )}
                     {error && (
                       <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                         {error}

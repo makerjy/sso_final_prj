@@ -1,8 +1,6 @@
 "use client"
 
-import React from "react"
-
-import { useState } from "react"
+import { type ReactNode, useEffect, useRef, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -118,14 +116,148 @@ const savedQueries: SavedQuery[] = [
 const categories = ["전체", "생존분석", "재입원", "ICU", "응급실", "사망률"]
 
 export function DashboardView() {
-  const [queries, setQueries] = useState(savedQueries)
+  const [queries, setQueries] = useState<SavedQuery[]>([])
   const [searchTerm, setSearchTerm] = useState("")
   const [selectedCategory, setSelectedCategory] = useState("전체")
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const saveTimer = useRef<number | null>(null)
+
+  const persistQueries = async (next: SavedQuery[], silent = false) => {
+    if (!silent) {
+      setSaving(true)
+    }
+    try {
+      const res = await fetch("/dashboard/queries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ queries: next }),
+      })
+      if (!res.ok && !silent) {
+        setError("결과 보드 저장에 실패했습니다.")
+      }
+    } catch (err) {
+      if (!silent) {
+        setError("결과 보드 저장에 실패했습니다.")
+      }
+    } finally {
+      if (!silent) {
+        setSaving(false)
+      }
+    }
+  }
+
+  const schedulePersist = (next: SavedQuery[]) => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current)
+    }
+    saveTimer.current = window.setTimeout(() => {
+      persistQueries(next, true)
+    }, 400)
+  }
+
+  const loadQueries = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch("/dashboard/queries")
+      if (!res.ok) {
+        throw new Error("Failed to fetch dashboard queries.")
+      }
+      const payload = await res.json()
+      const remote = Array.isArray(payload?.queries) ? payload.queries : []
+      if (remote.length > 0) {
+        setQueries(remote)
+      } else {
+        setQueries(savedQueries)
+        if (!payload?.detail) {
+          persistQueries(savedQueries, true)
+        }
+      }
+    } catch (err) {
+      setQueries(savedQueries)
+      setError("결과 보드를 불러오지 못했습니다.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadQueries()
+    return () => {
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current)
+      }
+    }
+  }, [])
 
   const togglePin = (id: string) => {
-    setQueries(prev => prev.map(q => 
-      q.id === id ? { ...q, isPinned: !q.isPinned } : q
-    ))
+    setQueries(prev => {
+      const next = prev.map(q => q.id === id ? { ...q, isPinned: !q.isPinned } : q)
+      schedulePersist(next)
+      return next
+    })
+  }
+
+  const handleDelete = (id: string) => {
+    setQueries(prev => {
+      const next = prev.filter(q => q.id !== id)
+      schedulePersist(next)
+      return next
+    })
+  }
+
+  const handleDuplicate = (id: string) => {
+    setQueries(prev => {
+      const target = prev.find(q => q.id === id)
+      if (!target) {
+        return prev
+      }
+      const copy = {
+        ...target,
+        id: `copy-${Date.now()}`,
+        title: `${target.title} (복제)`,
+        isPinned: false,
+        lastRun: "방금 생성",
+      }
+      const next = [copy, ...prev]
+      schedulePersist(next)
+      return next
+    })
+  }
+
+  const handleAddQuery = () => {
+    setQueries(prev => {
+      const next = [
+        {
+          id: `new-${Date.now()}`,
+          title: "새 쿼리",
+          description: "설명을 입력하세요",
+          query: "",
+          lastRun: "방금 생성",
+          isPinned: true,
+          category: "전체",
+          metrics: [
+            { label: "지표 1", value: "-" },
+            { label: "지표 2", value: "-" },
+            { label: "지표 3", value: "-" },
+          ],
+          chartType: "bar" as const,
+        },
+        ...prev,
+      ]
+      schedulePersist(next)
+      return next
+    })
+  }
+
+  const handleShare = async (query: SavedQuery) => {
+    try {
+      await navigator.clipboard.writeText(query.query || query.title)
+    } catch (err) {
+      setError("클립보드 복사에 실패했습니다.")
+    }
   }
 
   const filteredQueries = queries.filter(q => {
@@ -148,21 +280,27 @@ export function DashboardView() {
   }
 
   return (
-    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 w-full max-w-none">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h2 className="text-xl sm:text-2xl font-bold text-foreground">결과 보드</h2>
           <p className="text-sm text-muted-foreground mt-1">자주 사용하는 쿼리와 분석 결과를 관리합니다</p>
         </div>
-        <Button className="gap-2 w-full sm:w-auto">
+        <Button className="gap-2 w-full sm:w-auto" onClick={handleAddQuery} disabled={loading || saving}>
           <Plus className="w-4 h-4" />
           새 쿼리 추가
         </Button>
       </div>
+      {error && (
+        <div className="text-sm text-destructive">{error}</div>
+      )}
+      {saving && (
+        <div className="text-xs text-muted-foreground">저장 중...</div>
+      )}
 
       {/* Search and Filters */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 sm:gap-4">
-        <div className="relative flex-1 sm:max-w-md">
+        <div className="relative flex-1 w-full">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <Input 
             placeholder="쿼리 검색..." 
@@ -195,7 +333,15 @@ export function DashboardView() {
           </h3>
           <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
             {pinnedQueries.map((query) => (
-              <QueryCard key={query.id} query={query} onTogglePin={togglePin} getChartIcon={getChartIcon} />
+              <QueryCard
+                key={query.id}
+                query={query}
+                onTogglePin={togglePin}
+                onDelete={handleDelete}
+                onDuplicate={handleDuplicate}
+                onShare={handleShare}
+                getChartIcon={getChartIcon}
+              />
             ))}
           </div>
         </div>
@@ -207,7 +353,15 @@ export function DashboardView() {
           <h3 className="text-sm font-medium text-muted-foreground mb-3">기타 쿼리</h3>
           <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
             {otherQueries.map((query) => (
-              <QueryCard key={query.id} query={query} onTogglePin={togglePin} getChartIcon={getChartIcon} />
+              <QueryCard
+                key={query.id}
+                query={query}
+                onTogglePin={togglePin}
+                onDelete={handleDelete}
+                onDuplicate={handleDuplicate}
+                onShare={handleShare}
+                getChartIcon={getChartIcon}
+              />
             ))}
           </div>
         </div>
@@ -228,10 +382,13 @@ export function DashboardView() {
 interface QueryCardProps {
   query: SavedQuery
   onTogglePin: (id: string) => void
-  getChartIcon: (type: string) => React.ReactNode
+  onDelete: (id: string) => void
+  onDuplicate: (id: string) => void
+  onShare: (query: SavedQuery) => void
+  getChartIcon: (type: string) => ReactNode
 }
 
-function QueryCard({ query, onTogglePin, getChartIcon }: QueryCardProps) {
+function QueryCard({ query, onTogglePin, onDelete, onDuplicate, onShare, getChartIcon }: QueryCardProps) {
   return (
     <Card className={cn(
       "hover:border-primary/30 transition-colors",
@@ -259,11 +416,11 @@ function QueryCard({ query, onTogglePin, getChartIcon }: QueryCardProps) {
                 {query.isPinned ? <StarOff className="w-4 h-4 mr-2" /> : <Star className="w-4 h-4 mr-2" />}
                 {query.isPinned ? "고정 해제" : "고정"}
               </DropdownMenuItem>
-              <DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onShare(query)}>
                 <Share2 className="w-4 h-4 mr-2" />
                 공유
               </DropdownMenuItem>
-              <DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onDuplicate(query.id)}>
                 <Copy className="w-4 h-4 mr-2" />
                 복제
               </DropdownMenuItem>
@@ -272,7 +429,7 @@ function QueryCard({ query, onTogglePin, getChartIcon }: QueryCardProps) {
                 스케줄 설정
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem className="text-destructive">
+              <DropdownMenuItem className="text-destructive" onClick={() => onDelete(query.id)}>
                 <Trash2 className="w-4 h-4 mr-2" />
                 삭제
               </DropdownMenuItem>

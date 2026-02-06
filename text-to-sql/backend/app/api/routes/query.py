@@ -5,10 +5,12 @@ from pydantic import BaseModel
 import uuid
 from pathlib import Path
 import json
+import time
 
 from app.services.agents.orchestrator import run_oneshot
 from app.services.budget_gate import ensure_budget_ok
 from app.services.cost_tracker import get_cost_tracker
+from app.services.logging_store.store import append_event
 from app.services.oracle.executor import execute_sql
 from app.services.policy.gate import precheck_sql
 from app.core.config import get_settings
@@ -22,21 +24,77 @@ class OneShotRequest(BaseModel):
     question: str
     translate: bool | None = None
     rag_multi: bool | None = None
+    user_name: str | None = None
+    user_role: str | None = None
 
 
 class RunRequest(BaseModel):
     qid: str | None = None
     sql: str | None = None
     user_ack: bool = False
+    user_name: str | None = None
+    user_role: str | None = None
 
 
 @router.post("/oneshot")
 def oneshot(req: OneShotRequest):
     ensure_budget_ok()
-    payload = run_oneshot(req.question, translate=req.translate, rag_multi=req.rag_multi)
-    qid = str(uuid.uuid4())
-    _QUERY_STORE[qid] = payload
-    return {"qid": qid, "payload": payload}
+    start = time.perf_counter()
+    payload: dict | None = None
+    qid: str | None = None
+    status = "success"
+    error_detail = None
+    try:
+        payload = run_oneshot(req.question, translate=req.translate, rag_multi=req.rag_multi)
+        qid = str(uuid.uuid4())
+        _QUERY_STORE[qid] = payload
+        return {"qid": qid, "payload": payload}
+    except HTTPException as exc:
+        status = "error"
+        error_detail = str(exc.detail) if exc.detail else str(exc)
+        raise
+    except Exception as exc:  # pragma: no cover - depends on LLM
+        status = "error"
+        error_detail = str(exc)
+        raise
+    finally:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        try:
+            sql = ""
+            rows_returned = 0
+            mode = None
+            if isinstance(payload, dict):
+                mode = payload.get("mode")
+                if mode == "demo":
+                    result = payload.get("result") or {}
+                    sql = str(result.get("sql") or "")
+                    preview = result.get("preview") or {}
+                    rows_returned = int(preview.get("row_count") or 0)
+                else:
+                    final = payload.get("final") or {}
+                    draft = payload.get("draft") or {}
+                    sql = str(final.get("final_sql") or draft.get("final_sql") or "")
+            append_event(get_settings().events_log_path, {
+                "type": "audit",
+                "event": "query_oneshot",
+                "qid": qid,
+                "question": req.question,
+                "sql": sql,
+                "status": status,
+                "rows_returned": rows_returned,
+                "row_cap": None,
+                "duration_ms": duration_ms,
+                "mode": mode,
+                "user": {
+                    "name": req.user_name or "사용자",
+                    "role": req.user_role or "연구원",
+                },
+                "error": error_detail,
+                "applied_terms": [],
+                "applied_metrics": [],
+            })
+        except Exception:
+            pass
 
 
 @router.get("/get")
@@ -56,19 +114,66 @@ def run_query(req: RunRequest):
     settings = get_settings()
 
     sql = req.sql
-    if not sql and req.qid:
+    stored = None
+    if req.qid:
         stored = _QUERY_STORE.get(req.qid)
-        if stored and "final" in stored:
-            sql = stored["final"].get("final_sql")
+    if not sql and stored and "final" in stored:
+        sql = stored["final"].get("final_sql")
 
     if not sql:
         raise HTTPException(status_code=400, detail="SQL not provided")
 
-    precheck_sql(sql)
-    result = execute_sql(sql)
-    if settings.sql_run_cost_krw > 0:
-        get_cost_tracker().add_cost(settings.sql_run_cost_krw, {"stage": "run"})
-    return {"sql": sql, "result": result}
+    question = None
+    if isinstance(stored, dict):
+        question = stored.get("question") or stored.get("question_en")
+
+    user_name = req.user_name or "사용자"
+    user_role = req.user_role or "연구원"
+
+    status = "success"
+    rows_returned = 0
+    row_cap = None
+    error_detail = None
+    start = time.perf_counter()
+
+    try:
+        precheck_sql(sql)
+        result = execute_sql(sql)
+        rows_returned = int(result.get("row_count") or 0)
+        row_cap = int(result.get("row_cap") or 0)
+        if row_cap and rows_returned >= row_cap:
+            status = "warning"
+        if settings.sql_run_cost_krw > 0:
+            get_cost_tracker().add_cost(settings.sql_run_cost_krw, {"stage": "run"})
+        return {"sql": sql, "result": result}
+    except HTTPException as exc:
+        status = "error"
+        error_detail = str(exc.detail) if exc.detail else str(exc)
+        raise
+    except Exception as exc:  # pragma: no cover - depends on driver
+        status = "error"
+        error_detail = str(exc)
+        raise
+    finally:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        try:
+            append_event(settings.events_log_path, {
+                "type": "audit",
+                "event": "query_run",
+                "qid": req.qid,
+                "question": question,
+                "sql": sql,
+                "status": status,
+                "rows_returned": rows_returned,
+                "row_cap": row_cap,
+                "duration_ms": duration_ms,
+                "user": {"name": user_name, "role": user_role},
+                "error": error_detail,
+                "applied_terms": [],
+                "applied_metrics": [],
+            })
+        except Exception:
+            pass
 
 
 def _load_json(path: Path):

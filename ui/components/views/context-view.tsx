@@ -1,43 +1,36 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Textarea } from "@/components/ui/textarea"
 import { 
   GitBranch, 
   Calculator, 
   BookOpen,
   Plus,
   Pencil,
+  Check,
   Trash2,
   ArrowRight,
   Search,
   Table2,
   Hash
 } from "lucide-react"
-import { cn } from "@/lib/utils"
 
-interface JoinRelation {
-  id: string
-  leftTable: string
-  leftColumn: string
-  rightTable: string
-  rightColumn: string
-  joinType: string
-}
-
-interface Metric {
+interface JoinTemplate {
   id: string
   name: string
-  nameKo: string
-  formula: string
-  description: string
-  category: string
+  sql: string
+}
+
+interface MetricTemplate {
+  id: string
+  name: string
+  sql: string
 }
 
 interface Term {
@@ -45,48 +38,193 @@ interface Term {
   term: string
   aliases: string[]
   definition: string
-  sqlMapping?: string
 }
 
 export function ContextView() {
-  const [joins, setJoins] = useState<JoinRelation[]>([
-    { id: "1", leftTable: "patients", leftColumn: "subject_id", rightTable: "admissions", rightColumn: "subject_id", joinType: "INNER" },
-    { id: "2", leftTable: "admissions", leftColumn: "hadm_id", rightTable: "diagnoses_icd", rightColumn: "hadm_id", joinType: "INNER" },
-    { id: "3", leftTable: "admissions", leftColumn: "hadm_id", rightTable: "procedures_icd", rightColumn: "hadm_id", joinType: "LEFT" },
-    { id: "4", leftTable: "patients", leftColumn: "subject_id", rightTable: "icustays", rightColumn: "subject_id", joinType: "LEFT" },
-  ])
-
-  const [metrics, setMetrics] = useState<Metric[]>([
-    { id: "1", name: "LOS", nameKo: "재원일수", formula: "EXTRACT(DAY FROM dischtime - admittime)", description: "입원부터 퇴원까지의 일수", category: "재원" },
-    { id: "2", name: "Readmission30", nameKo: "30일 재입원", formula: "CASE WHEN next_admit - dischtime <= 30 THEN 1 ELSE 0 END", description: "퇴원 후 30일 이내 재입원 여부", category: "재입원" },
-    { id: "3", name: "MortalityRate", nameKo: "사망률", formula: "COUNT(CASE WHEN dod IS NOT NULL THEN 1 END) / COUNT(*)", description: "전체 환자 대비 사망 환자 비율", category: "결과" },
-    { id: "4", name: "ICUStay", nameKo: "ICU 재원일수", formula: "EXTRACT(DAY FROM outtime - intime)", description: "ICU 입실부터 퇴실까지의 일수", category: "재원" },
-  ])
-
-  const [terms, setTerms] = useState<Term[]>([
-    { id: "1", term: "심부전", aliases: ["HF", "Heart Failure", "울혈성 심부전", "CHF"], definition: "심장이 충분한 혈액을 펌프질하지 못하는 상태", sqlMapping: "icd_code IN ('I50', 'I500', 'I501', 'I509', '4280', '4281', '4289')" },
-    { id: "2", term: "고혈압", aliases: ["HTN", "Hypertension", "혈압 높음"], definition: "지속적으로 높은 혈압 상태", sqlMapping: "icd_code LIKE 'I10%' OR icd_code LIKE '401%'" },
-    { id: "3", term: "당뇨", aliases: ["DM", "Diabetes", "당뇨병"], definition: "혈당 조절 장애 질환", sqlMapping: "icd_code LIKE 'E11%' OR icd_code LIKE '250%'" },
-    { id: "4", term: "노인", aliases: ["고령자", "65세 이상", "elderly"], definition: "만 65세 이상의 환자", sqlMapping: "age >= 65" },
-  ])
-
+  const [joins, setJoins] = useState<JoinTemplate[]>([])
+  const [metrics, setMetrics] = useState<MetricTemplate[]>([])
+  const [terms, setTerms] = useState<Term[]>([])
   const [searchTerm, setSearchTerm] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveMessage, setSaveMessage] = useState<string | null>(null)
+  const [editingJoinId, setEditingJoinId] = useState<string | null>(null)
+  const [editingMetricId, setEditingMetricId] = useState<string | null>(null)
+  const [editingTermId, setEditingTermId] = useState<string | null>(null)
+
+  const loadDocs = async () => {
+    setLoading(true)
+    setError(null)
+    setSaveMessage(null)
+    try {
+        const [joinRes, sqlRes, glossaryRes] = await Promise.all([
+          fetch("/admin/rag/docs?doc_type=template&kind=join&limit=1000"),
+          fetch("/admin/rag/docs?doc_type=template&kind=sql&limit=1000"),
+          fetch("/admin/rag/docs?doc_type=glossary&limit=1000"),
+        ])
+
+      if (!joinRes.ok || !sqlRes.ok || !glossaryRes.ok) {
+        throw new Error("Failed to fetch RAG docs.")
+      }
+
+      const joinPayload = await joinRes.json()
+      const sqlPayload = await sqlRes.json()
+      const glossaryPayload = await glossaryRes.json()
+
+      const joinDocs = Array.isArray(joinPayload?.docs) ? joinPayload.docs : []
+      const sqlDocs = Array.isArray(sqlPayload?.docs) ? sqlPayload.docs : []
+      const glossaryDocs = Array.isArray(glossaryPayload?.docs) ? glossaryPayload.docs : []
+
+      const parsedJoins = joinDocs.map((doc: any, idx: number) => {
+        const { name, sql } = parseTemplateDoc(doc)
+        return {
+          id: doc.id ?? `${name}-${idx}`,
+          name: name || `join_template_${idx}`,
+          sql,
+        }
+      })
+
+      const parsedMetrics = sqlDocs.map((doc: any, idx: number) => {
+        const { name, sql } = parseTemplateDoc(doc)
+        return {
+          id: doc.id ?? `${name}-${idx}`,
+          name: name || `template_${idx}`,
+          sql,
+        }
+      })
+
+      const parsedTerms = glossaryDocs.map((doc: any, idx: number) => {
+        const { term, definition } = parseGlossaryDoc(doc)
+        return {
+          id: doc.id ?? `${term}-${idx}`,
+          term: term || `term_${idx}`,
+          aliases: [],
+          definition: definition || "",
+        }
+      })
+
+      setJoins(parsedJoins)
+      setMetrics(parsedMetrics)
+      setTerms(parsedTerms)
+      setEditingJoinId(null)
+      setEditingMetricId(null)
+      setEditingTermId(null)
+    } catch (err) {
+      setError("RAG 문서를 불러오지 못했습니다.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadDocs()
+  }, [])
+
+  const tableChain = useMemo(() => {
+    const chain: string[] = []
+    joins.forEach((join) => {
+      const parsed = parseJoinSql(join.sql)
+      if (parsed?.leftTable && !chain.includes(parsed.leftTable)) {
+        chain.push(parsed.leftTable)
+      }
+      if (parsed?.rightTable && !chain.includes(parsed.rightTable)) {
+        chain.push(parsed.rightTable)
+      }
+    })
+    return chain
+  }, [joins])
 
   const filteredTerms = terms.filter(t => 
     t.term.toLowerCase().includes(searchTerm.toLowerCase()) ||
     t.aliases.some(a => a.toLowerCase().includes(searchTerm.toLowerCase()))
   )
 
+  const addJoin = () => {
+    const id = `join-${Date.now()}`
+    setJoins(prev => [{ id, name: "join_template_new", sql: "" }, ...prev])
+    setEditingJoinId(id)
+  }
+
+  const addMetric = () => {
+    const id = `metric-${Date.now()}`
+    setMetrics(prev => [{ id, name: "template_new", sql: "" }, ...prev])
+    setEditingMetricId(id)
+  }
+
+  const addTerm = () => {
+    const id = `term-${Date.now()}`
+    setTerms(prev => [{ id, term: "", aliases: [], definition: "" }, ...prev])
+    setSearchTerm("")
+    setEditingTermId(id)
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    setSaveMessage(null)
+    setError(null)
+    try {
+      const payload = {
+        joins: joins
+          .map(item => ({
+            name: item.name.trim(),
+            sql: item.sql.trim(),
+          }))
+          .filter(item => item.name && item.sql),
+        metrics: metrics
+          .map(item => ({
+            name: item.name.trim(),
+            sql: item.sql.trim(),
+          }))
+          .filter(item => item.name && item.sql),
+        terms: terms
+          .map(item => ({
+            term: item.term.trim(),
+            definition: item.definition.trim(),
+          }))
+          .filter(item => item.term),
+      }
+
+      const res = await fetch("/admin/rag/context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+
+      if (!res.ok) {
+        throw new Error("Failed to save context.")
+      }
+
+      setSaveMessage("저장이 완료되었습니다.")
+      await loadDocs()
+    } catch (err) {
+      setError("저장에 실패했습니다.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleCancel = async () => {
+    setSaveMessage(null)
+    await loadDocs()
+  }
+
   return (
-    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 w-full max-w-none">
       <div>
         <h2 className="text-xl sm:text-2xl font-bold text-foreground">컨텍스트 편집</h2>
         <p className="text-sm text-muted-foreground mt-1">NL2SQL 변환에 사용되는 조인, 지표, 용어를 관리합니다.</p>
         <Badge variant="outline" className="mt-2">관리자 전용</Badge>
       </div>
+      {error && (
+        <div className="text-sm text-destructive">{error}</div>
+      )}
+      {saveMessage && (
+        <div className="text-sm text-emerald-600">{saveMessage}</div>
+      )}
 
       <Tabs defaultValue="joins" className="space-y-4">
-        <TabsList className="grid w-full grid-cols-3 max-w-md h-auto">
+        <TabsList className="grid w-full grid-cols-3 h-auto">
           <TabsTrigger value="joins" className="gap-1 sm:gap-2 text-xs sm:text-sm py-2">
             <GitBranch className="w-3 h-3 sm:w-4 sm:h-4" />
             <span className="hidden sm:inline">조인 관계</span>
@@ -113,7 +251,7 @@ export function ContextView() {
                   <CardTitle className="text-lg">테이블 조인 관계</CardTitle>
                   <CardDescription>테이블 간의 조인 관계를 정의합니다. NL2SQL이 자동으로 적절한 조인을 선택합니다.</CardDescription>
                 </div>
-                <Button size="sm" className="gap-2">
+                <Button size="sm" className="gap-2" onClick={addJoin} disabled={loading || saving}>
                   <Plus className="w-4 h-4" />
                   조인 추가
                 </Button>
@@ -123,45 +261,118 @@ export function ContextView() {
               {/* Visual Join Graph */}
               <div className="mb-6 p-4 rounded-lg bg-secondary/30 border border-border">
                 <div className="text-xs text-muted-foreground mb-3">테이블 관계도</div>
-                <div className="flex items-center justify-center gap-4 flex-wrap">
-                  {["patients", "admissions", "diagnoses_icd", "icustays"].map((table, idx) => (
-                    <div key={table} className="flex items-center gap-2">
-                      <div className="px-3 py-2 rounded-lg bg-primary/20 border border-primary/30">
-                        <span className="font-mono text-sm text-foreground">{table}</span>
+                {loading ? (
+                  <div className="text-xs text-muted-foreground">불러오는 중...</div>
+                ) : tableChain.length === 0 ? (
+                  <div className="text-xs text-muted-foreground">연결된 조인 템플릿이 없습니다.</div>
+                ) : (
+                  <div className="flex items-center justify-center gap-4 flex-wrap">
+                    {tableChain.map((table, idx) => (
+                      <div key={`${table}-${idx}`} className="flex items-center gap-2">
+                        <div className="px-3 py-2 rounded-lg bg-primary/20 border border-primary/30">
+                          <span className="font-mono text-sm text-foreground">{table}</span>
+                        </div>
+                        {idx < tableChain.length - 1 && <ArrowRight className="w-4 h-4 text-muted-foreground" />}
                       </div>
-                      {idx < 3 && <ArrowRight className="w-4 h-4 text-muted-foreground" />}
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Join List */}
               <div className="space-y-3">
-                {joins.map((join) => (
-                  <div key={join.id} className="flex items-center gap-3 p-3 rounded-lg border border-border hover:border-primary/30 transition-colors">
-                    <div className="flex items-center gap-2 flex-1">
-                      <div className="flex items-center gap-1 px-2 py-1 rounded bg-secondary">
-                        <Table2 className="w-3 h-3 text-muted-foreground" />
-                        <span className="font-mono text-xs">{join.leftTable}</span>
+                {loading ? (
+                  <div className="text-xs text-muted-foreground">불러오는 중...</div>
+                ) : joins.length === 0 ? (
+                  <div className="text-xs text-muted-foreground">표시할 조인 템플릿이 없습니다.</div>
+                ) : joins.map((join) => {
+                  const parsed = parseJoinSql(join.sql)
+                  const isEditing = editingJoinId === join.id
+                  const leftTable = parsed?.leftTable ?? (join.name || "template")
+                  const leftColumn = parsed?.leftColumn ?? "?"
+                  const rightTable = parsed?.rightTable ?? "unknown"
+                  const rightColumn = parsed?.rightColumn ?? "?"
+                  const joinType = parsed?.joinType ?? "TEMPLATE"
+
+                  return (
+                    <div key={join.id} className="p-3 rounded-lg border border-border hover:border-primary/30 transition-colors space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary" className="text-[10px]">Template</Badge>
+                          <span className="text-xs font-mono text-muted-foreground">{join.name}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            onClick={() => setEditingJoinId(isEditing ? null : join.id)}
+                            disabled={saving}
+                          >
+                            {isEditing ? <Check className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive"
+                            onClick={() => setJoins(prev => prev.filter(item => item.id !== join.id))}
+                            disabled={saving}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </Button>
+                        </div>
                       </div>
-                      <span className="text-xs text-muted-foreground">.{join.leftColumn}</span>
-                      <Badge variant="outline" className="text-[10px]">{join.joinType}</Badge>
-                      <div className="flex items-center gap-1 px-2 py-1 rounded bg-secondary">
-                        <Table2 className="w-3 h-3 text-muted-foreground" />
-                        <span className="font-mono text-xs">{join.rightTable}</span>
-                      </div>
-                      <span className="text-xs text-muted-foreground">.{join.rightColumn}</span>
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <Input
+                            value={join.name}
+                            placeholder="Template name"
+                            onChange={(e) =>
+                              setJoins(prev =>
+                                prev.map(item =>
+                                  item.id === join.id ? { ...item, name: e.target.value } : item
+                                )
+                              )
+                            }
+                          />
+                          <Textarea
+                            value={join.sql}
+                            placeholder="SQL template"
+                            rows={4}
+                            onChange={(e) =>
+                              setJoins(prev =>
+                                prev.map(item =>
+                                  item.id === join.id ? { ...item, sql: e.target.value } : item
+                                )
+                              )
+                            }
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <div className="flex items-center gap-1 px-2 py-1 rounded bg-secondary">
+                              <Table2 className="w-3 h-3 text-muted-foreground" />
+                              <span className="font-mono text-xs">{leftTable}</span>
+                            </div>
+                            <span className="text-xs text-muted-foreground">.{leftColumn}</span>
+                            <Badge variant="outline" className="text-[10px]">{joinType}</Badge>
+                            <div className="flex items-center gap-1 px-2 py-1 rounded bg-secondary">
+                              <Table2 className="w-3 h-3 text-muted-foreground" />
+                              <span className="font-mono text-xs">{rightTable}</span>
+                            </div>
+                            <span className="text-xs text-muted-foreground">.{rightColumn}</span>
+                          </div>
+                          {join.sql && (
+                            <div className="w-full rounded bg-secondary/50 font-mono text-[11px] text-foreground overflow-x-auto px-2 py-1">
+                              {join.sql}
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
-                    <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <Pencil className="w-3 h-3" />
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive">
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </CardContent>
           </Card>
@@ -176,7 +387,7 @@ export function ContextView() {
                   <CardTitle className="text-lg">지표 템플릿</CardTitle>
                   <CardDescription>자주 사용하는 지표의 SQL 공식을 미리 정의합니다.</CardDescription>
                 </div>
-                <Button size="sm" className="gap-2">
+                <Button size="sm" className="gap-2" onClick={addMetric} disabled={loading || saving}>
                   <Plus className="w-4 h-4" />
                   지표 추가
                 </Button>
@@ -184,31 +395,81 @@ export function ContextView() {
             </CardHeader>
             <CardContent>
               <div className="grid md:grid-cols-2 gap-4">
-                {metrics.map((metric) => (
-                  <div key={metric.id} className="p-4 rounded-lg border border-border hover:border-primary/30 transition-colors">
-                    <div className="flex items-start justify-between mb-2">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-foreground">{metric.nameKo}</span>
-                          <Badge variant="secondary" className="text-[10px]">{metric.category}</Badge>
+                {loading ? (
+                  <div className="text-xs text-muted-foreground">불러오는 중...</div>
+                ) : metrics.length === 0 ? (
+                  <div className="text-xs text-muted-foreground">표시할 지표 템플릿이 없습니다.</div>
+                ) : metrics.map((metric) => {
+                  const isEditing = editingMetricId === metric.id
+                  const displayName = toDisplayName(metric.name) || metric.name
+                  return (
+                    <div key={metric.id} className="p-4 rounded-lg border border-border hover:border-primary/30 transition-colors space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-foreground">{displayName}</span>
+                            <Badge variant="secondary" className="text-[10px]">Template</Badge>
+                          </div>
+                          <span className="text-xs text-muted-foreground font-mono">{metric.name}</span>
                         </div>
-                        <span className="text-xs text-muted-foreground font-mono">{metric.name}</span>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => setEditingMetricId(isEditing ? null : metric.id)}
+                            disabled={saving}
+                          >
+                            {isEditing ? <Check className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-destructive"
+                            onClick={() => setMetrics(prev => prev.filter(item => item.id !== metric.id))}
+                            disabled={saving}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </Button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <Pencil className="w-3 h-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive">
-                          <Trash2 className="w-3 h-3" />
-                        </Button>
-                      </div>
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <Input
+                            value={metric.name}
+                            placeholder="Template name"
+                            onChange={(e) =>
+                              setMetrics(prev =>
+                                prev.map(item =>
+                                  item.id === metric.id ? { ...item, name: e.target.value } : item
+                                )
+                              )
+                            }
+                          />
+                          <Textarea
+                            value={metric.sql}
+                            placeholder="SQL template"
+                            rows={4}
+                            onChange={(e) =>
+                              setMetrics(prev =>
+                                prev.map(item =>
+                                  item.id === metric.id ? { ...item, sql: e.target.value } : item
+                                )
+                              )
+                            }
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <p className="text-xs text-muted-foreground">RAG SQL template</p>
+                          <div className="p-2 rounded bg-secondary/50 font-mono text-[11px] text-foreground overflow-x-auto">
+                            {metric.sql}
+                          </div>
+                        </>
+                      )}
                     </div>
-                    <p className="text-xs text-muted-foreground mb-2">{metric.description}</p>
-                    <div className="p-2 rounded bg-secondary/50 font-mono text-[11px] text-foreground overflow-x-auto">
-                      {metric.formula}
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </CardContent>
           </Card>
@@ -223,7 +484,7 @@ export function ContextView() {
                   <CardTitle className="text-lg">용어 사전 / 약어 등록</CardTitle>
                   <CardDescription>의료 용어와 약어를 SQL 조건으로 매핑합니다.</CardDescription>
                 </div>
-                <Button size="sm" className="gap-2">
+                <Button size="sm" className="gap-2" onClick={addTerm} disabled={loading || saving}>
                   <Plus className="w-4 h-4" />
                   용어 추가
                 </Button>
@@ -243,35 +504,81 @@ export function ContextView() {
 
               {/* Terms List */}
               <div className="space-y-3">
-                {filteredTerms.map((term) => (
-                  <div key={term.id} className="p-4 rounded-lg border border-border hover:border-primary/30 transition-colors">
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <Hash className="w-4 h-4 text-primary" />
-                        <span className="font-medium text-foreground">{term.term}</span>
+                {loading ? (
+                  <div className="text-xs text-muted-foreground">불러오는 중...</div>
+                ) : filteredTerms.length === 0 ? (
+                  <div className="text-xs text-muted-foreground">표시할 용어가 없습니다.</div>
+                ) : filteredTerms.map((term) => {
+                  const isEditing = editingTermId === term.id
+                  return (
+                    <div key={term.id} className="p-4 rounded-lg border border-border hover:border-primary/30 transition-colors space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <Hash className="w-4 h-4 text-primary" />
+                          <span className="font-medium text-foreground">{term.term || "새 용어"}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => setEditingTermId(isEditing ? null : term.id)}
+                            disabled={saving}
+                          >
+                            {isEditing ? <Check className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-destructive"
+                            onClick={() => setTerms(prev => prev.filter(item => item.id !== term.id))}
+                            disabled={saving}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </Button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <Pencil className="w-3 h-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive">
-                          <Trash2 className="w-3 h-3" />
-                        </Button>
-                      </div>
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <Input
+                            value={term.term}
+                            placeholder="용어"
+                            onChange={(e) =>
+                              setTerms(prev =>
+                                prev.map(item =>
+                                  item.id === term.id ? { ...item, term: e.target.value } : item
+                                )
+                              )
+                            }
+                          />
+                          <Textarea
+                            value={term.definition}
+                            placeholder="정의"
+                            rows={3}
+                            onChange={(e) =>
+                              setTerms(prev =>
+                                prev.map(item =>
+                                  item.id === term.id ? { ...item, definition: e.target.value } : item
+                                )
+                              )
+                            }
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          {term.aliases.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {term.aliases.map((alias) => (
+                                <Badge key={alias} variant="outline" className="text-[10px]">{alias}</Badge>
+                              ))}
+                            </div>
+                          )}
+                          <p className="text-xs text-muted-foreground">{term.definition}</p>
+                        </>
+                      )}
                     </div>
-                    <div className="flex flex-wrap gap-1 mb-2">
-                      {term.aliases.map((alias) => (
-                        <Badge key={alias} variant="outline" className="text-[10px]">{alias}</Badge>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground mb-2">{term.definition}</p>
-                    {term.sqlMapping && (
-                      <div className="p-2 rounded bg-secondary/50 font-mono text-[11px] text-foreground overflow-x-auto">
-                        {term.sqlMapping}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </CardContent>
           </Card>
@@ -280,9 +587,91 @@ export function ContextView() {
 
       {/* Save Button */}
       <div className="flex justify-end gap-3">
-        <Button variant="outline">변경 취소</Button>
-        <Button>모든 변경 저장</Button>
+        <Button variant="outline" onClick={handleCancel} disabled={loading || saving}>변경 취소</Button>
+        <Button onClick={handleSave} disabled={loading || saving}>
+          {saving ? "저장 중..." : "모든 변경 저장"}
+        </Button>
       </div>
     </div>
   )
+}
+
+function parseTemplateDoc(doc: any) {
+  const text = typeof doc?.text === "string" ? doc.text : ""
+  const fallbackName = doc?.metadata?.name || doc?.id || ""
+  let name = fallbackName
+  let sql = ""
+  const parts = text.split(/\r?\nSQL:/)
+  if (parts.length > 1) {
+    const header = parts[0]
+    sql = parts.slice(1).join("\nSQL:").trim()
+    if (header.toLowerCase().startsWith("template:")) {
+      name = header.slice("template:".length).trim() || name
+    }
+  } else if (text.toLowerCase().startsWith("template:")) {
+    name = text.slice("template:".length).trim()
+  }
+  return { name, sql }
+}
+
+function parseGlossaryDoc(doc: any) {
+  const text = typeof doc?.text === "string" ? doc.text : ""
+  const fallbackTerm = doc?.metadata?.term || doc?.id || ""
+  let term = fallbackTerm
+  let definition = ""
+  const cleaned = text.replace(/^Glossary:/i, "").trim()
+  const eqIdx = cleaned.indexOf("=")
+  if (eqIdx >= 0) {
+    term = cleaned.slice(0, eqIdx).trim() || term
+    definition = cleaned.slice(eqIdx + 1).trim()
+  } else if (cleaned) {
+    term = cleaned
+  }
+  return { term, definition }
+}
+
+function parseJoinSql(sql: string) {
+  if (!sql) {
+    return null
+  }
+  const match = sql.match(
+    /from\s+([A-Z0-9_]+)\s+([A-Z0-9_]+)\s+(left|right|inner|full)?\s*join\s+([A-Z0-9_]+)\s+([A-Z0-9_]+)\s+on\s+([A-Z0-9_]+)\.([A-Z0-9_]+)\s*=\s*([A-Z0-9_]+)\.([A-Z0-9_]+)/i
+  )
+  if (!match) {
+    return null
+  }
+  const leftTable = match[1]
+  const leftAlias = match[2]
+  const joinType = match[3] ? match[3].toUpperCase() : "INNER"
+  const rightTable = match[4]
+  const rightAlias = match[5]
+  const alias1 = match[6]
+  const col1 = match[7]
+  const alias2 = match[8]
+  const col2 = match[9]
+
+  let leftColumn = col1
+  let rightColumn = col2
+  if (
+    alias1.toLowerCase() === rightAlias.toLowerCase() &&
+    alias2.toLowerCase() === leftAlias.toLowerCase()
+  ) {
+    leftColumn = col2
+    rightColumn = col1
+  }
+
+  return {
+    leftTable: leftTable.toLowerCase(),
+    leftColumn: leftColumn.toLowerCase(),
+    rightTable: rightTable.toLowerCase(),
+    rightColumn: rightColumn.toLowerCase(),
+    joinType,
+  }
+}
+
+function toDisplayName(name: string) {
+  if (!name) {
+    return ""
+  }
+  return name.replace(/^template_/, "").replace(/_/g, " ")
 }

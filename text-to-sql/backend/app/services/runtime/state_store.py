@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import time
+from typing import Any
+
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+
+from app.core.config import get_settings
+
+
+@dataclass
+class AppStateStore:
+    collection_name: str = "app_state"
+    _client: MongoClient | None = None
+    _collection: Any | None = None
+
+    def __post_init__(self) -> None:
+        settings = get_settings()
+        if not settings.mongo_uri:
+            return
+        self._client = MongoClient(settings.mongo_uri, serverSelectionTimeoutMS=2000)
+        database = self._client[settings.mongo_db]
+        self._collection = database[self.collection_name]
+        try:
+            self._collection.create_index("_id", unique=True)
+        except PyMongoError:
+            pass
+
+    @property
+    def enabled(self) -> bool:
+        return self._collection is not None
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        if self._collection is None:
+            return None
+        try:
+            doc = self._collection.find_one({"_id": key})
+        except PyMongoError:
+            return None
+        if not doc:
+            return None
+        return doc.get("value")
+
+    def set(self, key: str, value: dict[str, Any]) -> bool:
+        if self._collection is None:
+            return False
+        try:
+            self._collection.replace_one(
+                {"_id": key},
+                {"_id": key, "value": value, "updated_at": int(time.time())},
+                upsert=True,
+            )
+            return True
+        except PyMongoError:
+            return False
+
+    def delete(self, key: str) -> bool:
+        if self._collection is None:
+            return False
+        try:
+            self._collection.delete_one({"_id": key})
+            return True
+        except PyMongoError:
+            return False
+
+
+_STORE: AppStateStore | None = None
+
+
+def get_state_store() -> AppStateStore:
+    global _STORE
+    if _STORE is None:
+        _STORE = AppStateStore()
+    return _STORE

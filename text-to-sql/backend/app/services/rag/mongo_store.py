@@ -211,3 +211,49 @@ class MongoStore:
             return results
 
         return self._python_search(query_vec, filter_query, k)
+
+    def list_documents(
+        self,
+        where: dict[str, Any] | None = None,
+        limit: int = 200,
+        skip: int = 0,
+    ) -> list[dict[str, Any]]:
+        if self._simple is not None:
+            items = []
+            for doc_id, doc in self._simple.docs.items():
+                meta = doc.get("meta", {})
+                if where:
+                    match = True
+                    for key, value in where.items():
+                        if meta.get(key) != value:
+                            match = False
+                            break
+                    if not match:
+                        continue
+                items.append({
+                    "id": doc_id,
+                    "text": doc.get("text", ""),
+                    "metadata": meta,
+                })
+            items.sort(key=lambda item: str(item.get("id")))
+            return items[skip: skip + limit]
+
+        if self._collection is None:
+            return []
+
+        filter_query = _build_metadata_filter(where)
+        cursor = (
+            self._collection
+            .find(filter_query, {"text": 1, "metadata": 1})
+            .sort("_id", 1)
+            .skip(max(skip, 0))
+            .limit(max(limit, 1))
+        )
+        results = []
+        for doc in cursor:
+            results.append({
+                "id": str(doc.get("_id")),
+                "text": doc.get("text", ""),
+                "metadata": doc.get("metadata", {}),
+            })
+        return results
