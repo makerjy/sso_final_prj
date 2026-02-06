@@ -6,4 +6,4 @@ plotly
 python-dotenv
 pytest
 openai
-qdrant-client
+pymongo

@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from openai import OpenAI
 
 from src.config.rag_config import EMBEDDING_MODEL, RAG_TOP_K
-from src.db.vector_store import get_qdrant_client, search_embeddings
+from src.db.vector_store import get_mongo_collection, search_embeddings
 from src.utils.logging import log_event
 
 
@@ -33,12 +33,12 @@ def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, An
         query_text = _build_query_text(user_query, df_schema)
         query_embedding = _embed_texts([query_text])[0]
 
-        client = get_qdrant_client()
-        hits = search_embeddings(client, query_embedding, limit=RAG_TOP_K)
+        collection = get_mongo_collection()
+        hits = search_embeddings(collection, query_embedding, limit=RAG_TOP_K)
 
         snippets = []
         for hit in hits:
-            payload = hit.payload or {}
+            payload = (hit.get('metadata') or {}) | {'text': hit.get('text')}
             text = payload.get("text")
             if text:
                 snippets.append(text)

@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(BASE_DIR))
 
 from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE
-from src.db.vector_store import ensure_collection, get_qdrant_client, upsert_embeddings
+from src.db.vector_store import ensure_collection, get_mongo_collection, upsert_embeddings
 
 
 def _load_jsonl(path: Path) -> List[dict]:
@@ -101,12 +101,12 @@ def build_index() -> None:
     for doc, doc_id in zip(docs, ids):
         doc["metadata"] = doc.get("metadata", {}) | {"doc_id": doc.get("id")}
 
-    client = get_qdrant_client()
+    collection = get_mongo_collection()
 
     # 첫 배치로 벡터 크기 확보 후 컬렉션 생성
     first_embeddings = _embed_texts(texts[:1])
-    ensure_collection(client, vector_size=len(first_embeddings[0]))
-    upsert_embeddings(client, first_embeddings, metadatas[:1], ids[:1])
+    ensure_collection(collection, vector_size=len(first_embeddings[0]))
+    upsert_embeddings(collection, first_embeddings, metadatas[:1], ids[:1])
 
     # 나머지 배치 업서트
     start_idx = 1
@@ -115,7 +115,7 @@ def build_index() -> None:
         batch_size = len(batch_texts)
         batch_metadatas = metadatas[start_idx : start_idx + batch_size]
         batch_ids = ids[start_idx : start_idx + batch_size]
-        upsert_embeddings(client, batch_embeddings, batch_metadatas, batch_ids)
+        upsert_embeddings(collection, batch_embeddings, batch_metadatas, batch_ids)
         start_idx += batch_size
 
 

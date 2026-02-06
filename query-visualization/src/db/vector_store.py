@@ -3,58 +3,73 @@ from __future__ import annotations
 from typing import Iterable, List, Optional
 from uuid import uuid4
 
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qdrant_models
+from pymongo import MongoClient, ReplaceOne
 
 from src.config.rag_config import (
-    QDRANT_API_KEY,
-    QDRANT_PATH,
-    QDRANT_URL,
-    RAG_COLLECTION,
-    RAG_DISTANCE,
+    MONGODB_URI,
+    MONGODB_DB,
+    MONGODB_COLLECTION,
+    MONGODB_VECTOR_INDEX,
+    MONGODB_EMBED_FIELD,
 )
 
 
-def get_qdrant_client() -> QdrantClient:
-    if QDRANT_URL:
-        return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-    return QdrantClient(path=QDRANT_PATH)
+def get_mongo_collection():
+    if not MONGODB_URI:
+        raise RuntimeError("MONGODB_URI is not set")
+    client = MongoClient(MONGODB_URI)
+    db = client[MONGODB_DB]
+    return db[MONGODB_COLLECTION]
 
 
-def ensure_collection(client: QdrantClient, vector_size: int) -> None:
-    distance = getattr(qdrant_models.Distance, RAG_DISTANCE, qdrant_models.Distance.COSINE)
-    collections = client.get_collections().collections
-    if any(c.name == RAG_COLLECTION for c in collections):
-        return
-    client.create_collection(
-        collection_name=RAG_COLLECTION,
-        vectors_config=qdrant_models.VectorParams(size=vector_size, distance=distance),
-    )
+def ensure_collection(_collection, *_args, **_kwargs) -> None:
+    # Atlas Vector Search index is managed in Atlas UI.
+    # Keep no-op here to preserve call sites.
+    return None
 
 
 def upsert_embeddings(
-    client: QdrantClient,
+    collection,
     embeddings: List[List[float]],
     payloads: List[dict],
     ids: Optional[Iterable[str]] = None,
 ) -> None:
     point_ids = list(ids) if ids else [str(uuid4()) for _ in embeddings]
-    points = [
-        qdrant_models.PointStruct(id=pid, vector=vec, payload=payload)
-        for pid, vec, payload in zip(point_ids, embeddings, payloads)
-    ]
-    client.upsert(collection_name=RAG_COLLECTION, points=points)
+    ops = []
+    for pid, vec, payload in zip(point_ids, embeddings, payloads):
+        doc = {
+            "_id": pid,
+            MONGODB_EMBED_FIELD: vec,
+            "text": payload.get("text"),
+            "metadata": {k: v for k, v in payload.items() if k != "text"},
+        }
+        ops.append(ReplaceOne({"_id": pid}, doc, upsert=True))
+    if ops:
+        collection.bulk_write(ops, ordered=False)
 
 
 def search_embeddings(
-    client: QdrantClient,
+    collection,
     query_embedding: List[float],
     limit: int,
 ) -> list:
-    response = client.query_points(
-        collection_name=RAG_COLLECTION,
-        query=query_embedding,
-        limit=limit,
-        with_payload=True,
-    )
-    return response.points
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": MONGODB_VECTOR_INDEX,
+                "path": MONGODB_EMBED_FIELD,
+                "queryVector": query_embedding,
+                "numCandidates": max(limit * 10, 100),
+                "limit": limit,
+            }
+        },
+        {
+            "$project": {
+                "_id": 1,
+                "text": 1,
+                "metadata": 1,
+                "score": {"$meta": "vectorSearchScore"},
+            }
+        },
+    ]
+    return list(collection.aggregate(pipeline))
