@@ -36,18 +36,6 @@ services:
     ports:
       - "27017:27017"
 
-  mongo-express:
-    image: mongo-express:1.0.2
-    depends_on:
-      - mongo
-    environment:
-      - ME_CONFIG_MONGODB_SERVER=mongo
-      - ME_CONFIG_BASICAUTH=true
-      - ME_CONFIG_BASICAUTH_USERNAME=${MONGO_EXPRESS_USER:-admin}
-      - ME_CONFIG_BASICAUTH_PASSWORD=${MONGO_EXPRESS_PASSWORD:-admin1234}
-    ports:
-      - "127.0.0.1:8081:8081"
-
   ui:
     build:
       context: ../../..
