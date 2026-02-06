@@ -19,6 +19,7 @@ class LLMClient:
             api_key=settings.openai_api_key or None,
             base_url=settings.openai_base_url or None,
             organization=settings.openai_org or None,
+            timeout=settings.llm_timeout_sec,
         )
 
     def chat(self, messages: list[dict[str, str]], model: str, max_tokens: int) -> dict[str, Any]:

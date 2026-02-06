@@ -3,13 +3,20 @@ version: '3.8'
 services:
   api:
     build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.api
+      context: ../../..
+      dockerfile: text-to-sql/deploy/docker/Dockerfile.api
+    depends_on:
+      - mongo
     env_file:
       - ../../.env
     environment:
       - ORACLE_LIB_DIR=/opt/oracle/instantclient
       - LD_LIBRARY_PATH=/opt/oracle/instantclient
+      - ANONYMIZED_TELEMETRY=false
+      - MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
+      - MONGO_DB=${MONGO_DB:-text_to_sql}
+      - MONGO_COLLECTION=${MONGO_COLLECTION:-rag_docs}
+      - MONGO_VECTOR_INDEX=${MONGO_VECTOR_INDEX:-}
       # Set if wallet/tnsnames is required
       # - ORACLE_TNS_ADMIN=/opt/oracle/wallet
     volumes:
@@ -18,14 +25,33 @@ services:
       - ../../var/metadata:/app/var/metadata
       - ../../var/cache:/app/var/cache
       - ../../var/logs:/app/var/logs
-      - ../../var/chroma:/app/var/chroma
+      - ../../var/rag:/app/var/rag
     ports:
       - "8001:8000"
 
+  mongo:
+    image: mongo:7
+    volumes:
+      - ../../var/mongo:/data/db
+    ports:
+      - "27017:27017"
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    depends_on:
+      - mongo
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongo
+      - ME_CONFIG_BASICAUTH=true
+      - ME_CONFIG_BASICAUTH_USERNAME=${MONGO_EXPRESS_USER:-admin}
+      - ME_CONFIG_BASICAUTH_PASSWORD=${MONGO_EXPRESS_PASSWORD:-admin1234}
+    ports:
+      - "127.0.0.1:8081:8081"
+
   ui:
     build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.ui
+      context: ../../..
+      dockerfile: text-to-sql/deploy/docker/Dockerfile.ui
       args:
         - API_BASE_URL=http://api:8000
     env_file:

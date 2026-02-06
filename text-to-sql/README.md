@@ -1,14 +1,15 @@
-# Text-to-SQL 데모 (RAG + Oracle)
+# Text-to-SQL 데모 (RAG + MongoDB + Oracle)
 
 자연어 질문을 안전한 Oracle SQL로 변환하는 데모 스택입니다. RAG 컨텍스트, 정책 게이팅, 예산 추적을 포함하며, Demo/Advanced 흐름을 제공하는 간단한 UI가 있습니다.
 
 ## 프로젝트 구조
 
 - `backend/` FastAPI API (RAG, Oracle, 정책, 예산)
-- `ui/` Next.js UI
+- `../ui/` Next.js UI (repo root, 현재 연결 대상)
+- `ui/` 레거시 UI (text-to-sql 내부)
 - `scripts/` 검증 + 데모 캐시 생성
 - `deploy/` Docker Compose + Dockerfiles
-- `var/` 런타임 데이터 (metadata, chroma, cache, logs) (git에서 제외)
+- `var/` 런타임 데이터 (metadata, rag, cache, logs, mongo) (git에서 제외)
 
 ## 빠른 시작 (Docker Compose)
 
@@ -19,6 +20,8 @@ ORACLE_DSN=host:1521/service_name
 ORACLE_USER=...
 ORACLE_PASSWORD=...
 ORACLE_DEFAULT_SCHEMA=SSO
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=text_to_sql
 OPENAI_API_KEY=...  # Advanced 모드에서만 필요
 ```
 
@@ -76,7 +79,7 @@ python scripts/pregen_demo_cache.py
 
 이 과정에서 `var/cache/demo_cache.json`이 생성되며 Demo 모드에서 사용됩니다.
 
-## UI 흐름
+## UI 흐름 (레거시 UI 기준)
 
 - `/ask` Demo 버튼은 캐시된 답변을 사용합니다.
 - Advanced 질문은 사용자 확인을 위해 `/review/{qid}`로 이동합니다.

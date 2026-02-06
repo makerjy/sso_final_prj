@@ -20,6 +20,8 @@ _QUERY_STORE: dict[str, dict] = {}
 
 class OneShotRequest(BaseModel):
     question: str
+    translate: bool | None = None
+    rag_multi: bool | None = None
 
 
 class RunRequest(BaseModel):
@@ -31,7 +33,7 @@ class RunRequest(BaseModel):
 @router.post("/oneshot")
 def oneshot(req: OneShotRequest):
     ensure_budget_ok()
-    payload = run_oneshot(req.question)
+    payload = run_oneshot(req.question, translate=req.translate, rag_multi=req.rag_multi)
     qid = str(uuid.uuid4())
     _QUERY_STORE[qid] = payload
     return {"qid": qid, "payload": payload}
@@ -50,6 +52,8 @@ def run_query(req: RunRequest):
     ensure_budget_ok()
     if not req.user_ack:
         raise HTTPException(status_code=400, detail="user_ack is required")
+
+    settings = get_settings()
 
     sql = req.sql
     if not sql and req.qid:
@@ -100,7 +104,10 @@ def demo_questions():
     settings = get_settings()
     cache = _load_json(Path(settings.demo_cache_path))
     if isinstance(cache, dict) and cache:
-        return {"questions": list(cache.keys())}
+        aliases = cache.get("_aliases")
+        if isinstance(aliases, dict) and aliases:
+            return {"questions": list(aliases.keys())}
+        return {"questions": [key for key in cache.keys() if key != "_aliases"]}
 
     questions = _load_questions_jsonl(Path("var/metadata/demo_questions.jsonl"))
     return {"questions": questions}

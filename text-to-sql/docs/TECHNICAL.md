@@ -29,14 +29,16 @@
 
 - `backend/`
   - FastAPI API, RAG, Oracle 서비스, 정책, 예산, 로깅
+- `../ui/`
+  - Next.js UI (repo root, 현재 연결 대상)
 - `ui/`
-  - Next.js UI (Ask/Review/Admin)
+  - 레거시 UI (text-to-sql 내부, Ask/Review/Admin)
 - `scripts/`
   - 자산 검증, 데모 캐시, 평가 스크립트
 - `deploy/`
   - Docker Compose 및 Dockerfiles
 - `var/`
-  - 런타임 데이터 (metadata, chroma, cache, logs) (gitignored)
+  - 런타임 데이터 (metadata, rag, cache, logs, mongo) (gitignored)
 - `oracle/`
   - Instant Client (Thick 모드에 필요)
 
@@ -58,6 +60,8 @@
   - `ORACLE_DSN`, `ORACLE_USER`, `ORACLE_PASSWORD`
   - `ORACLE_DEFAULT_SCHEMA`
   - `ORACLE_LIB_DIR`, `ORACLE_TNS_ADMIN`
+  - `RAG_PERSIST_DIR`, `RAG_TOP_K`, `RAG_EMBEDDING_DIM`
+  - `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION`, `MONGO_VECTOR_INDEX`
   - `BUDGET_CONFIG_PATH`
 
 ### 3.2 Oracle 레이어
@@ -78,14 +82,15 @@
 
 ### 3.3 RAG 파이프라인
 파일:
-- `backend/app/services/rag/chroma_store.py`
+- `backend/app/services/rag/mongo_store.py`
 - `backend/app/services/rag/indexer.py`
 - `backend/app/services/rag/retrieval.py`
 - `backend/app/services/runtime/context_budget.py`
 
 핵심 사항:
 - 스키마, 용어집, SQL 예시, 조인 템플릿 인덱싱
-- Chroma 설치 시 사용, 미설치 시 SimpleStore로 폴백
+- MongoDB 저장소 사용, `MONGO_VECTOR_INDEX`가 있으면 벡터 검색
+- Mongo 설정이 없으면 SimpleStore로 폴백
 - Top-K 검색 + 토큰 예산 기반 컨텍스트 트리밍
 
 ### 3.4 에이전트

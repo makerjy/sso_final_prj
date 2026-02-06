@@ -1,0 +1,103 @@
+{
+  "owner": "SSO",
+  "edges": [
+    {
+      "from_table": "PRESCRIPTIONS",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "DIAGNOSES_ICD",
+      "from_column": "ICD_CODE",
+      "to_table": "D_ICD_DIAGNOSES",
+      "to_column": "ICD_CODE",
+      "type": "FK"
+    },
+    {
+      "from_table": "DIAGNOSES_ICD",
+      "from_column": "ICD_CODE",
+      "to_table": "D_ICD_DIAGNOSES",
+      "to_column": "ICD_VERSION",
+      "type": "FK"
+    },
+    {
+      "from_table": "DIAGNOSES_ICD",
+      "from_column": "ICD_VERSION",
+      "to_table": "D_ICD_DIAGNOSES",
+      "to_column": "ICD_CODE",
+      "type": "FK"
+    },
+    {
+      "from_table": "DIAGNOSES_ICD",
+      "from_column": "ICD_VERSION",
+      "to_table": "D_ICD_DIAGNOSES",
+      "to_column": "ICD_VERSION",
+      "type": "FK"
+    },
+    {
+      "from_table": "LABEVENTS",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "PROCEDURES_ICD",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "CHARTEVENTS",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "INPUTEVENTS",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "OUTPUTEVENTS",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "PROCEDUREEVENTS",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "SERVICES",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "TRANSFERS",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    },
+    {
+      "from_table": "EMAR",
+      "from_column": "SUBJECT_ID",
+      "to_table": "PATIENTS",
+      "to_column": "SUBJECT_ID",
+      "type": "FK"
+    }
+  ]
+}

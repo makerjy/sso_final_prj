@@ -1,0 +1,10 @@
+.git
+.gitignore
+**/node_modules
+**/.next
+**/.turbo
+**/dist
+**/out
+**/.cache
+text-to-sql/var/mongo/
+text-to-sql/var/mongo/**

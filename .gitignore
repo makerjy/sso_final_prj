@@ -4,3 +4,7 @@ venv/
 
 # Local workspace
 9team/
+
+# Cache / artifacts
+text-to-sql/var/chroma/
+text-to-sql/var/chroma_cache/
