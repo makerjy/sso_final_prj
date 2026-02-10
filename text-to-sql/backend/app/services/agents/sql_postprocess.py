@@ -434,6 +434,16 @@ _OUTER_ROWNUM_RE = re.compile(
     r"^\s*SELECT\s+\*\s+FROM\s*\((SELECT .*?)\)\s*WHERE\s+ROWNUM\s*<=\s*(\d+)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_ABS_YEAR_RE = re.compile(r"(?<!\d)(?:19|20|21)\d{2}(?!\d)")
+_SYSDATE_YEAR_DIFF_RE = re.compile(
+    r"\(\s*(?:SYSDATE|CURRENT_DATE)\s*-\s*(?:CAST\s*\(\s*)?([A-Za-z0-9_\\.]+)"
+    r"(?:\s+AS\s+DATE\s*\))?\s*\)\s*/\s*365(?:\.25)?",
+    re.IGNORECASE,
+)
+_ADD_MONTHS_PRED_RE = re.compile(
+    r"([A-Za-z0-9_\\.]+)\s*(>=|>|<=|<)\s*ADD_MONTHS\s*\(\s*(?:SYSDATE|CURRENT_DATE)\s*,\s*[-+]?\d+\s*\*\s*12\s*\)",
+    re.IGNORECASE,
+)
 
 
 def _parse_columns(text: str) -> list[str]:
@@ -1081,6 +1091,60 @@ def _rewrite_prescriptions_drug_field(question: str, sql: str) -> tuple[str, lis
     if re.search(r"(?<!\.)\bITEMID\b", text, re.IGNORECASE):
         text = re.sub(r"(?<!\.)\bITEMID\b", "DRUG", text, flags=re.IGNORECASE)
         rules.append("prescriptions_itemid_to_drug")
+    return text, rules
+
+
+def _rewrite_prescriptions_columns(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+
+    aliases: set[str] = {"PRESCRIPTIONS"}
+    for m in re.finditer(
+        r"\b(?:FROM|JOIN)\s+PRESCRIPTIONS(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+        text,
+        re.IGNORECASE,
+    ):
+        alias = m.group(1)
+        if alias and alias.upper() not in {"ON", "WHERE", "JOIN", "GROUP", "ORDER", "INNER", "LEFT", "RIGHT", "FULL"}:
+            aliases.add(alias)
+
+    aliases_upper = {a.upper() for a in aliases}
+
+    def replace_qualified(col: str, repl: str) -> bool:
+        nonlocal text
+        changed = False
+
+        def _repl(match: re.Match) -> str:
+            nonlocal changed
+            alias = match.group(1)
+            if alias.upper() in aliases_upper:
+                changed = True
+                return f"{alias}.{repl}"
+            return match.group(0)
+
+        text = re.sub(
+            rf"\b([A-Za-z0-9_]+)\.{col}\b",
+            _repl,
+            text,
+            flags=re.IGNORECASE,
+        )
+        return changed
+
+    if replace_qualified("MEDICATION", "DRUG"):
+        rules.append("prescriptions_medication_to_drug")
+    if replace_qualified("CHARTTIME", "STARTTIME"):
+        rules.append("prescriptions_charttime_to_starttime")
+
+    # If EMAR is absent, unqualified MEDICATION/CHARTTIME in PRESCRIPTIONS context should map to DRUG/STARTTIME.
+    has_emar = re.search(r"\bEMAR(?:_DETAIL)?\b", text, re.IGNORECASE) is not None
+    if not has_emar:
+        if re.search(r"(?<!\.)\bMEDICATION\b", text, re.IGNORECASE):
+            text = re.sub(r"(?<!\.)\bMEDICATION\b", "DRUG", text, flags=re.IGNORECASE)
+            rules.append("prescriptions_unqualified_medication_to_drug")
+        if re.search(r"(?<!\.)\bCHARTTIME\b", text, re.IGNORECASE):
+            text = re.sub(r"(?<!\.)\bCHARTTIME\b", "STARTTIME", text, flags=re.IGNORECASE)
+            rules.append("prescriptions_unqualified_charttime_to_starttime")
+
     return text, rules
 
 
@@ -1756,6 +1820,48 @@ def _rewrite_hospital_expire_flag(sql: str) -> tuple[str, list[str]]:
     text = _HOSPITAL_EXPIRE_RE.sub("HOSPITAL_EXPIRE_FLAG = 1", text)
     rules.append("hospital_expire_flag_to_one")
     return text, rules
+
+
+def _rewrite_age_from_sysdate_diff(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+
+    new_text = _SYSDATE_YEAR_DIFF_RE.sub("ANCHOR_AGE", text)
+    if new_text != text:
+        rules.append("sysdate_diff_years_to_anchor_age")
+    return new_text, rules
+
+
+def _rewrite_absolute_year_range(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+
+    years = sorted({int(m.group(0)) for m in _ABS_YEAR_RE.finditer(question)})
+    if len(years) < 2:
+        return text, rules
+    start_year = years[0]
+    end_year = years[-1]
+    if end_year < start_year or (end_year - start_year) > 30:
+        return text, rules
+    if "ADD_MONTHS" not in text.upper():
+        return text, rules
+
+    changed = False
+
+    def _repl(match: re.Match) -> str:
+        nonlocal changed
+        col = match.group(1)
+        op = match.group(2)
+        changed = True
+        if op in (">=", ">"):
+            return f"{col} >= TO_DATE('{start_year}-01-01', 'YYYY-MM-DD')"
+        # Upper bound is normalized to strict less-than of next year.
+        return f"{col} < TO_DATE('{end_year + 1}-01-01', 'YYYY-MM-DD')"
+
+    new_text = _ADD_MONTHS_PRED_RE.sub(_repl, text)
+    if changed:
+        rules.append("absolute_year_range_from_question")
+    return new_text, rules
 
 
 def _rewrite_extract_day_diff(sql: str) -> tuple[str, list[str]]:
@@ -2682,7 +2788,10 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     prescriptions_field_fixed, prescriptions_field_rules = _rewrite_prescriptions_drug_field(q, procedures_forced)
     rules.extend(prescriptions_field_rules)
 
-    icd_code_fixed, icd_code_rules = _rewrite_icd_code_field(q, prescriptions_field_fixed)
+    prescriptions_col_fixed, prescriptions_col_rules = _rewrite_prescriptions_columns(prescriptions_field_fixed)
+    rules.extend(prescriptions_col_rules)
+
+    icd_code_fixed, icd_code_rules = _rewrite_icd_code_field(q, prescriptions_col_fixed)
     rules.extend(icd_code_rules)
 
     icd_itemid_fixed, icd_itemid_rules = _rewrite_itemid_in_icd_tables(icd_code_fixed)
@@ -2733,7 +2842,13 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     joined_adm, adm_rules = _ensure_admissions_join(rewritten_ext)
     rules.extend(adm_rules)
 
-    joined_patients, patient_rules = _ensure_patients_join(joined_adm)
+    year_range_fixed, year_range_rules = _rewrite_absolute_year_range(q, joined_adm)
+    rules.extend(year_range_rules)
+
+    age_from_diff_fixed, age_from_diff_rules = _rewrite_age_from_sysdate_diff(year_range_fixed)
+    rules.extend(age_from_diff_rules)
+
+    joined_patients, patient_rules = _ensure_patients_join(age_from_diff_fixed)
     rules.extend(patient_rules)
 
     rewritten_patients_id, patient_id_rules = _rewrite_patients_id(joined_patients)

@@ -71,7 +71,9 @@ ENGINEER_SYSTEM_PROMPT = (
     "using ICD_CODE and ICD_VERSION. "
 
     "Medication orders must use PRESCRIPTIONS. "
+    "In PRESCRIPTIONS, use DRUG (not MEDICATION) and STARTTIME/STOPTIME (not CHARTTIME). "
     "Medication administrations must use EMAR or EMAR_DETAIL. "
+    "In EMAR, use MEDICATION and CHARTTIME. "
 
     "Use SUBJECT_ID, HADM_ID, and STAY_ID consistently as join keys. "
 
@@ -111,6 +113,9 @@ EXPERT_SYSTEM_PROMPT = (
     "(D_ITEMS for CHARTEVENTS, D_LABITEMS for LABEVENTS). "
     "Verify correct ICD title joins "
     "(D_ICD_DIAGNOSES, D_ICD_PROCEDURES). "
+    "Verify medication table-column consistency: "
+    "PRESCRIPTIONS uses DRUG and STARTTIME/STOPTIME, "
+    "EMAR uses MEDICATION and CHARTTIME. "
 
     # ===== 최종 성능 기준 =====
     "Prefer aggressive WHERE filtering before JOIN, aggregation, "
@@ -132,5 +137,7 @@ CLARIFIER_SYSTEM_PROMPT = (
     "4) example_inputs must contain 1-3 concrete natural-language examples the user can reply with. "
     "5) If need_clarification=false, refined_question must be a single complete request that merges all known constraints. "
     "6) Keep output language aligned with the user's latest language. "
-    "7) Do not generate SQL."
+    "7) If latest_question is Korean, output Korean only for reason, clarification_question, options, and example_inputs. "
+    "Do not include any English words, phrases, or mixed-language sentences. "
+    "8) Do not generate SQL."
 )

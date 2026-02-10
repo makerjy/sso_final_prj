@@ -452,17 +452,17 @@ export function QueryView() {
       const options = Array.isArray(clarify?.options) ? clarify.options.filter(Boolean) : []
       const examples = Array.isArray(clarify?.example_inputs) ? clarify.example_inputs.filter(Boolean) : []
       const reason = clarify?.reason?.trim()
-      const parts = [prompt]
+      const lines = [prompt]
       if (reason) {
-        parts.push(`이유: ${reason}`)
+        lines.push(`이유: ${reason}`)
       }
       if (options.length) {
-        parts.push(`선택 예시: ${options.slice(0, 4).join(", ")}`)
+        lines.push(`선택 예시: ${options.slice(0, 4).join(", ")}`)
       }
       if (examples.length) {
-        parts.push(`답변 예: ${examples.slice(0, 2).join(" / ")}`)
+        lines.push(`답변 예: ${examples.slice(0, 2).join(" / ")}`)
       }
-      return parts.join(" ")
+      return lines.join("\n")
     }
     if (data.payload.mode === "demo") {
       const parts: string[] = []
@@ -1057,7 +1057,7 @@ export function QueryView() {
                         ? "bg-primary text-primary-foreground" 
                         : "bg-secondary"
                     )}>
-                      <p className="text-sm">{message.content}</p>
+                      <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
                       <span className="text-[10px] opacity-70 mt-1 block">
                         {message.timestamp.toLocaleTimeString()}
                       </span>

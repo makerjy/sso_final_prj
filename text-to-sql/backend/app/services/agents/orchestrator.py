@@ -91,19 +91,74 @@ def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
     return items
 
 
-def _normalize_clarifier_payload(payload: dict[str, Any]) -> dict[str, Any]:
+_ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_/-]*")
+_MULTI_SPACE_RE = re.compile(r"\s+")
+
+
+def _strip_english_tokens_for_korean(text: str) -> str:
+    # 한국어 문장을 유지하면서 영문 토큰을 제거한다.
+    cleaned = _ASCII_WORD_RE.sub("", text)
+    cleaned = re.sub(r"\s*[:：]\s*", ": ", cleaned)
+    cleaned = re.sub(r"\s*[/|]\s*", " / ", cleaned)
+    cleaned = _MULTI_SPACE_RE.sub(" ", cleaned).strip(" ,;")
+    return cleaned.strip()
+
+
+def _default_korean_clarification(question: str) -> tuple[str, list[str], list[str]]:
+    q = question.lower()
+    if "약" in question or "med" in q or "drug" in q or "medication" in q:
+        reason = "요청 범위가 넓어 약물군 또는 진료 영역을 먼저 좁혀야 합니다."
+        options = ["심혈관 약물", "정신과 약물", "항생제", "모든 약물"]
+        examples = [
+            "심혈관 약물에 대한 정보가 필요해요",
+            "정신과 약물로 좁혀주세요",
+            "항생제만 보여주세요",
+        ]
+        return reason, options, examples
+    reason = "질문 범위를 조금 더 좁혀야 정확한 SQL을 만들 수 있습니다."
+    options = ["기간을 지정", "대상 집단을 지정", "지표를 지정"]
+    examples = [
+        "최근 1년 데이터로 보여주세요",
+        "65세 이상 환자로 제한해 주세요",
+        "재입원율 기준으로만 알려주세요",
+    ]
+    return reason, options, examples
+
+
+def _normalize_clarifier_payload(payload: dict[str, Any], question: str) -> dict[str, Any]:
     need_clarification = bool(payload.get("need_clarification"))
     reason = str(payload.get("reason") or "").strip()
     clarification_question = str(payload.get("clarification_question") or "").strip()
     if need_clarification and not clarification_question:
         clarification_question = "질문 범위를 조금 더 좁혀주세요."
 
+    options = _normalize_string_list(payload.get("options"), limit=5)
+    example_inputs = _normalize_string_list(payload.get("example_inputs"), limit=3)
+
+    if contains_korean(question):
+        reason = _strip_english_tokens_for_korean(reason)
+        clarification_question = _strip_english_tokens_for_korean(clarification_question)
+        options = [_strip_english_tokens_for_korean(item) for item in options]
+        options = [item for item in options if item]
+        example_inputs = [_strip_english_tokens_for_korean(item) for item in example_inputs]
+        example_inputs = [item for item in example_inputs if item]
+
+        default_reason, default_options, default_examples = _default_korean_clarification(question)
+        if not reason:
+            reason = default_reason
+        if not clarification_question:
+            clarification_question = "어떤 기준으로 범위를 좁힐까요?"
+        if not options:
+            options = default_options
+        if not example_inputs:
+            example_inputs = default_examples
+
     return {
         "need_clarification": need_clarification,
         "reason": reason,
         "clarification_question": clarification_question,
-        "options": _normalize_string_list(payload.get("options"), limit=5),
-        "example_inputs": _normalize_string_list(payload.get("example_inputs"), limit=3),
+        "options": options,
+        "example_inputs": example_inputs,
         "refined_question": str(payload.get("refined_question") or "").strip(),
         "usage": payload.get("usage", {}),
     }
@@ -142,7 +197,7 @@ def run_oneshot(
         }
         try:
             clarity_raw = evaluate_question_clarity(original_question, conversation=conversation)
-            clarity = _normalize_clarifier_payload(clarity_raw)
+            clarity = _normalize_clarifier_payload(clarity_raw, original_question)
             _add_llm_cost(clarity.get("usage", {}), "clarify")
         except Exception:
             clarity = {**clarity, "need_clarification": False}
