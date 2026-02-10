@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# ???? ??? ???? ???? .env ??
+# Load project-level .env regardless of current working directory.
 _DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_DOTENV_PATH)
 

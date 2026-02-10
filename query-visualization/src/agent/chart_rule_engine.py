@@ -251,7 +251,14 @@ def _infer_context_flags(user_query: Optional[str], available_columns: List[str]
     cols = {c.lower() for c in available_columns}
     icu_kw = any(k in q for k in ("icu", "중환자실", "입실", "입실 후", "입실후"))
     admit_kw = any(k in q for k in ("입원", "입원 후", "admission", "admit"))
-    post_days = any(k in q for k in ("후", "days after", "after", "n일", "일간"))
+    # "후" 단독 키워드는 오탐이 많아 숫자+시간 단위 패턴만 허용한다.
+    post_days = bool(
+        re.search(r"\bafter\s+\d+\s*(day|days|hour|hours|d|h)\b", q)
+        or re.search(r"\b\d+\s*(day|days|hour|hours|d|h)\s+after\b", q)
+        or re.search(r"\b후\s*\d+\s*(일|시간)\b", q)
+        or re.search(r"\b\d+\s*(일|시간)\s*후\b", q)
+        or re.search(r"\bn일\s*후\b", q)
+    )
 
     # ICU 맥락: 키워드 또는 stay_id+intime이 있는 경우 보수적으로 판단
     icu_context = icu_kw or ("stay_id" in cols and "intime" in cols)
@@ -311,6 +318,25 @@ def _find_elapsed_column(cols: List[str], context: str) -> Optional[str]:
 def _is_identifier_col(col: str) -> bool:
     lower = col.lower()
     return any(tok == lower or tok in lower for tok in _IDENTIFIER_COLS)
+
+
+def _dedupe_plans(plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unique: List[Dict[str, Any]] = []
+    seen = set()
+    for plan in plans:
+        spec = plan.get("chart_spec") or {}
+        key = (
+            spec.get("chart_type"),
+            spec.get("x"),
+            spec.get("y"),
+            spec.get("group"),
+            spec.get("agg"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(plan)
+    return unique
 
 # 입력: intent, group_var, time_var, available_columns, context_flags
 # 출력: None | Exception
@@ -521,8 +547,11 @@ def plan_analyses(
                         list(df.columns),
                         context_flags,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event(
+                        "rule_engine.suggested_plan.blocked",
+                        {"reason": str(exc), "chart_spec": spec},
+                    )
                 else:
                     plans.append(suggested_plan)
         else:
@@ -534,10 +563,10 @@ def plan_analyses(
         try:
             validate_plan(intent, group_var, time_info,
                           list(df.columns), context_flags)
-        except Exception:
+        except Exception as exc:
             # 규칙 위반 시 trend 플랜을 만들지 않는다(의미 보존 우선)
             log_event("rule_engine.trend.blocked",
-                      {"reason": "rule_violation"})
+                      {"reason": str(exc)})
         else:
             patient_group = _pick_patient_group(df)
             line_group = patient_group or group_var
@@ -608,6 +637,31 @@ def plan_analyses(
                     "reason": "그룹별 분포 차이와 이상치를 비교하기 좋습니다.",
                 }
             )
+    elif intent == "proportion" and primary:
+        # 비율 질문은 추세/그룹 비교 둘 다 가능하므로 time 우선, 없으면 group 기반 bar.
+        if time_var:
+            plans.append(
+                {
+                    "chart_spec": {
+                        "chart_type": "line",
+                        "x": time_var,
+                        "y": primary,
+                        "group": group_var,
+                    },
+                    "reason": "시간에 따른 비율 변화를 확인할 수 있습니다.",
+                }
+            )
+        elif group_var:
+            plans.append(
+                {
+                    "chart_spec": {
+                        "chart_type": "bar",
+                        "x": group_var,
+                        "y": primary,
+                    },
+                    "reason": "그룹별 비율 차이를 확인할 수 있습니다.",
+                }
+            )
     elif intent == "correlation" and primary:
         if not _is_identifier_col(primary):
             other = None
@@ -656,6 +710,7 @@ def plan_analyses(
                 }
             )
 
+    plans = _dedupe_plans(plans)
     log_event("rule_engine.plans", {"count": len(plans)})
 
     return plans

@@ -28,7 +28,7 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
 
 
 def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Qdrant에서 관련 컨텍스트를 검색해 반환."""
+    """Vector DB에서 관련 컨텍스트를 검색해 반환."""
     try:
         query_text = _build_query_text(user_query, df_schema)
         query_embedding = _embed_texts([query_text])[0]
@@ -38,7 +38,7 @@ def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, An
 
         snippets = []
         for hit in hits:
-            payload = (hit.get('metadata') or {}) | {'text': hit.get('text')}
+            payload = (hit.get("metadata") or {}) | {"text": hit.get("text")}
             text = payload.get("text")
             if text:
                 snippets.append(text)

@@ -29,6 +29,35 @@ def _build_code(chart_spec: Dict[str, Any]) -> str:
     )
 
 
+def _aggregate_frame(
+    df: pd.DataFrame,
+    x: str,
+    y: str,
+    group: str | None,
+    agg: str | None,
+) -> pd.DataFrame:
+    if not agg:
+        return df
+
+    agg_map = {
+        "avg": "mean",
+        "mean": "mean",
+        "sum": "sum",
+        "min": "min",
+        "max": "max",
+        "count": "count",
+        "median": "median",
+    }
+    agg_func = agg_map.get(str(agg).lower())
+    if not agg_func:
+        return df
+
+    by_cols = [x]
+    if group:
+        by_cols.append(group)
+    return df.groupby(by_cols, dropna=False, as_index=False)[y].agg(agg_func)
+
+
 def generate_chart(
     chart_spec: Dict[str, Any],
     df: pd.DataFrame,
@@ -48,12 +77,14 @@ def generate_chart(
     fig = None
 
     if chart_type == "line" and x and y:
-        fig = px.line(df, x=x, y=y, color=group)
+        chart_df = _aggregate_frame(df, x, y, group, agg)
+        fig = px.line(chart_df, x=x, y=y, color=group)
     elif chart_type == "bar" and x and y:
+        chart_df = _aggregate_frame(df, x, y, group, agg)
         if agg:
-            fig = px.bar(df, x=x, y=y, color=group, barmode="group")
+            fig = px.bar(chart_df, x=x, y=y, color=group, barmode="group")
         else:
-            fig = px.bar(df, x=x, y=y, color=group)
+            fig = px.bar(chart_df, x=x, y=y, color=group)
     elif chart_type == "hist" and x:
         fig = px.histogram(df, x=x, color=group)
     elif chart_type == "scatter" and x and y:
