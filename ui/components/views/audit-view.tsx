@@ -478,9 +478,15 @@ export function AuditView() {
                         <Code className="w-3 h-3" />
                         실행된 SQL
                       </div>
-                      <pre className="p-3 rounded-lg bg-background text-[11px] font-mono text-foreground overflow-x-auto whitespace-pre-wrap border border-border">
-                        {log.query.sql}
-                      </pre>
+                      <div className="p-3 rounded-lg bg-background text-[11px] font-mono text-foreground overflow-auto max-h-[420px] border border-border [scrollbar-gutter:stable]">
+                        {log.query.sql ? (
+                          <pre className="whitespace-pre-wrap leading-6">
+                            <code dangerouslySetInnerHTML={{ __html: highlightSqlForDisplay(log.query.sql) }} />
+                          </pre>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">SQL 없음</span>
+                        )}
+                      </div>
                     </div>
 
                     {/* Result Snapshot */}
@@ -508,4 +514,95 @@ export function AuditView() {
       </Card>
     </div>
   )
+}
+
+function formatSqlForDisplay(sql: string) {
+  if (!sql?.trim()) return sql
+
+  let formatted = sql.replace(/\s+/g, " ").trim()
+
+  const clausePatterns: RegExp[] = [
+    /\bWITH\b/gi,
+    /\bSELECT\b/gi,
+    /\bFROM\b/gi,
+    /\bLEFT\s+OUTER\s+JOIN\b/gi,
+    /\bRIGHT\s+OUTER\s+JOIN\b/gi,
+    /\bFULL\s+OUTER\s+JOIN\b/gi,
+    /\bLEFT\s+JOIN\b/gi,
+    /\bRIGHT\s+JOIN\b/gi,
+    /\bINNER\s+JOIN\b/gi,
+    /\bFULL\s+JOIN\b/gi,
+    /\bJOIN\b/gi,
+    /\bON\b/gi,
+    /\bWHERE\b/gi,
+    /\bGROUP\s+BY\b/gi,
+    /\bHAVING\b/gi,
+    /\bORDER\s+BY\b/gi,
+    /\bUNION\s+ALL\b/gi,
+    /\bUNION\b/gi,
+  ]
+
+  for (const pattern of clausePatterns) {
+    formatted = formatted.replace(pattern, (match, offset) => {
+      const token = match.toUpperCase().replace(/\s+/g, " ")
+      return offset === 0 ? token : `\n${token}`
+    })
+  }
+
+  formatted = formatted.replace(/,\s*/g, ",\n  ")
+  formatted = formatted.replace(/\bCASE\b/gi, "\nCASE")
+  formatted = formatted.replace(/\bWHEN\b/gi, "\n  WHEN")
+  formatted = formatted.replace(/\bTHEN\b/gi, "\n    THEN")
+  formatted = formatted.replace(/\bELSE\b/gi, "\n  ELSE")
+  formatted = formatted.replace(/\bEND\b/gi, "\nEND")
+  formatted = formatted.replace(/\s+(AND|OR)\s+/gi, (_, op) => `\n  ${String(op).toUpperCase()} `)
+  return formatted.replace(/\n{3,}/g, "\n\n").trim()
+}
+
+function highlightSqlForDisplay(sql: string) {
+  const formatted = formatSqlForDisplay(sql)
+  if (!formatted?.trim()) return ""
+
+  const keywordPattern =
+    /\b(WITH|SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|FULL|OUTER|ON|GROUP|BY|HAVING|ORDER|UNION|ALL|DISTINCT|AS|CASE|WHEN|THEN|ELSE|END|AND|OR|IN|IS|NOT|NULL|LIKE)\b/gi
+  const functionPattern =
+    /\b(COUNT|SUM|AVG|MIN|MAX|CAST|COALESCE|NVL|EXTRACT|ROUND|TRUNC|TO_DATE|TO_CHAR)\b(?=\s*\()/gi
+
+  let highlighted = escapeHtml(formatted)
+  const placeholders: string[] = []
+
+  const stash = (pattern: RegExp, className: string) => {
+    highlighted = highlighted.replace(pattern, (match) => {
+      const token = `__SQL_TOKEN_${placeholders.length}__`
+      placeholders.push(`<span class="${className}">${match}</span>`)
+      return token
+    })
+  }
+
+  stash(/--[^\n]*/g, "text-muted-foreground")
+  stash(/'(?:''|[^'])*'/g, "text-lime-700 dark:text-lime-400")
+  stash(/"(?:[^"]|"")*"/g, "text-lime-700 dark:text-lime-400")
+
+  highlighted = highlighted.replace(
+    functionPattern,
+    (match) => `<span class="text-pink-600 dark:text-pink-400 font-semibold">${match.toUpperCase()}</span>`
+  )
+  highlighted = highlighted.replace(
+    keywordPattern,
+    (match) => `<span class="text-sky-600 dark:text-sky-400 font-semibold">${match.toUpperCase()}</span>`
+  )
+
+  highlighted = highlighted.replace(/__SQL_TOKEN_(\d+)__/g, (_, idx) => {
+    const token = placeholders[Number(idx)]
+    return token || ""
+  })
+
+  return highlighted
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
 }

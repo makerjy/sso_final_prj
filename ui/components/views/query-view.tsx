@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useMemo, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -31,6 +31,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { SurvivalChart } from "@/components/survival-chart"
+import { useAuth } from "@/components/auth-provider"
 
 interface ChatMessage {
   id: string
@@ -60,13 +61,31 @@ interface DemoResult {
   source?: string
 }
 
+interface PolicyCheck {
+  name: string
+  passed: boolean
+  message: string
+}
+
+interface PolicyResult {
+  passed?: boolean
+  checks?: PolicyCheck[]
+}
+
 interface OneShotPayload {
-  mode: "demo" | "advanced"
+  mode: "demo" | "advanced" | "clarify"
   question: string
   result?: DemoResult
   risk?: { risk?: number; intent?: string }
+  policy?: PolicyResult | null
   draft?: { final_sql?: string }
-  final?: { final_sql?: string; warnings?: string[] | string; risk_score?: number; used_tables?: string[] }
+  final?: { final_sql?: string; risk_score?: number; used_tables?: string[] }
+  clarification?: {
+    reason?: string
+    question?: string
+    options?: string[]
+    example_inputs?: string[]
+  }
 }
 
 interface OneShotResponse {
@@ -77,6 +96,7 @@ interface OneShotResponse {
 interface RunResponse {
   sql: string
   result: PreviewData
+  policy?: PolicyResult | null
 }
 
 interface PersistedQueryState {
@@ -126,9 +146,32 @@ const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | n
   const final = payload.final
     ? {
         final_sql: payload.final.final_sql,
-        warnings: payload.final.warnings,
         risk_score: payload.final.risk_score,
         used_tables: payload.final.used_tables,
+      }
+    : undefined
+  const policy = payload.policy
+    ? {
+        passed: payload.policy.passed,
+        checks: Array.isArray(payload.policy.checks)
+          ? payload.policy.checks.map((item) => ({
+              name: String(item.name ?? ""),
+              passed: Boolean(item.passed),
+              message: String(item.message ?? ""),
+            }))
+          : [],
+      }
+    : undefined
+  const clarification = payload.clarification
+    ? {
+        reason: payload.clarification.reason,
+        question: payload.clarification.question,
+        options: Array.isArray(payload.clarification.options)
+          ? payload.clarification.options.map((item) => String(item))
+          : [],
+        example_inputs: Array.isArray(payload.clarification.example_inputs)
+          ? payload.clarification.example_inputs.map((item) => String(item))
+          : [],
       }
     : undefined
   return {
@@ -138,8 +181,10 @@ const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | n
       question: payload.question,
       result,
       risk: payload.risk,
+      policy,
       draft,
       final,
+      clarification,
     },
   }
 }
@@ -160,9 +205,12 @@ const deserializeMessages = (messages: PersistedChatMessage[]): ChatMessage[] =>
   })
 
 export function QueryView() {
+  const { user, isHydrated: isAuthHydrated } = useAuth()
   const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
-  const chatUser = "김연구원"
+  const chatUser = (user?.name || "김연구원").trim() || "김연구원"
+  const chatUserRole = (user?.role || "연구원").trim() || "연구원"
+  const chatHistoryUser = (user?.id || chatUser).trim() || chatUser
   const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 45000) => {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -192,7 +240,16 @@ export function QueryView() {
     "ICU 재원일수가 가장 긴 환자는 누구인가요?",
   ])
   const [isHydrated, setIsHydrated] = useState(false)
+  const [isSqlDragging, setIsSqlDragging] = useState(false)
   const saveTimerRef = useRef<number | null>(null)
+  const sqlScrollRef = useRef<HTMLDivElement | null>(null)
+  const sqlDragRef = useRef({
+    active: false,
+    startX: 0,
+    startY: 0,
+    scrollLeft: 0,
+    scrollTop: 0,
+  })
 
   const payload = response?.payload
   const mode = payload?.mode
@@ -201,12 +258,6 @@ export function QueryView() {
     (mode === "demo"
       ? demoResult?.sql
       : payload?.final?.final_sql || payload?.draft?.final_sql) || ""
-  const warnings = (() => {
-    const raw = payload?.final?.warnings
-    if (Array.isArray(raw)) return raw.map((item) => String(item)).filter(Boolean)
-    if (typeof raw === "string" && raw.trim()) return [raw.trim()]
-    return []
-  })()
   const riskScore = payload?.final?.risk_score ?? payload?.risk?.risk
   const riskIntent = payload?.risk?.intent
   const preview = runResult?.result ?? demoResult?.preview ?? null
@@ -230,13 +281,59 @@ export function QueryView() {
   const summary = demoResult?.summary
   const source = demoResult?.source
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
+  const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
+  const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
   const hasConversation =
     messages.length > 0 || Boolean(response) || Boolean(runResult) || query.trim().length > 0
-  const appendSuggestions = (base: string) => base
+  const appendSuggestions = (base: string, _suggestions?: string[]) => base
 
-  const normalizeColumn = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "")
-  const findColumnIndex = (columns: string[], candidates: string[]) => {
+  const handleSqlMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    const el = sqlScrollRef.current
+    if (!el) return
+
+    sqlDragRef.current = {
+      active: true,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: el.scrollLeft,
+      scrollTop: el.scrollTop,
+    }
+    setIsSqlDragging(true)
+    event.preventDefault()
+  }
+
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!sqlDragRef.current.active) return
+      const el = sqlScrollRef.current
+      if (!el) return
+      const dx = event.clientX - sqlDragRef.current.startX
+      const dy = event.clientY - sqlDragRef.current.startY
+      el.scrollLeft = sqlDragRef.current.scrollLeft - dx
+      el.scrollTop = sqlDragRef.current.scrollTop - dy
+    }
+
+    const stopDragging = () => {
+      if (!sqlDragRef.current.active) return
+      sqlDragRef.current.active = false
+      setIsSqlDragging(false)
+    }
+
+    window.addEventListener("mousemove", handleMouseMove)
+    window.addEventListener("mouseup", stopDragging)
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("mouseup", stopDragging)
+    }
+  }, [])
+
+  function normalizeColumn(value: string) {
+    return value.toLowerCase().replace(/[^a-z0-9]/g, "")
+  }
+
+  function findColumnIndex(columns: string[], candidates: string[]) {
     const normalized = columns.map((col) => normalizeColumn(col))
     for (const candidate of candidates) {
       const idx = normalized.indexOf(normalizeColumn(candidate))
@@ -244,12 +341,14 @@ export function QueryView() {
     }
     return -1
   }
-  const toNumber = (value: unknown) => {
+
+  function toNumber(value: unknown) {
     if (value == null) return null
     const num = Number(value)
     return Number.isFinite(num) ? num : null
   }
-  const buildSurvivalFromPreview = (columns: string[], rows: any[][]) => {
+
+  function buildSurvivalFromPreview(columns: string[], rows: any[][]) {
     if (!columns.length || !rows.length) return null
     const timeIdx = findColumnIndex(columns, ["time", "days", "day", "week", "weeks", "month", "months"])
     const survivalIdx = findColumnIndex(columns, ["survival", "survivalrate", "rate", "prob", "probability"])
@@ -325,6 +424,18 @@ export function QueryView() {
     return suggestions.slice(0, 3)
   }
 
+  const buildClarificationSuggestions = (payload?: OneShotPayload) => {
+    if (!payload?.clarification) return []
+    const options = Array.isArray(payload.clarification.options)
+      ? payload.clarification.options.map((item) => String(item).trim()).filter(Boolean)
+      : []
+    const examples = Array.isArray(payload.clarification.example_inputs)
+      ? payload.clarification.example_inputs.map((item) => String(item).trim()).filter(Boolean)
+      : []
+    const merged = [...options, ...examples]
+    return Array.from(new Set(merged)).slice(0, 5)
+  }
+
   const readError = async (res: Response) => {
     const text = await res.text()
     try {
@@ -335,6 +446,24 @@ export function QueryView() {
   }
 
   const buildAssistantMessage = (data: OneShotResponse) => {
+    if (data.payload.mode === "clarify") {
+      const clarify = data.payload.clarification
+      const prompt = clarify?.question?.trim() || "질문 범위를 조금 더 좁혀주세요."
+      const options = Array.isArray(clarify?.options) ? clarify.options.filter(Boolean) : []
+      const examples = Array.isArray(clarify?.example_inputs) ? clarify.example_inputs.filter(Boolean) : []
+      const reason = clarify?.reason?.trim()
+      const parts = [prompt]
+      if (reason) {
+        parts.push(`이유: ${reason}`)
+      }
+      if (options.length) {
+        parts.push(`선택 예시: ${options.slice(0, 4).join(", ")}`)
+      }
+      if (examples.length) {
+        parts.push(`답변 예: ${examples.slice(0, 2).join(" / ")}`)
+      }
+      return parts.join(" ")
+    }
     if (data.payload.mode === "demo") {
       const parts: string[] = []
       const summaryText = data.payload.result?.summary
@@ -350,25 +479,28 @@ export function QueryView() {
     }
     const base = "요청하신 내용을 바탕으로 SQL을 준비했어요. 실행하면 결과를 가져올게요."
     const payload = data.payload
-    const localWarnings = (() => {
-      const raw = payload?.final?.warnings
-      if (Array.isArray(raw)) return raw.map((item) => String(item)).filter(Boolean)
-      if (typeof raw === "string" && raw.trim()) return [raw.trim()]
-      return []
-    })()
     const localRiskScore = payload?.final?.risk_score ?? payload?.risk?.risk
     const localRiskIntent = payload?.risk?.intent
     const riskLabel =
       localRiskScore != null ? `위험도 ${localRiskScore}${localRiskIntent ? ` (${localRiskIntent})` : ""}로 평가됐어요.` : ""
-    const warnLabel = localWarnings.length ? `주의할 점: ${localWarnings.join(", ")}` : ""
-    return [base, riskLabel, warnLabel].filter(Boolean).join(" ")
+    return [base, riskLabel].filter(Boolean).join(" ")
   }
 
   useEffect(() => {
+    if (!isAuthHydrated || !chatHistoryUser) return
     const loadChatState = async () => {
+      setQuery("")
+      setMessages([])
+      setResponse(null)
+      setRunResult(null)
+      setShowResults(false)
+      setEditedSql("")
+      setIsEditing(false)
+      setLastQuestion("")
+      setSuggestedQuestions([])
       try {
         const res = await fetchWithTimeout(
-          apiUrl(`/chat/history?user=${encodeURIComponent(chatUser)}`),
+          apiUrl(`/chat/history?user=${encodeURIComponent(chatHistoryUser)}`),
           {},
           12000
         )
@@ -393,10 +525,10 @@ export function QueryView() {
       }
     }
     loadChatState()
-  }, [apiBaseUrl])
+  }, [apiBaseUrl, isAuthHydrated, chatHistoryUser])
 
   useEffect(() => {
-    if (!isHydrated) return
+    if (!isHydrated || !chatHistoryUser) return
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current)
     }
@@ -416,7 +548,7 @@ export function QueryView() {
       fetch(apiUrl("/chat/history"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: chatUser, state })
+        body: JSON.stringify({ user: chatHistoryUser, state })
       }).catch(() => {})
     }, 600)
     return () => {
@@ -437,6 +569,7 @@ export function QueryView() {
     isEditing,
     isTechnicalMode,
     apiBaseUrl,
+    chatHistoryUser,
   ])
 
   useEffect(() => {
@@ -463,7 +596,7 @@ export function QueryView() {
     setResponse(null)
     setRunResult(null)
     setEditedSql("")
-    setShowResults(true)
+    setShowResults(false)
     setLastQuestion(trimmed)
     setSuggestedQuestions([])
     const newMessage: ChatMessage = {
@@ -472,6 +605,11 @@ export function QueryView() {
       content: trimmed,
       timestamp: new Date()
     }
+    const shouldUseClarificationContext = response?.payload?.mode === "clarify"
+    const conversationSeed = shouldUseClarificationContext ? [...messages, newMessage] : [newMessage]
+    const conversation = conversationSeed
+      .slice(-10)
+      .map((item) => ({ role: item.role, content: item.content }))
     setMessages(prev => [...prev, newMessage])
     setQuery("")
 
@@ -481,8 +619,9 @@ export function QueryView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: trimmed,
+          conversation,
           user_name: chatUser,
-          user_role: "연구원",
+          user_role: chatUserRole,
         })
       })
       if (!res.ok) {
@@ -490,16 +629,35 @@ export function QueryView() {
       }
       const data: OneShotResponse = await res.json()
       setResponse(data)
-      setEditedSql(
+      if (data.payload.mode === "clarify") {
+        setShowResults(false)
+        setEditedSql("")
+        setIsEditing(false)
+        const clarificationSuggestions = buildClarificationSuggestions(data.payload)
+        setSuggestedQuestions(clarificationSuggestions)
+        const responseMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: appendSuggestions(buildAssistantMessage(data), clarificationSuggestions),
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, responseMessage])
+        return
+      }
+
+      setShowResults(true)
+      const generatedSql =
         (data.payload.mode === "demo"
           ? data.payload.result?.sql
           : data.payload.final?.final_sql || data.payload.draft?.final_sql) || ""
+      setEditedSql(
+        generatedSql
       )
       setIsEditing(false)
-      const suggestions = buildSuggestions(
-        trimmed,
-        data.payload.mode === "demo" ? data.payload.result?.preview?.columns : undefined
-      )
+      const suggestions =
+        data.payload.mode === "demo"
+          ? buildSuggestions(trimmed, data.payload.result?.preview?.columns)
+          : []
       setSuggestedQuestions(suggestions)
       const responseMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -508,6 +666,16 @@ export function QueryView() {
         timestamp: new Date()
       }
       setMessages(prev => [...prev, responseMessage])
+
+      // Advanced 모드에서는 SQL 생성 직후 자동 실행
+      if (data.payload.mode === "advanced" && generatedSql.trim()) {
+        await executeAdvancedSql({
+          qid: data.qid,
+          sql: generatedSql,
+          questionForSuggestions: trimmed,
+          addAssistantMessage: true,
+        })
+      }
     } catch (err: any) {
       const message =
         err?.name === "AbortError"
@@ -592,38 +760,47 @@ export function QueryView() {
     }
   }
 
-  const handleExecuteEdited = async (overrideSql?: string) => {
-    if (!response || mode !== "advanced") return
-    setIsLoading(true)
-    setError(null)
-    setBoardMessage(null)
-    try {
-      const sqlToRun = (overrideSql || editedSql || currentSql).trim()
-      const body: Record<string, any> = {
-        user_ack: true,
-        user_name: chatUser,
-        user_role: "연구원",
-      }
-      if (response.qid) {
-        body.qid = response.qid
-      }
-      if (sqlToRun) {
-        body.sql = sqlToRun
-      }
-      const res = await fetchWithTimeout(apiUrl("/query/run"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      })
-      if (!res.ok) {
-        throw new Error(await readError(res))
-      }
-      const data: RunResponse = await res.json()
-      setRunResult(data)
-      setShowResults(true)
-      setIsEditing(false)
-      const suggestions = buildSuggestions(lastQuestion, data.result?.columns)
-      setSuggestedQuestions(suggestions)
+  const executeAdvancedSql = async ({
+    qid,
+    sql,
+    questionForSuggestions,
+    addAssistantMessage = true,
+  }: {
+    qid?: string
+    sql?: string
+    questionForSuggestions?: string
+    addAssistantMessage?: boolean
+  }) => {
+    const body: Record<string, any> = {
+      user_ack: true,
+      user_name: chatUser,
+      user_role: chatUserRole,
+    }
+    if (qid) {
+      body.qid = qid
+    }
+    if (sql?.trim()) {
+      body.sql = sql.trim()
+    }
+
+    const res = await fetchWithTimeout(apiUrl("/query/run"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+    if (!res.ok) {
+      throw new Error(await readError(res))
+    }
+
+    const data: RunResponse = await res.json()
+    setRunResult(data)
+    setShowResults(true)
+    setIsEditing(false)
+
+    const suggestions = buildSuggestions(questionForSuggestions || lastQuestion, data.result?.columns)
+    setSuggestedQuestions(suggestions)
+
+    if (addAssistantMessage) {
       setMessages(prev => [
         ...prev,
         {
@@ -636,6 +813,22 @@ export function QueryView() {
           timestamp: new Date()
         }
       ])
+    }
+  }
+
+  const handleExecuteEdited = async (overrideSql?: string) => {
+    if (!response || mode !== "advanced") return
+    setIsLoading(true)
+    setError(null)
+    setBoardMessage(null)
+    try {
+      const sqlToRun = (overrideSql || editedSql || currentSql).trim()
+      await executeAdvancedSql({
+        qid: response.qid,
+        sql: sqlToRun,
+        questionForSuggestions: lastQuestion,
+        addAssistantMessage: true,
+      })
     } catch (err: any) {
       const message =
         err?.name === "AbortError"
@@ -703,7 +896,7 @@ export function QueryView() {
     fetch(apiUrl("/chat/history"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: chatUser, state: null })
+      body: JSON.stringify({ user: chatHistoryUser, state: null })
     }).catch(() => {})
   }
 
@@ -715,8 +908,31 @@ export function QueryView() {
         checks: [{ name: "Demo cache", passed: true, message: "캐시 결과" }]
       }
     }
+    if (mode === "clarify") {
+      return {
+        status: "warning" as const,
+        checks: [{ name: "Clarification", passed: false, message: "추가 질문 응답 대기 중" }]
+      }
+    }
     const checks: { name: string; passed: boolean; message: string }[] = []
-    checks.push({ name: "PolicyGate", passed: true, message: "통과" })
+    const policyChecks = Array.isArray(payload?.policy?.checks)
+      ? payload.policy!.checks!
+      : Array.isArray(runResult?.policy?.checks)
+        ? runResult!.policy!.checks!
+        : []
+    if (policyChecks.length > 0) {
+      const passedAll = policyChecks.every((item) => item.passed)
+      checks.push({ name: "PolicyGate", passed: passedAll, message: passedAll ? "통과" : "실패" })
+      for (const item of policyChecks) {
+        checks.push({
+          name: item.name || "Policy",
+          passed: Boolean(item.passed),
+          message: item.message || "",
+        })
+      }
+    } else {
+      checks.push({ name: "PolicyGate", passed: true, message: "통과" })
+    }
     if (riskScore != null) {
       checks.push({
         name: "Risk score",
@@ -724,12 +940,11 @@ export function QueryView() {
         message: `${riskScore}${riskIntent ? ` (${riskIntent})` : ""}`
       })
     }
-    warnings.forEach((warning, idx) => {
-      checks.push({ name: `경고 ${idx + 1}`, passed: false, message: warning })
-    })
     let status: "safe" | "warning" | "danger" = "safe"
-    if ((riskScore ?? 0) >= 4) status = "danger"
-    else if ((riskScore ?? 0) >= 2 || warnings.length) status = "warning"
+    if (checks.some((item) => !item.passed && item.name !== "Risk score")) {
+      status = "danger"
+    } else if ((riskScore ?? 0) >= 4) status = "danger"
+    else if ((riskScore ?? 0) >= 2) status = "warning"
     return { status, checks }
   })()
   const validationStatus = validation?.status ?? "safe"
@@ -742,6 +957,22 @@ export function QueryView() {
       case "danger": return <XCircle className="w-4 h-4 text-destructive" />
       default: return null
     }
+  }
+
+  const getValidationLabel = (name: string) => {
+    const labels: Record<string, string> = {
+      "PolicyGate": "정책 게이트",
+      "Read-only": "읽기 전용",
+      "Statement type": "쿼리 타입",
+      "CTE": "CTE 문법",
+      "Join limit": "조인 개수 제한",
+      "WHERE rule": "WHERE 규칙",
+      "Table scope": "테이블 범위",
+      "Risk score": "위험 점수",
+      "Demo cache": "데모 캐시",
+      "Clarification": "질문 명확화",
+    }
+    return labels[name] || name
   }
 
   return (
@@ -779,7 +1010,7 @@ export function QueryView() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
         {/* Chat Panel */}
         <div className="flex-1 flex flex-col lg:border-r border-border min-h-0">
           {/* Messages */}
@@ -895,8 +1126,8 @@ export function QueryView() {
 
         {/* Results Panel */}
         {showResults && (
-          <div className="lg:w-[55%] flex flex-col overflow-hidden border-t lg:border-t-0 border-border max-h-[50vh] lg:max-h-none">
-            <Tabs defaultValue={isTechnicalMode ? "sql" : "results"} className="flex-1 flex flex-col">
+          <div className="lg:w-[55%] min-h-0 flex flex-col overflow-hidden border-t lg:border-t-0 border-border max-h-[50vh] lg:max-h-none">
+            <Tabs defaultValue={isTechnicalMode ? "sql" : "results"} className="flex-1 min-h-0 flex flex-col">
               <div className="px-4 pt-2 border-b border-border">
                 <TabsList className="h-9">
                   {isTechnicalMode && (
@@ -922,7 +1153,7 @@ export function QueryView() {
 
               {/* SQL Tab */}
               {isTechnicalMode && (
-                <TabsContent value="sql" className="flex-1 overflow-y-auto p-4 space-y-4 mt-0">
+                <TabsContent value="sql" className="flex-1 min-h-0 overflow-y-auto p-4 pb-6 space-y-4 mt-0">
                   {/* Validation Panel */}
                   <Card className={cn(
                     "border-l-4",
@@ -939,16 +1170,16 @@ export function QueryView() {
                     </CardHeader>
                     <CardContent>
                       {validationChecks.length ? (
-                        <div className="grid grid-cols-2 gap-2">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                           {validationChecks.map((check, idx) => (
-                            <div key={idx} className="flex items-center gap-2 text-xs">
+                            <div key={idx} className="flex items-start gap-2 text-xs">
                               {check.passed ? (
-                                <CheckCircle2 className="w-3 h-3 text-primary" />
+                                <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
                               ) : (
-                                <XCircle className="w-3 h-3 text-destructive" />
+                                <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
                               )}
-                              <span className="text-muted-foreground">{check.name}:</span>
-                              <span className="text-foreground">{check.message}</span>
+                              <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
+                              <span className="text-foreground break-words">{check.message}</span>
                             </div>
                           ))}
                         </div>
@@ -1029,9 +1260,23 @@ export function QueryView() {
                           </p>
                         </div>
                       ) : (
-                        <pre className="p-3 rounded-lg bg-secondary/50 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">
-                          {displaySql || "SQL이 아직 생성되지 않았습니다."}
-                        </pre>
+                        <div
+                          ref={sqlScrollRef}
+                          onMouseDown={handleSqlMouseDown}
+                          className={cn(
+                            "p-4 pb-6 pr-6 rounded-xl bg-secondary/50 border border-border/60 text-[13px] font-mono leading-7 text-foreground overflow-x-auto overflow-y-visible [scrollbar-gutter:stable]",
+                            "cursor-grab select-none",
+                            isSqlDragging && "cursor-grabbing"
+                          )}
+                        >
+                          {formattedDisplaySql ? (
+                            <pre className="w-max min-w-full whitespace-pre pb-1">
+                              <code dangerouslySetInnerHTML={{ __html: highlightedDisplaySql }} />
+                            </pre>
+                          ) : (
+                            "SQL이 아직 생성되지 않았습니다."
+                          )}
+                        </div>
                       )}
                     </CardContent>
                   </Card>
@@ -1176,23 +1421,6 @@ export function QueryView() {
                       )}
                     </div>
 
-                    {warnings.length > 0 && (
-                      <div className="p-4 rounded-lg border border-yellow-500/30 bg-yellow-500/5">
-                        <h4 className="font-medium text-foreground mb-2 flex items-center gap-2">
-                          <AlertTriangle className="w-4 h-4 text-yellow-500" />
-                          경고
-                        </h4>
-                        <ul className="text-sm text-muted-foreground space-y-2">
-                          {warnings.map((warning, idx) => (
-                            <li key={idx} className="flex items-start gap-2">
-                              <AlertTriangle className="w-4 h-4 text-yellow-500 mt-0.5 shrink-0" />
-                              {warning}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
                     {riskScore != null && (
                       <div className="p-4 rounded-lg bg-secondary/50 border border-border">
                         <h4 className="font-medium text-foreground mb-2">위험도</h4>
@@ -1211,4 +1439,95 @@ export function QueryView() {
       </div>
     </div>
   )
+}
+
+function formatSqlForDisplay(sql: string) {
+  if (!sql?.trim()) return sql
+
+  let formatted = sql.replace(/\s+/g, " ").trim()
+
+  const clausePatterns: RegExp[] = [
+    /\bWITH\b/gi,
+    /\bSELECT\b/gi,
+    /\bFROM\b/gi,
+    /\bLEFT\s+OUTER\s+JOIN\b/gi,
+    /\bRIGHT\s+OUTER\s+JOIN\b/gi,
+    /\bFULL\s+OUTER\s+JOIN\b/gi,
+    /\bLEFT\s+JOIN\b/gi,
+    /\bRIGHT\s+JOIN\b/gi,
+    /\bINNER\s+JOIN\b/gi,
+    /\bFULL\s+JOIN\b/gi,
+    /\bJOIN\b/gi,
+    /\bON\b/gi,
+    /\bWHERE\b/gi,
+    /\bGROUP\s+BY\b/gi,
+    /\bHAVING\b/gi,
+    /\bORDER\s+BY\b/gi,
+    /\bUNION\s+ALL\b/gi,
+    /\bUNION\b/gi,
+  ]
+
+  for (const pattern of clausePatterns) {
+    formatted = formatted.replace(pattern, (match, offset) => {
+      const token = match.toUpperCase().replace(/\s+/g, " ")
+      return offset === 0 ? token : `\n${token}`
+    })
+  }
+
+  formatted = formatted.replace(/,\s*/g, ",\n  ")
+  formatted = formatted.replace(/\bCASE\b/gi, "\nCASE")
+  formatted = formatted.replace(/\bWHEN\b/gi, "\n  WHEN")
+  formatted = formatted.replace(/\bTHEN\b/gi, "\n    THEN")
+  formatted = formatted.replace(/\bELSE\b/gi, "\n  ELSE")
+  formatted = formatted.replace(/\bEND\b/gi, "\nEND")
+  formatted = formatted.replace(/\s+(AND|OR)\s+/gi, (_, op) => `\n  ${String(op).toUpperCase()} `)
+  return formatted.replace(/\n{3,}/g, "\n\n").trim()
+}
+
+function highlightSqlForDisplay(sql: string) {
+  const formatted = formatSqlForDisplay(sql)
+  if (!formatted?.trim()) return ""
+
+  const keywordPattern =
+    /\b(WITH|SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|FULL|OUTER|ON|GROUP|BY|HAVING|ORDER|UNION|ALL|DISTINCT|AS|CASE|WHEN|THEN|ELSE|END|AND|OR|IN|IS|NOT|NULL|LIKE)\b/gi
+  const functionPattern =
+    /\b(COUNT|SUM|AVG|MIN|MAX|CAST|COALESCE|NVL|EXTRACT|ROUND|TRUNC|TO_DATE|TO_CHAR)\b(?=\s*\()/gi
+
+  let highlighted = escapeHtml(formatted)
+  const placeholders: string[] = []
+
+  const stash = (pattern: RegExp, className: string) => {
+    highlighted = highlighted.replace(pattern, (match) => {
+      const token = `__SQL_TOKEN_${placeholders.length}__`
+      placeholders.push(`<span class="${className}">${match}</span>`)
+      return token
+    })
+  }
+
+  stash(/--[^\n]*/g, "text-muted-foreground")
+  stash(/'(?:''|[^'])*'/g, "text-lime-700 dark:text-lime-400")
+  stash(/"(?:[^"]|"")*"/g, "text-lime-700 dark:text-lime-400")
+
+  highlighted = highlighted.replace(
+    functionPattern,
+    (match) => `<span class="text-pink-600 dark:text-pink-400 font-semibold">${match.toUpperCase()}</span>`
+  )
+  highlighted = highlighted.replace(
+    keywordPattern,
+    (match) => `<span class="text-sky-600 dark:text-sky-400 font-semibold">${match.toUpperCase()}</span>`
+  )
+
+  highlighted = highlighted.replace(/__SQL_TOKEN_(\d+)__/g, (_, idx) => {
+    const token = placeholders[Number(idx)]
+    return token || ""
+  })
+
+  return highlighted
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
 }

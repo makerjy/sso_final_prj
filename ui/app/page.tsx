@@ -1,6 +1,7 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import { useRouter } from "next/navigation"
 import { AppSidebar, type ViewType } from "@/components/app-sidebar"
 import { ConnectionView } from "@/components/views/connection-view"
 import { ContextView } from "@/components/views/context-view"
@@ -9,15 +10,36 @@ import { DashboardView } from "@/components/views/dashboard-view"
 import { AuditView } from "@/components/views/audit-view"
 import { CohortView } from "@/components/views/cohort-view"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { useAuth } from "@/components/auth-provider"
 import { Badge } from "@/components/ui/badge"
-import { Database, Shield, Bell, Menu, X } from "lucide-react"
+import { Database, Shield, Bell, Menu, LogOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
+import { Sheet, SheetContent } from "@/components/ui/sheet"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 
 export default function Home() {
+  const router = useRouter()
+  const { user, isHydrated, logout } = useAuth()
   const [currentView, setCurrentView] = useState<ViewType>("connection")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  useEffect(() => {
+    if (!isHydrated) return
+    if (!user) {
+      router.replace("/login")
+    }
+  }, [isHydrated, user, router])
+
+  const userInitial = useMemo(() => {
+    const base = (user?.name || "").trim()
+    return base ? base.charAt(0) : "?"
+  }, [user?.name])
+
+  const handleLogout = () => {
+    logout()
+    router.replace("/login")
+  }
 
   const renderView = () => {
     switch (currentView) {
@@ -53,6 +75,14 @@ export default function Home() {
   const handleViewChange = (view: ViewType) => {
     setCurrentView(view)
     setMobileMenuOpen(false)
+  }
+
+  if (!isHydrated || !user) {
+    return (
+      <div className="h-screen flex items-center justify-center text-sm text-muted-foreground">
+        로그인 상태를 확인 중입니다...
+      </div>
+    )
   }
 
   return (
@@ -124,15 +154,38 @@ export default function Home() {
             </Button>
 
             {/* User Profile */}
-            <div className="flex items-center gap-2 pl-2 sm:pl-4 border-l border-border">
-              <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-                <span className="text-xs font-medium text-primary">김</span>
-              </div>
-              <div className="hidden sm:block">
-                <div className="text-sm font-medium text-foreground">김연구원</div>
-                <div className="text-[10px] text-muted-foreground">연구원</div>
-              </div>
-            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex items-center gap-2 pl-2 sm:pl-4 border-l border-border rounded-md py-1 pr-1 hover:bg-accent/50 transition-colors"
+                >
+                  <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+                    <span className="text-xs font-medium text-primary">{userInitial}</span>
+                  </div>
+                  <div className="hidden sm:block text-left">
+                    <div className="text-sm font-medium text-foreground">{user.name}</div>
+                    <div className="text-[10px] text-muted-foreground">{user.role}</div>
+                  </div>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56 p-2">
+                <div className="flex items-center gap-2 px-2 py-1">
+                  <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+                    <span className="text-xs font-medium text-primary">{userInitial}</span>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-foreground truncate">{user.name}</div>
+                    <div className="text-[10px] text-muted-foreground">{user.role}</div>
+                  </div>
+                </div>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={handleLogout} className="gap-2">
+                  <LogOut className="w-4 h-4" />
+                  로그아웃
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </header>
 

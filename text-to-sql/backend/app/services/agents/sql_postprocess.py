@@ -1309,9 +1309,67 @@ def _rewrite_icustays_careunit(question: str, sql: str) -> tuple[str, list[str]]
     elif "first careunit" in q or "first care unit" in q:
         target = "FIRST_CAREUNIT"
 
-    text = re.sub(r"(?<!\.)\bCAREUNIT\b", target, text, flags=re.IGNORECASE)
-    text = re.sub(r"\b([A-Za-z0-9_]+)\.CAREUNIT\b", rf"\1.{target}", text, flags=re.IGNORECASE)
-    rules.append("icustays_careunit_to_first_last")
+    aliases: set[str] = {"ICUSTAYS"}
+    for m in re.finditer(
+        r"\b(?:FROM|JOIN)\s+ICUSTAYS(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+        text,
+        re.IGNORECASE,
+    ):
+        alias = m.group(1)
+        if alias and alias.upper() not in {"ON", "WHERE", "JOIN", "GROUP", "ORDER", "INNER", "LEFT", "RIGHT", "FULL"}:
+            aliases.add(alias)
+
+    aliases_upper = {a.upper() for a in aliases}
+    updated = re.sub(
+        r"\b([A-Za-z0-9_]+)\.CAREUNIT\b",
+        lambda m: f"{m.group(1)}.{target}" if m.group(1).upper() in aliases_upper else m.group(0),
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # ICUSTAYS 단일 문맥일 때만 비한정 CAREUNIT을 FIRST/LAST로 보정
+    if not re.search(r"\bTRANSFERS\b", updated, re.IGNORECASE):
+        updated = re.sub(r"(?<!\.)\bCAREUNIT\b", target, updated, flags=re.IGNORECASE)
+
+    if updated != text:
+        text = updated
+        rules.append("icustays_careunit_to_first_last")
+    return text, rules
+
+
+def _rewrite_transfers_careunit_fields(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+    if not re.search(r"\bTRANSFERS\b", text, re.IGNORECASE):
+        return text, rules
+    if not re.search(r"\b(FIRST_CAREUNIT|LAST_CAREUNIT)\b", text, re.IGNORECASE):
+        return text, rules
+
+    aliases: set[str] = {"TRANSFERS"}
+    for m in re.finditer(
+        r"\b(?:FROM|JOIN)\s+TRANSFERS(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+        text,
+        re.IGNORECASE,
+    ):
+        alias = m.group(1)
+        if alias and alias.upper() not in {"ON", "WHERE", "JOIN", "GROUP", "ORDER", "INNER", "LEFT", "RIGHT", "FULL"}:
+            aliases.add(alias)
+
+    aliases_upper = {a.upper() for a in aliases}
+    updated = re.sub(
+        r"\b([A-Za-z0-9_]+)\.(FIRST_CAREUNIT|LAST_CAREUNIT)\b",
+        lambda m: f"{m.group(1)}.CAREUNIT" if m.group(1).upper() in aliases_upper else m.group(0),
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # TRANSFERS만 사용하는 문맥의 비한정 FIRST/LAST_CAREUNIT 보정
+    if not re.search(r"\bICUSTAYS\b", updated, re.IGNORECASE):
+        updated = re.sub(r"(?<!\.)\b(FIRST_CAREUNIT|LAST_CAREUNIT)\b", "CAREUNIT", updated, flags=re.IGNORECASE)
+
+    if updated != text:
+        text = updated
+        rules.append("transfers_careunit_to_careunit")
     return text, rules
 
 
@@ -2144,6 +2202,67 @@ def _rewrite_admissions_with_icu(question: str, sql: str) -> tuple[str, list[str
     return text, rules
 
 
+def _rewrite_er_to_icu_hospital_los_compare(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = question.lower()
+
+    kr_hit = (
+        "응급실" in question
+        and "icu" in q
+        and ("los" in q or "재원" in question)
+        and ("바로" in question or "거쳐" in question or "일반 병동" in question)
+    )
+    en_hit = (
+        "emergency" in q
+        and "icu" in q
+        and ("los" in q or "length of stay" in q)
+        and ("direct" in q or "ward" in q or "via" in q)
+    )
+    if not kr_hit and not en_hit:
+        return sql, rules
+
+    text = (
+        "WITH first_icu AS ( "
+        "SELECT i.SUBJECT_ID, i.HADM_ID, MIN(i.INTIME) AS FIRST_ICU_INTIME "
+        "FROM ICUSTAYS i "
+        "WHERE i.INTIME IS NOT NULL "
+        "GROUP BY i.SUBJECT_ID, i.HADM_ID "
+        "), "
+        "pre_icu AS ( "
+        "SELECT f.SUBJECT_ID, f.HADM_ID, "
+        "MAX(CASE WHEN t.CAREUNIT IS NOT NULL AND UPPER(t.CAREUNIT) NOT LIKE '%ICU%' THEN 1 ELSE 0 END) AS HAS_NON_ICU_BEFORE "
+        "FROM first_icu f "
+        "LEFT JOIN TRANSFERS t "
+        "ON t.SUBJECT_ID = f.SUBJECT_ID "
+        "AND t.HADM_ID = f.HADM_ID "
+        "AND NVL(t.OUTTIME, t.INTIME) < f.FIRST_ICU_INTIME "
+        "GROUP BY f.SUBJECT_ID, f.HADM_ID "
+        "), "
+        "path_labeled AS ( "
+        "SELECT f.SUBJECT_ID, f.HADM_ID, "
+        "CASE "
+        "WHEN UPPER(NVL(a.ADMISSION_LOCATION, '')) LIKE '%EMERGENCY%' AND NVL(p.HAS_NON_ICU_BEFORE, 0) = 0 THEN 'Direct_ER_to_ICU' "
+        "WHEN NVL(p.HAS_NON_ICU_BEFORE, 0) = 1 THEN 'Ward_to_ICU' "
+        "ELSE 'Other' "
+        "END AS ICU_PATH "
+        "FROM first_icu f "
+        "JOIN ADMISSIONS a ON a.SUBJECT_ID = f.SUBJECT_ID AND a.HADM_ID = f.HADM_ID "
+        "LEFT JOIN pre_icu p ON p.SUBJECT_ID = f.SUBJECT_ID AND p.HADM_ID = f.HADM_ID "
+        ") "
+        "SELECT l.ICU_PATH, COUNT(*) AS ADMISSION_CNT, "
+        "AVG(CAST(a.DISCHTIME AS DATE) - CAST(a.ADMITTIME AS DATE)) AS AVG_HOSPITAL_LOS "
+        "FROM path_labeled l "
+        "JOIN ADMISSIONS a ON a.SUBJECT_ID = l.SUBJECT_ID AND a.HADM_ID = l.HADM_ID "
+        "WHERE l.ICU_PATH IN ('Direct_ER_to_ICU', 'Ward_to_ICU') "
+        "AND a.ADMITTIME IS NOT NULL "
+        "AND a.DISCHTIME IS NOT NULL "
+        "GROUP BY l.ICU_PATH "
+        "ORDER BY l.ICU_PATH"
+    )
+    rules.append("er_vs_ward_to_icu_hospital_los_canonical")
+    return text, rules
+
+
 def _strip_time_window_if_absent(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
@@ -2575,7 +2694,10 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     transfers_fixed, transfers_rules = _ensure_transfers_eventtype(q, emar_field_fixed)
     rules.extend(transfers_rules)
 
-    services_order_fixed, services_order_rules = _rewrite_services_order_type(q, transfers_fixed)
+    transfers_careunit_fixed, transfers_careunit_rules = _rewrite_transfers_careunit_fields(transfers_fixed)
+    rules.extend(transfers_careunit_rules)
+
+    services_order_fixed, services_order_rules = _rewrite_services_order_type(q, transfers_careunit_fixed)
     rules.extend(services_order_rules)
 
     rewritten_icu, icu_rules = _rewrite_has_icu_stay(services_order_fixed)
@@ -2737,7 +2859,10 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     admissions_fixed, admissions_rules = _rewrite_admissions_with_icu(q, avg_adm_fixed)
     rules.extend(admissions_rules)
 
-    reordered, reorder_rules = _reorder_count_select(admissions_fixed)
+    er_icu_los_fixed, er_icu_los_rules = _rewrite_er_to_icu_hospital_los_compare(q, admissions_fixed)
+    rules.extend(er_icu_los_rules)
+
+    reordered, reorder_rules = _reorder_count_select(er_icu_los_fixed)
     rules.extend(reorder_rules)
 
     avg_reordered, avg_reorder_rules = _reorder_avg_select(reordered)

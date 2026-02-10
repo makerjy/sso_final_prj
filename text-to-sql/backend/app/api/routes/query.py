@@ -24,6 +24,7 @@ class OneShotRequest(BaseModel):
     question: str
     translate: bool | None = None
     rag_multi: bool | None = None
+    conversation: list[dict] | None = None
     user_name: str | None = None
     user_role: str | None = None
 
@@ -45,7 +46,13 @@ def oneshot(req: OneShotRequest):
     status = "success"
     error_detail = None
     try:
-        payload = run_oneshot(req.question, translate=req.translate, rag_multi=req.rag_multi)
+        payload = run_oneshot(
+            req.question,
+            translate=req.translate,
+            rag_multi=req.rag_multi,
+            conversation=req.conversation,
+            enable_clarification=True,
+        )
         qid = str(uuid.uuid4())
         _QUERY_STORE[qid] = payload
         return {"qid": qid, "payload": payload}
@@ -137,7 +144,7 @@ def run_query(req: RunRequest):
     start = time.perf_counter()
 
     try:
-        precheck_sql(sql)
+        policy_result = precheck_sql(sql, question)
         result = execute_sql(sql)
         rows_returned = int(result.get("row_count") or 0)
         row_cap = int(result.get("row_cap") or 0)
@@ -145,7 +152,7 @@ def run_query(req: RunRequest):
             status = "warning"
         if settings.sql_run_cost_krw > 0:
             get_cost_tracker().add_cost(settings.sql_run_cost_krw, {"stage": "run"})
-        return {"sql": sql, "result": result}
+        return {"sql": sql, "result": result, "policy": policy_result}
     except HTTPException as exc:
         status = "error"
         error_detail = str(exc.detail) if exc.detail else str(exc)

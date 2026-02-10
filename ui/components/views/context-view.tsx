@@ -25,6 +25,9 @@ interface JoinTemplate {
   id: string
   name: string
   sql: string
+  leftTable?: string
+  rightTable?: string
+  joinColumn?: string
 }
 
 interface MetricTemplate {
@@ -78,10 +81,14 @@ export function ContextView() {
 
       const parsedJoins = joinDocs.map((doc: any, idx: number) => {
         const { name, sql } = parseTemplateDoc(doc)
+        const parsed = parseJoinSql(sql)
         return {
           id: doc.id ?? `${name}-${idx}`,
           name: name || `join_template_${idx}`,
           sql,
+          leftTable: parsed?.leftTable ?? "",
+          rightTable: parsed?.rightTable ?? "",
+          joinColumn: parsed?.leftColumn ?? "",
         }
       })
 
@@ -125,14 +132,34 @@ export function ContextView() {
     const chain: string[] = []
     joins.forEach((join) => {
       const parsed = parseJoinSql(join.sql)
-      if (parsed?.leftTable && !chain.includes(parsed.leftTable)) {
-        chain.push(parsed.leftTable)
+      const leftTable = parsed?.leftTable ?? join.leftTable
+      const rightTable = parsed?.rightTable ?? join.rightTable
+      if (leftTable && !chain.includes(leftTable)) {
+        chain.push(leftTable)
       }
-      if (parsed?.rightTable && !chain.includes(parsed.rightTable)) {
-        chain.push(parsed.rightTable)
+      if (rightTable && !chain.includes(rightTable)) {
+        chain.push(rightTable)
       }
     })
     return chain
+  }, [joins])
+
+  const knownTables = useMemo(() => {
+    const tables = new Set<string>()
+    joins.forEach((join) => {
+      const parsed = parseJoinSql(join.sql)
+      if (parsed?.leftTable) {
+        tables.add(parsed.leftTable)
+      } else if (join.leftTable) {
+        tables.add(join.leftTable)
+      }
+      if (parsed?.rightTable) {
+        tables.add(parsed.rightTable)
+      } else if (join.rightTable) {
+        tables.add(join.rightTable)
+      }
+    })
+    return Array.from(tables).sort()
   }, [joins])
 
   const filteredTerms = terms.filter(t => 
@@ -142,8 +169,36 @@ export function ContextView() {
 
   const addJoin = () => {
     const id = `join-${Date.now()}`
-    setJoins(prev => [{ id, name: "join_template_new", sql: "" }, ...prev])
+    setJoins(prev => [{ id, name: "join_template_new", sql: "", leftTable: "", rightTable: "", joinColumn: "" }, ...prev])
     setEditingJoinId(id)
+  }
+
+  const updateJoinFromFields = (
+    joinId: string,
+    patch: { leftTable?: string; rightTable?: string; joinColumn?: string }
+  ) => {
+    setJoins((prev) =>
+      prev.map((item) => {
+        if (item.id !== joinId) {
+          return item
+        }
+
+        const parsed = parseJoinSql(item.sql)
+        const leftTable = patch.leftTable ?? item.leftTable ?? parsed?.leftTable ?? ""
+        const rightTable = patch.rightTable ?? item.rightTable ?? parsed?.rightTable ?? ""
+        const joinColumn = patch.joinColumn ?? item.joinColumn ?? parsed?.leftColumn ?? ""
+        const joinType = parsed?.joinType ?? "INNER"
+        const nextSql = buildJoinSqlFromFields({
+          leftTable,
+          rightTable,
+          joinColumn,
+          joinType,
+          fallbackSql: item.sql,
+        })
+
+        return { ...item, leftTable, rightTable, joinColumn, sql: nextSql }
+      })
+    )
   }
 
   const addMetric = () => {
@@ -244,6 +299,11 @@ export function ContextView() {
 
         {/* Joins Tab */}
         <TabsContent value="joins" className="space-y-4">
+          <datalist id="join-table-options">
+            {knownTables.map((table) => (
+              <option key={table} value={table} />
+            ))}
+          </datalist>
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
@@ -288,10 +348,10 @@ export function ContextView() {
                 ) : joins.map((join) => {
                   const parsed = parseJoinSql(join.sql)
                   const isEditing = editingJoinId === join.id
-                  const leftTable = parsed?.leftTable ?? (join.name || "template")
-                  const leftColumn = parsed?.leftColumn ?? "?"
-                  const rightTable = parsed?.rightTable ?? "unknown"
-                  const rightColumn = parsed?.rightColumn ?? "?"
+                  const leftTable = parsed?.leftTable ?? join.leftTable ?? (join.name || "template")
+                  const leftColumn = parsed?.leftColumn ?? join.joinColumn ?? "?"
+                  const rightTable = parsed?.rightTable ?? join.rightTable ?? "unknown"
+                  const rightColumn = parsed?.rightColumn ?? join.joinColumn ?? "?"
                   const joinType = parsed?.joinType ?? "TEMPLATE"
 
                   return (
@@ -335,15 +395,60 @@ export function ContextView() {
                               )
                             }
                           />
+                          <div className="grid md:grid-cols-3 gap-2">
+                            <div className="space-y-1">
+                              <p className="text-[11px] text-muted-foreground">왼쪽 테이블 (선택/직접입력)</p>
+                              <Input
+                                list="join-table-options"
+                                value={join.leftTable ?? parsed?.leftTable ?? ""}
+                                placeholder="e.g. admissions"
+                                onChange={(e) =>
+                                  updateJoinFromFields(join.id, { leftTable: e.target.value })
+                                }
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <p className="text-[11px] text-muted-foreground">오른쪽 테이블 (선택/직접입력)</p>
+                              <Input
+                                list="join-table-options"
+                                value={join.rightTable ?? parsed?.rightTable ?? ""}
+                                placeholder="e.g. icustays"
+                                onChange={(e) =>
+                                  updateJoinFromFields(join.id, { rightTable: e.target.value })
+                                }
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <p className="text-[11px] text-muted-foreground">연결 컬럼</p>
+                              <Input
+                                value={join.joinColumn ?? parsed?.leftColumn ?? ""}
+                                placeholder="e.g. hadm_id"
+                                onChange={(e) =>
+                                  updateJoinFromFields(join.id, { joinColumn: e.target.value })
+                                }
+                              />
+                            </div>
+                          </div>
                           <Textarea
                             value={join.sql}
                             placeholder="SQL template"
                             rows={4}
                             onChange={(e) =>
                               setJoins(prev =>
-                                prev.map(item =>
-                                  item.id === join.id ? { ...item, sql: e.target.value } : item
-                                )
+                                prev.map(item => {
+                                  if (item.id !== join.id) {
+                                    return item
+                                  }
+                                  const nextSql = e.target.value
+                                  const nextParsed = parseJoinSql(nextSql)
+                                  return {
+                                    ...item,
+                                    sql: nextSql,
+                                    leftTable: nextParsed?.leftTable ?? item.leftTable ?? "",
+                                    rightTable: nextParsed?.rightTable ?? item.rightTable ?? "",
+                                    joinColumn: nextParsed?.leftColumn ?? item.joinColumn ?? "",
+                                  }
+                                })
                               )
                             }
                           />
@@ -673,5 +778,64 @@ function toDisplayName(name: string) {
   if (!name) {
     return ""
   }
+  const normalized = name.trim().toLowerCase()
+
+  const koNameMap: Record<string, string> = {
+    // Clinical research metric templates
+    template_hospital_los_days: "병원 재원일수",
+    template_readmission_30d_flag: "30일 재입원 여부",
+    template_in_hospital_mortality_flag: "입원 중 사망 여부",
+    template_in_hospital_mortality_rate: "입원 중 사망률",
+    template_icu_los_days: "ICU 재원일수",
+    template_icu_readmit_same_hadm_flag: "ICU 재입실 여부(동일 입원)",
+    template_transfer_count_per_admission: "입원별 병동 이동 횟수",
+    template_discharge_location_distribution: "퇴원 형태 분포",
+
+    // Backward compatibility for previously used sample templates
+    template_sample_rows_two_cols: "샘플 조회(2개 컬럼)",
+    template_count_rows_sampled: "샘플 건수",
+    template_distinct_sample: "중복 제거 샘플",
+    template_count_by_gender: "성별 분포",
+    template_count_by_admission_type: "입원 유형 분포",
+    template_recent_admissions_30d: "최근 30일 입원",
+    template_avg_icu_los: "평균 ICU 재원일수",
+    template_top_n_ordered: "상위 N 집계",
+    template_recent_admissions_7d: "최근 7일 입원",
+  }
+
+  const mapped = koNameMap[normalized]
+  if (mapped) {
+    return mapped
+  }
+
   return name.replace(/^template_/, "").replace(/_/g, " ")
+}
+
+function buildJoinSqlFromFields({
+  leftTable,
+  rightTable,
+  joinColumn,
+  joinType,
+  fallbackSql,
+}: {
+  leftTable: string
+  rightTable: string
+  joinColumn: string
+  joinType: string
+  fallbackSql: string
+}) {
+  const left = leftTable.trim()
+  const right = rightTable.trim()
+  const col = joinColumn.trim()
+
+  if (!left || !right || !col) {
+    return fallbackSql
+  }
+
+  const jt = (joinType || "INNER").toUpperCase()
+  const leftUpper = left.toUpperCase()
+  const rightUpper = right.toUpperCase()
+  const colUpper = col.toUpperCase()
+
+  return `SELECT l.${colUpper}, r.${colUpper} FROM ${leftUpper} l ${jt} JOIN ${rightUpper} r ON l.${colUpper} = r.${colUpper} WHERE l.${colUpper} IS NOT NULL AND ROWNUM <= 100`
 }

@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from app.core.config import get_settings
+from app.services.agents.clarifier import evaluate_question_clarity
 from app.services.agents.sql_engineer import generate_sql
 from app.services.agents.sql_expert import review_sql
 from app.services.agents.sql_postprocess import postprocess_sql
@@ -74,12 +75,48 @@ def _add_llm_cost(usage: dict[str, Any], stage: str) -> None:
         get_cost_tracker().add_cost(cost, {"usage": usage, "stage": stage, "source": "llm"})
 
 
+def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            continue
+        if text in items:
+            continue
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _normalize_clarifier_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    need_clarification = bool(payload.get("need_clarification"))
+    reason = str(payload.get("reason") or "").strip()
+    clarification_question = str(payload.get("clarification_question") or "").strip()
+    if need_clarification and not clarification_question:
+        clarification_question = "질문 범위를 조금 더 좁혀주세요."
+
+    return {
+        "need_clarification": need_clarification,
+        "reason": reason,
+        "clarification_question": clarification_question,
+        "options": _normalize_string_list(payload.get("options"), limit=5),
+        "example_inputs": _normalize_string_list(payload.get("example_inputs"), limit=3),
+        "refined_question": str(payload.get("refined_question") or "").strip(),
+        "usage": payload.get("usage", {}),
+    }
+
+
 def run_oneshot(
     question: str,
     *,
     skip_policy: bool = False,
     translate: bool | None = None,
     rag_multi: bool | None = None,
+    conversation: list[dict[str, Any]] | None = None,
+    enable_clarification: bool = False,
 ) -> dict[str, Any]:
     settings = get_settings()
     original_question = question
@@ -92,6 +129,42 @@ def run_oneshot(
         cached = _lookup_demo_cache(cache, question)
         if cached:
             return cached
+
+    if enable_clarification:
+        clarity: dict[str, Any] = {
+            "need_clarification": False,
+            "reason": "",
+            "clarification_question": "",
+            "options": [],
+            "example_inputs": [],
+            "refined_question": "",
+            "usage": {},
+        }
+        try:
+            clarity_raw = evaluate_question_clarity(original_question, conversation=conversation)
+            clarity = _normalize_clarifier_payload(clarity_raw)
+            _add_llm_cost(clarity.get("usage", {}), "clarify")
+        except Exception:
+            clarity = {**clarity, "need_clarification": False}
+        if clarity["need_clarification"]:
+            return {
+                "mode": "clarify",
+                "question": original_question,
+                "clarification": {
+                    "reason": clarity.get("reason"),
+                    "question": clarity.get("clarification_question"),
+                    "options": clarity.get("options", []),
+                    "example_inputs": clarity.get("example_inputs", []),
+                },
+            }
+        if clarity.get("refined_question"):
+            original_question = clarity["refined_question"]
+            question = clarity["refined_question"]
+            if settings.demo_mode or settings.demo_cache_always:
+                cache = _load_demo_cache(settings.demo_cache_path)
+                cached = _lookup_demo_cache(cache, question)
+                if cached:
+                    return cached
 
     if use_translate and contains_korean(question):
         try:
@@ -124,11 +197,15 @@ def run_oneshot(
         attempt += 1
         try:
             engineer = generate_sql(question, context)
+            # LLM 경고 문구는 사용하지 않도록 제거
+            engineer.pop("warnings", None)
             final_payload = engineer
 
             if settings.expert_trigger_mode == "score" and risk_info["risk"] >= settings.expert_score_threshold:
                 expert = review_sql(question, context, engineer)
                 final_payload = expert
+                # LLM 경고 문구는 사용하지 않도록 제거
+                final_payload.pop("warnings", None)
 
             usage = final_payload.get("usage", {})
             _add_llm_cost(usage, "oneshot")
@@ -140,13 +217,15 @@ def run_oneshot(
                     final_payload["final_sql"] = final_sql
                     final_payload["postprocess"] = rules
 
+            policy_result = None
             if not skip_policy and final_sql:
-                precheck_sql(final_sql)
+                policy_result = precheck_sql(final_sql, original_question)
             return {
                 "mode": "advanced",
                 "question": original_question,
                 "question_en": question if translated_question else None,
                 "risk": risk_info,
+                "policy": policy_result,
                 "context": context,
                 "draft": engineer,
                 "final": final_payload,

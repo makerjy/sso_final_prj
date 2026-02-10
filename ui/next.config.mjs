@@ -20,6 +20,7 @@ const nextConfig = {
       { source: "/audit/:path*", destination: `${API_BASE_URL}/audit/:path*` },
       { source: "/chat/:path*", destination: `${API_BASE_URL}/chat/:path*` },
       { source: "/dashboard/:path*", destination: `${API_BASE_URL}/dashboard/:path*` },
+      { source: "/cohort/:path*", destination: `${API_BASE_URL}/cohort/:path*` },
     ]
   },
 }
