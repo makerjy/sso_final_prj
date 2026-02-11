@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from src.agent.chart_rule_engine import plan_analyses
+from src.agent.chart_rule_engine import _infer_context_flags, plan_analyses
 
 
 def _load_df() -> pd.DataFrame:
@@ -22,7 +22,7 @@ def test_plan_analyses_trend() -> None:
     chart_types = {p["chart_spec"]["chart_type"] for p in plans}
 
     assert "line" in chart_types
-    assert "bar" in chart_types
+    assert "box" in chart_types
 
 
 def test_plan_analyses_distribution() -> None:
@@ -39,3 +39,31 @@ def test_plan_analyses_distribution() -> None:
 
     assert "hist" in chart_types
     assert "box" in chart_types
+
+
+def test_plan_analyses_proportion() -> None:
+    df = pd.DataFrame(
+        {
+            "admit_year": [2020, 2021, 2022],
+            "readmit_30d_rate": [0.10, 0.12, 0.11],
+        }
+    )
+    intent_info = {
+        "analysis_intent": "proportion",
+        "primary_outcome": "readmit_30d_rate",
+        "time_var": "admit_year",
+        "group_var": None,
+    }
+
+    plans = plan_analyses(intent_info, df)
+    chart_types = {p["chart_spec"]["chart_type"] for p in plans}
+
+    assert "line" in chart_types
+
+
+def test_infer_context_flags_requires_numeric_post_days_pattern() -> None:
+    flags = _infer_context_flags("퇴원 후 상태를 보여줘", ["admittime", "dischtime"])
+    assert flags["post_days"] is False
+
+    flags_with_days = _infer_context_flags("퇴원 후 30일 재입원율 추세", ["admittime", "dischtime"])
+    assert flags_with_days["post_days"] is True

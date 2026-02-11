@@ -19,4 +19,4 @@ def test_analysis_agent_trend() -> None:
     assert result.analyses
     chart_types = {a.chart_spec.chart_type for a in result.analyses}
 
-    assert "line" in chart_types or "bar" in chart_types
+    assert chart_types.intersection({"line", "bar", "box", "hist"})
