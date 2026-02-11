@@ -140,12 +140,12 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     if "x_time" in lower and "y_value" in lower:
         return {
             "chart_spec": {"chart_type": "line", "x": lower["x_time"], "y": lower["y_value"]},
-            "reason": "Result aliases indicate a time-series aggregate.",
+            "reason": "결과 별칭 기준으로 시계열 집계 차트가 적합합니다.",
         }
     if "x_group" in lower and "y_value" in lower:
         return {
             "chart_spec": {"chart_type": "bar", "x": lower["x_group"], "y": lower["y_value"]},
-            "reason": "Result aliases indicate a grouped aggregate.",
+            "reason": "결과 별칭 기준으로 그룹 집계 차트가 적합합니다.",
         }
 
     # Time-series heuristics
@@ -173,28 +173,28 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     if time_cols and numeric_cols:
         return {
             "chart_spec": {"chart_type": "line", "x": time_cols[0], "y": numeric_cols[0]},
-            "reason": "Detected time-like and numeric columns for a trend chart.",
+            "reason": "시간형 컬럼과 수치형 컬럼이 있어 추세 차트가 적합합니다.",
         }
 
     # Two numeric columns -> scatter
     if len(numeric_cols) >= 2:
         return {
             "chart_spec": {"chart_type": "scatter", "x": numeric_cols[0], "y": numeric_cols[1]},
-            "reason": "Detected multiple numeric columns for correlation.",
+            "reason": "수치형 컬럼이 2개 이상이라 상관관계 산점도가 적합합니다.",
         }
 
     # Categorical + numeric -> bar
     if categorical_cols and numeric_cols:
         return {
             "chart_spec": {"chart_type": "bar", "x": categorical_cols[0], "y": numeric_cols[0]},
-            "reason": "Detected category + numeric for comparison.",
+            "reason": "범주형-수치형 조합으로 비교 막대 차트가 적합합니다.",
         }
 
     # Single numeric -> histogram
     if len(numeric_cols) == 1:
         return {
             "chart_spec": {"chart_type": "hist", "x": numeric_cols[0]},
-            "reason": "Detected a single numeric column for distribution.",
+            "reason": "단일 수치형 컬럼 분포 확인을 위해 히스토그램이 적합합니다.",
         }
 
     return None

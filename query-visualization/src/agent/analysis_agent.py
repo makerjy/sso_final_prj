@@ -106,9 +106,23 @@ def _fallback_insight(user_query: str, df: pd.DataFrame, analyses: List[Analysis
         first = analyses[0]
         if first.chart_spec and first.chart_spec.chart_type:
             chart_hint = f"주요 추천 차트는 {first.chart_spec.chart_type} 입니다."
+        if first.reason:
+            chart_hint = f"{chart_hint} {first.reason}"
+    stats = _stats_snapshot(df)
+    stats_hint = "수치형 통계 요약 대상이 부족합니다."
+    if stats:
+        top = sorted(
+            stats.items(),
+            key=lambda kv: (kv[1].get("max", 0.0) - kv[1].get("min", 0.0)),
+            reverse=True,
+        )[0]
+        stats_hint = (
+            f"통계표 기준 '{top[0]}'의 범위가 가장 큽니다 "
+            f"(min {top[1].get('min'):.3f}, max {top[1].get('max'):.3f})."
+        )
     return (
         f"질문 '{user_query}' 기준으로 결과 {row_count}행, {col_count}개 컬럼을 분석했습니다. "
-        f"{chart_hint} 통계표의 분포/결측을 함께 확인해 해석하세요."
+        f"{chart_hint} {stats_hint} 쿼리 결과, 차트, 통계표를 함께 보고 해석하세요."
     )
 
 

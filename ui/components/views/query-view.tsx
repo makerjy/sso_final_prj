@@ -147,7 +147,7 @@ interface PersistedQueryState {
 }
 
 const MAX_PERSIST_ROWS = 200
-const VIZ_CACHE_PREFIX = "viz_cache_v1:"
+const VIZ_CACHE_PREFIX = "viz_cache_v3:"
 const VIZ_CACHE_TTL_MS = 1000 * 60 * 60 * 24
 
 const hashText = (value: string) => {
@@ -502,8 +502,25 @@ export function QueryView() {
     const range = widest.max != null && widest.min != null ? widest.max - widest.min : null
     return `수치형 컬럼 ${numeric.length}개를 집계했습니다. 결측 ${missingTotal}, NULL ${nullTotal}이며, '${widest.column}'의 분산폭이 가장 큽니다${range != null ? ` (범위 ${formatStatNumber(range)})` : ""}.`
   }, [statsRows])
+  const normalizeInsightText = (text: string) => {
+    return text
+      .replace(/Detected category \+ numeric for comparison\.?/gi, "범주형-수치형 조합 비교가 적합한 결과입니다.")
+      .replace(/Result aliases indicate a time-series aggregate\.?/gi, "집계 결과가 시계열 추세 분석에 적합합니다.")
+      .replace(/Result aliases indicate a grouped aggregate\.?/gi, "집계 결과가 그룹 비교 분석에 적합합니다.")
+      .replace(/Detected time-like and numeric columns for a trend chart\.?/gi, "시간형-수치형 조합으로 추세 차트가 적합합니다.")
+      .replace(/Detected multiple numeric columns for correlation\.?/gi, "수치형 컬럼 간 상관관계 분석이 적합합니다.")
+      .replace(/Detected a single numeric column for distribution\.?/gi, "단일 수치형 컬럼 분포 분석이 적합합니다.")
+      .replace(/^Rows:\s*(\d+)$/gim, "결과 행 수: $1")
+      .replace(/^source:\s*.+$/gim, "")
+      .replace(/^\s*source:\s*.+$/gim, "")
+      .replace(/^\s*recommended reason:\s*.+$/gim, "")
+      .replace(/source:\s*llm/gi, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  }
+
   const integratedInsight = useMemo(() => {
-    if (visualizationResult?.insight) return visualizationResult.insight
+    if (visualizationResult?.insight) return normalizeInsightText(visualizationResult.insight)
     const lines: string[] = []
     lines.push(resultInterpretation)
     lines.push(chartInterpretation)
@@ -511,8 +528,8 @@ export function QueryView() {
     if (riskScore != null) {
       lines.push(`위험 점수는 ${riskScore}${riskIntent ? ` (${riskIntent})` : ""}로 평가되었습니다.`)
     }
-    return lines.join("\n\n")
-  }, [resultInterpretation, chartInterpretation, statsInterpretation, riskScore, riskIntent])
+    return normalizeInsightText(lines.join("\n\n"))
+  }, [visualizationResult, resultInterpretation, chartInterpretation, statsInterpretation, riskScore, riskIntent])
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
@@ -529,21 +546,7 @@ export function QueryView() {
       setVisualizationError(null)
       return
     }
-    const cacheKey = buildVizCacheKey(sqlText, questionText, previewData)
-    if (cacheKey) {
-      try {
-        const raw = localStorage.getItem(cacheKey)
-        if (raw) {
-          const parsed = JSON.parse(raw) as { ts?: number; payload?: VisualizationResponsePayload }
-          if (parsed?.payload && parsed?.ts && Date.now() - parsed.ts < VIZ_CACHE_TTL_MS) {
-            setVisualizationResult(parsed.payload)
-            setVisualizationError(null)
-            setVisualizationLoading(false)
-            return
-          }
-        }
-      } catch {}
-    }
+    // Always fetch latest visualization/insight from server (disable local cache)
     setVisualizationLoading(true)
     setVisualizationError(null)
     try {
@@ -566,11 +569,6 @@ export function QueryView() {
       if (!res.ok) throw new Error(await readError(res))
       const data: VisualizationResponsePayload = await res.json()
       setVisualizationResult(data)
-      if (cacheKey) {
-        try {
-          localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), payload: data }))
-        } catch {}
-      }
     } catch (err: any) {
       setVisualizationResult(null)
       setVisualizationError(err?.message || "시각화 추천 플랜 조회에 실패했습니다.")
@@ -1451,7 +1449,7 @@ export function QueryView() {
               <div className="flex justify-start">
                 <div className="bg-secondary rounded-lg p-3 flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">遺꾩꽍 以?..</span>
+                  <span className="text-sm">분석 중...</span>
                 </div>
               </div>
             )}
@@ -1473,7 +1471,7 @@ export function QueryView() {
             </div>
             <div className="flex gap-2">
               <Textarea
-                placeholder="?먯뿰?대줈 吏덈Ц?섏꽭??.."
+                placeholder="자연어로 질문하세요..."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 className="min-h-[60px] resize-none"
@@ -1499,7 +1497,7 @@ export function QueryView() {
           <div
             role="separator"
             aria-orientation="vertical"
-            aria-label="?⑤꼸 ?ш린 議곗젙"
+            aria-label="패널 크기 조정"
             aria-valuemin={30}
             aria-valuemax={70}
             aria-valuenow={Math.round(resultsPanelWidth)}
@@ -1939,7 +1937,6 @@ export function QueryView() {
                   <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
                     <h4 className="font-medium text-foreground mb-2">데이터 분석 인사이트</h4>
                     <p className="text-sm text-muted-foreground whitespace-pre-line">{integratedInsight}</p>
-                    {source && <p className="text-xs text-muted-foreground mt-2">source: {source}</p>}
                   </div>
                 </CardContent>
               </Card>
