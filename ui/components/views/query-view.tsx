@@ -370,18 +370,43 @@ export function QueryView() {
     () =>
       statsRows
         .filter((row) => row.count > 0 && row.q1 != null && row.q3 != null && row.min != null && row.max != null)
-        .map((row) => ({
-          column: row.column,
-          min: row.min as number,
-          q1: row.q1 as number,
-          median: row.median as number,
-          q3: row.q3 as number,
-          max: row.max as number,
-          iqrBase: row.q1 as number,
-          iqr: Math.max(0, (row.q3 as number) - (row.q1 as number)),
-        })),
+        .map((row) => {
+          const min = row.min as number
+          const q1 = row.q1 as number
+          const median = row.median as number
+          const q3 = row.q3 as number
+          const max = row.max as number
+          const iqr = Math.max(0, q3 - q1)
+          const whiskerLow = Math.max(min, q1 - 1.5 * iqr)
+          const whiskerHigh = Math.min(max, q3 + 1.5 * iqr)
+          return {
+            column: row.column,
+            min,
+            q1,
+            median,
+            q3,
+            max,
+            whiskerLow,
+            whiskerHigh,
+            outlierLow: min < whiskerLow ? min : null,
+            outlierHigh: max > whiskerHigh ? max : null,
+            iqrBase: q1,
+            iqr,
+          }
+        }),
     [statsRows]
   )
+  const boxPlotYDomain = useMemo<[number, number] | undefined>(() => {
+    if (!boxPlotRows.length) return undefined
+    const minValue = Math.min(...boxPlotRows.map((row) => row.whiskerLow))
+    const maxValue = Math.max(...boxPlotRows.map((row) => row.whiskerHigh))
+    const spread = Math.max(1, maxValue - minValue)
+    const pad = Math.max(20, spread * 0.1)
+    const paddedMin = minValue - pad
+    const paddedMax = maxValue + pad
+    if (paddedMin === paddedMax) return [paddedMin - 1, paddedMax + 1]
+    return [paddedMin, paddedMax]
+  }, [boxPlotRows])
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
   const recommendedAnalysis = useMemo(
     () => (Array.isArray(visualizationResult?.analyses) ? visualizationResult!.analyses![0] : null),
@@ -1761,7 +1786,7 @@ export function QueryView() {
               <Card>
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm">통계 자료</CardTitle>
-                  <CardDescription className="text-xs">컬럼별 MIN, Q1, 중앙값, Q3, MAX, 평균, NULL 개수</CardDescription>
+                  <CardDescription className="text-xs">컬럼별 MIN, Q1, 중앙값, Q3, MAX, 평균, 결측치, NULL 개수</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   {previewColumns.length ? (
@@ -1772,6 +1797,7 @@ export function QueryView() {
                             <tr>
                               <th className="text-left p-2 font-medium">컬럼</th>
                               <th className="text-right p-2 font-medium">N</th>
+                              <th className="text-right p-2 font-medium">결측치</th>
                               <th className="text-right p-2 font-medium">NULL</th>
                               <th className="text-right p-2 font-medium">MIN</th>
                               <th className="text-right p-2 font-medium">Q1</th>
@@ -1786,6 +1812,7 @@ export function QueryView() {
                               <tr key={row.column} className="border-t border-border">
                                 <td className="p-2 font-medium">{row.column}</td>
                                 <td className="p-2 text-right">{row.count}</td>
+                                <td className="p-2 text-right">{row.missingCount}</td>
                                 <td className="p-2 text-right">{row.nullCount}</td>
                                 <td className="p-2 text-right">{formatStatNumber(row.min)}</td>
                                 <td className="p-2 text-right">{formatStatNumber(row.q1)}</td>
@@ -1807,14 +1834,16 @@ export function QueryView() {
                               <ComposedChart data={boxPlotRows}>
                                 <CartesianGrid strokeDasharray="3 3" />
                                 <XAxis dataKey="column" tick={{ fontSize: 12 }} />
-                                <YAxis tick={{ fontSize: 12 }} />
+                                <YAxis tick={{ fontSize: 12 }} domain={boxPlotYDomain} allowDataOverflow />
                                 <Tooltip />
                                 <Legend />
                                 <Bar dataKey="iqrBase" stackId="box" fill="transparent" legendType="none" />
                                 <Bar dataKey="iqr" stackId="box" name="IQR (Q1~Q3)" fill="#60a5fa" stroke="#3b82f6" />
-                                <Line type="linear" dataKey="min" name="MIN" stroke="#64748b" dot={false} />
-                                <Line type="linear" dataKey="max" name="MAX" stroke="#64748b" dot={false} />
+                                <Line type="linear" dataKey="whiskerLow" name="MIN (whisker)" stroke="#64748b" dot={false} />
+                                <Line type="linear" dataKey="whiskerHigh" name="MAX (whisker)" stroke="#64748b" dot={false} />
                                 <Scatter dataKey="median" name="중앙값" fill="#ef4444" />
+                                <Scatter dataKey="outlierLow" name="하위 이상치" fill="#f59e0b" />
+                                <Scatter dataKey="outlierHigh" name="상위 이상치" fill="#f59e0b" />
                               </ComposedChart>
                             </ResponsiveContainer>
                           </div>
@@ -1868,6 +1897,7 @@ interface SimpleStatsRow {
   column: string
   count: number
   nullCount: number
+  missingCount: number
   min: number | null
   q1: number | null
   median: number | null
@@ -1880,16 +1910,25 @@ function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
   return columns.map((column, colIdx) => {
     const numbers: number[] = []
     let nullCount = 0
+    let missingCount = 0
 
     for (const row of rows) {
       const value = row?.[colIdx]
-      if (value == null || value === "") {
+      const isNull = value == null
+      const isBlank = typeof value === "string" && value.trim() === ""
+      if (isNull) {
         nullCount += 1
+        missingCount += 1
+        continue
+      }
+      if (isBlank) {
+        missingCount += 1
         continue
       }
       const num = Number(value)
-      if (Number.isFinite(num)) numbers.push(num)
-      else nullCount += 1
+      if (Number.isFinite(num)) {
+        numbers.push(num)
+      }
     }
 
     if (!numbers.length) {
@@ -1897,6 +1936,7 @@ function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
         column,
         count: 0,
         nullCount,
+        missingCount,
         min: null,
         q1: null,
         median: null,
@@ -1918,6 +1958,7 @@ function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
       column,
       count: numbers.length,
       nullCount,
+      missingCount,
       min: Number(min.toFixed(4)),
       q1: Number(q1.toFixed(4)),
       median: Number(median.toFixed(4)),
