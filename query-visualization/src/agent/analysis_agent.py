@@ -5,14 +5,22 @@
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
+from dotenv import load_dotenv
+from openai import OpenAI
 
 from src.agent import chart_rule_engine, code_generator, intent_extractor, retrieval
+from src.config.llm_config import OPENAI_MODEL
 from src.db.schema_introspect import summarize_dataframe_schema
 from src.models.chart_spec import AnalysisCard, ChartSpec, VisualizationResponse
 from src.utils.logging import log_event
+
+_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(_DOTENV_PATH)
 
 # 입력: df
 # 출력: 데이터프레임 스키마 요약 딕셔너리
@@ -68,6 +76,88 @@ def _add_elapsed_columns(df: pd.DataFrame) -> pd.DataFrame:
             pass
 
     return df
+
+
+def _stats_snapshot(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    stats: Dict[str, Dict[str, float]] = {}
+    if df.empty:
+        return stats
+    numeric_cols = list(df.select_dtypes(include=["number"]).columns)[:8]
+    for col in numeric_cols:
+        series = pd.to_numeric(df[col], errors="coerce").dropna()
+        if series.empty:
+            continue
+        stats[col] = {
+            "min": float(series.min()),
+            "q1": float(series.quantile(0.25)),
+            "median": float(series.quantile(0.5)),
+            "q3": float(series.quantile(0.75)),
+            "max": float(series.max()),
+            "mean": float(series.mean()),
+        }
+    return stats
+
+
+def _fallback_insight(user_query: str, df: pd.DataFrame, analyses: List[AnalysisCard]) -> str:
+    row_count = len(df)
+    col_count = len(df.columns)
+    chart_hint = "차트 추천이 생성되지 않았습니다."
+    if analyses:
+        first = analyses[0]
+        if first.chart_spec and first.chart_spec.chart_type:
+            chart_hint = f"주요 추천 차트는 {first.chart_spec.chart_type} 입니다."
+    return (
+        f"질문 '{user_query}' 기준으로 결과 {row_count}행, {col_count}개 컬럼을 분석했습니다. "
+        f"{chart_hint} 통계표의 분포/결측을 함께 확인해 해석하세요."
+    )
+
+
+def _llm_generate_insight(
+    user_query: str,
+    sql: str,
+    df: pd.DataFrame,
+    analyses: List[AnalysisCard],
+    df_schema: Dict[str, Any],
+) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
+
+    client = OpenAI(api_key=api_key)
+    sample_rows = df.head(20).to_dict(orient="records")
+    analysis_briefs = [
+        {
+            "chart_type": a.chart_spec.chart_type if a.chart_spec else None,
+            "x": a.chart_spec.x if a.chart_spec else None,
+            "y": a.chart_spec.y if a.chart_spec else None,
+            "reason": a.reason,
+            "summary": a.summary,
+        }
+        for a in analyses[:3]
+    ]
+    prompt = (
+        "다음 정보를 바탕으로 한국어 데이터 분석 인사이트를 작성하라.\n"
+        "- 사용자 질문, SQL, 쿼리 결과 샘플, 통계요약, 차트추천 정보를 종합할 것\n"
+        "- 출력은 4~6문장, 실행 가능한 인사이트 중심으로 작성\n"
+        "- 단순 나열 금지, 핵심 패턴/이상치/해석/주의사항 포함\n\n"
+        f"질문: {user_query}\n"
+        f"SQL: {sql}\n"
+        f"스키마 요약: {df_schema}\n"
+        f"통계 요약: {_stats_snapshot(df)}\n"
+        f"차트 추천: {analysis_briefs}\n"
+        f"결과 샘플(최대 20행): {sample_rows}\n"
+    )
+    response = client.responses.create(
+        model=OPENAI_MODEL or "gpt-4o-mini",
+        input=[
+            {"role": "system", "content": "너는 임상 데이터 분석 인사이트 작성 도우미다."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    text = (getattr(response, "output_text", None) or "").strip()
+    if not text:
+        raise RuntimeError("LLM insight 응답이 비어 있습니다.")
+    return text
 
 # 입력: user_query, sql, df
 # 출력: VisualizationResponse
@@ -125,9 +215,16 @@ def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> Visual
             )
         )
 
+    try:
+        insight = _llm_generate_insight(user_query, sql, df, analyses, df_schema)
+    except Exception as exc:
+        log_event("analysis.insight.error", {"error": str(exc)})
+        insight = _fallback_insight(user_query, df, analyses)
+
     # 5) 결과 묶기
     return VisualizationResponse(
         sql=sql,
         table_preview=df.head(20).to_dict(orient="records"),
         analyses=analyses,
+        insight=insight,
     )

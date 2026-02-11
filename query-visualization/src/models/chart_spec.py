@@ -45,3 +45,5 @@ class VisualizationResponse(BaseModel):
     table_preview: List[Dict[str, Any]]
     # 추천 시각화 카드 목록
     analyses: List[AnalysisCard]
+    # 통합 분석 인사이트(LLM 생성)
+    insight: Optional[str] = None

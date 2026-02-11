@@ -4,10 +4,7 @@ import { useState, useEffect, useMemo, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
-import { Switch } from "@/components/ui/switch"
-import { Label } from "@/components/ui/label"
 import { 
   Send, 
   Code, 
@@ -132,6 +129,7 @@ interface VisualizationResponsePayload {
   sql?: string
   table_preview?: Array<Record<string, unknown>>
   analyses?: VisualizationAnalysisCard[]
+  insight?: string
 }
 
 interface PersistedQueryState {
@@ -142,9 +140,10 @@ interface PersistedQueryState {
   runResult: RunResponse | null
   suggestedQuestions: string[]
   showResults: boolean
+  showSqlPanel: boolean
+  showQueryResultPanel: boolean
   editedSql: string
   isEditing: boolean
-  isTechnicalMode: boolean
 }
 
 const MAX_PERSIST_ROWS = 200
@@ -285,10 +284,11 @@ export function QueryView() {
       clearTimeout(timeout)
     }
   }
-  const [isTechnicalMode, setIsTechnicalMode] = useState(false)
   const [query, setQuery] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [showResults, setShowResults] = useState(false)
+  const [showSqlPanel, setShowSqlPanel] = useState(false)
+  const [showQueryResultPanel, setShowQueryResultPanel] = useState(false)
   const [editedSql, setEditedSql] = useState("")
   const [isEditing, setIsEditing] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -468,6 +468,51 @@ export function QueryView() {
       data,
     }
   }, [recommendedAnalysis, previewColumns, previewRecords])
+  const resultInterpretation = useMemo(() => {
+    if (summary) return summary
+    if (!previewColumns.length) return "쿼리 결과가 없어 해석을 생성할 수 없습니다."
+    const numericCols = statsRows.filter((row) => row.count > 0)
+    const topNumeric = numericCols
+      .slice()
+      .sort((a, b) => (b.avg ?? Number.NEGATIVE_INFINITY) - (a.avg ?? Number.NEGATIVE_INFINITY))[0]
+    const base = `현재 결과는 ${previewColumns.length}개 컬럼, 미리보기 ${previewRowCount}행입니다.`
+    if (!topNumeric || topNumeric.avg == null) return `${base} 수치형 요약 대상이 제한적입니다.`
+    return `${base} 평균 기준으로 '${topNumeric.column}' 컬럼이 가장 큽니다(평균 ${formatStatNumber(topNumeric.avg)}).`
+  }, [summary, previewColumns, previewRowCount, statsRows])
+  const chartInterpretation = useMemo(() => {
+    if (recommendedAnalysis?.summary) return recommendedAnalysis.summary
+    if (recommendedAnalysis?.reason) return recommendedAnalysis.reason
+    if (recommendedChart) {
+      return `차트 유형은 ${recommendedChart.type.toUpperCase()}이며, X축은 ${recommendedChart.xKey}, Y축은 ${recommendedChart.yKey} 기준입니다.`
+    }
+    if (survivalChartData?.length) {
+      return `생존 곡선을 표시했습니다. 추정 중앙 생존시간은 약 ${medianSurvival.toFixed(2)}입니다.`
+    }
+    return "현재 결과에서는 자동 차트 추천 근거가 충분하지 않습니다."
+  }, [recommendedAnalysis, recommendedChart, survivalChartData, medianSurvival])
+  const statsInterpretation = useMemo(() => {
+    if (!statsRows.length) return "통계표를 생성할 결과가 없습니다."
+    const numeric = statsRows.filter((row) => row.count > 0)
+    const nullTotal = statsRows.reduce((sum, row) => sum + row.nullCount, 0)
+    const missingTotal = statsRows.reduce((sum, row) => sum + row.missingCount, 0)
+    if (!numeric.length) return `수치형 컬럼이 없어 결측/NULL 중심으로 확인됩니다(결측 ${missingTotal}, NULL ${nullTotal}).`
+    const widest = numeric
+      .slice()
+      .sort((a, b) => ((b.max ?? 0) - (b.min ?? 0)) - ((a.max ?? 0) - (a.min ?? 0)))[0]
+    const range = widest.max != null && widest.min != null ? widest.max - widest.min : null
+    return `수치형 컬럼 ${numeric.length}개를 집계했습니다. 결측 ${missingTotal}, NULL ${nullTotal}이며, '${widest.column}'의 분산폭이 가장 큽니다${range != null ? ` (범위 ${formatStatNumber(range)})` : ""}.`
+  }, [statsRows])
+  const integratedInsight = useMemo(() => {
+    if (visualizationResult?.insight) return visualizationResult.insight
+    const lines: string[] = []
+    lines.push(resultInterpretation)
+    lines.push(chartInterpretation)
+    lines.push(statsInterpretation)
+    if (riskScore != null) {
+      lines.push(`위험 점수는 ${riskScore}${riskIntent ? ` (${riskIntent})` : ""}로 평가되었습니다.`)
+    }
+    return lines.join("\n\n")
+  }, [resultInterpretation, chartInterpretation, statsInterpretation, riskScore, riskIntent])
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
@@ -796,6 +841,8 @@ export function QueryView() {
       setResponse(null)
       setRunResult(null)
       setShowResults(false)
+      setShowSqlPanel(false)
+      setShowQueryResultPanel(false)
       setEditedSql("")
       setIsEditing(false)
       setLastQuestion("")
@@ -817,9 +864,10 @@ export function QueryView() {
         if (typeof state.lastQuestion === "string") setLastQuestion(state.lastQuestion)
         if (Array.isArray(state.suggestedQuestions)) setSuggestedQuestions(state.suggestedQuestions)
         if (typeof state.showResults === "boolean") setShowResults(state.showResults)
+        if (typeof state.showSqlPanel === "boolean") setShowSqlPanel(state.showSqlPanel)
+        if (typeof state.showQueryResultPanel === "boolean") setShowQueryResultPanel(state.showQueryResultPanel)
         if (typeof state.editedSql === "string") setEditedSql(state.editedSql)
         if (typeof state.isEditing === "boolean") setIsEditing(state.isEditing)
-        if (typeof state.isTechnicalMode === "boolean") setIsTechnicalMode(state.isTechnicalMode)
       } catch {
         // ignore hydration errors
       } finally {
@@ -842,9 +890,10 @@ export function QueryView() {
       runResult: sanitizeRunResult(runResult),
       suggestedQuestions,
       showResults,
+      showSqlPanel,
+      showQueryResultPanel,
       editedSql,
       isEditing,
-      isTechnicalMode,
     }
     saveTimerRef.current = window.setTimeout(() => {
       fetch(apiUrl("/chat/history"), {
@@ -867,9 +916,10 @@ export function QueryView() {
     runResult,
     suggestedQuestions,
     showResults,
+    showSqlPanel,
+    showQueryResultPanel,
     editedSql,
     isEditing,
-    isTechnicalMode,
     apiBaseUrl,
     chatHistoryUser,
   ])
@@ -900,7 +950,10 @@ export function QueryView() {
     setVisualizationResult(null)
     setVisualizationError(null)
     setEditedSql("")
-    setShowResults(false)
+    // Keep split layout while running next question to avoid chat panel jumping to full width.
+    // Results content is refreshed below when response arrives.
+    setShowSqlPanel(false)
+    setShowQueryResultPanel(false)
     setLastQuestion(trimmed)
     setSuggestedQuestions([])
     const newMessage: ChatMessage = {
@@ -934,7 +987,8 @@ export function QueryView() {
       const data: OneShotResponse = await res.json()
       setResponse(data)
       if (data.payload.mode === "clarify") {
-        setShowResults(false)
+        setShowSqlPanel(false)
+        setShowQueryResultPanel(false)
         setEditedSql("")
         setIsEditing(false)
         const clarificationSuggestions = buildClarificationSuggestions(data.payload)
@@ -950,6 +1004,8 @@ export function QueryView() {
       }
 
       setShowResults(true)
+      setShowSqlPanel(false)
+      setShowQueryResultPanel(false)
       const generatedSql =
         (data.payload.mode === "demo"
           ? data.payload.result?.sql
@@ -1214,6 +1270,8 @@ export function QueryView() {
     setVisualizationResult(null)
     setVisualizationError(null)
     setShowResults(false)
+    setShowSqlPanel(false)
+    setShowQueryResultPanel(false)
     setQuery("")
     setEditedSql("")
     setIsEditing(false)
@@ -1304,38 +1362,6 @@ export function QueryView() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-56px)] sm:h-[calc(100vh-64px)]">
-      {/* Header */}
-      <div className="p-3 sm:p-4 border-b border-border bg-card/50">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <h2 className="text-base sm:text-lg font-semibold text-foreground truncate">쿼리 & 분석</h2>
-            <p className="text-[10px] sm:text-xs text-muted-foreground hidden sm:block">자연어로 질문하고 SQL 결과를 확인하세요.</p>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-4 shrink-0">
-            <div className="flex items-center gap-1 sm:gap-2">
-              <Label htmlFor="mode-switch" className="text-[10px] sm:text-xs text-muted-foreground whitespace-nowrap">
-                {isTechnicalMode ? "기술" : "비기술"}
-              </Label>
-              <Switch 
-                id="mode-switch"
-                checked={isTechnicalMode}
-                onCheckedChange={setIsTechnicalMode}
-              />
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1"
-              onClick={handleResetConversation}
-              disabled={isLoading || !hasConversation}
-            >
-              <Trash2 className="w-3 h-3" />
-              대화 초기화
-            </Button>
-          </div>
-        </div>
-      </div>
-
       {/* Main Content */}
       <div ref={mainContentRef} className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
         {/* Chat Panel */}
@@ -1433,6 +1459,18 @@ export function QueryView() {
 
           {/* Input */}
           <div className="p-4 border-t border-border">
+            <div className="mb-2 flex justify-end">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1"
+                onClick={handleResetConversation}
+                disabled={isLoading || !hasConversation}
+              >
+                <Trash2 className="w-3 h-3" />
+                대화 초기화
+              </Button>
+            </div>
             <div className="flex gap-2">
               <Textarea
                 placeholder="?먯뿰?대줈 吏덈Ц?섏꽭??.."
@@ -1485,44 +1523,72 @@ export function QueryView() {
             style={resultsPanelStyle}
           >
             <div className="flex-1 overflow-y-auto p-4 pb-6 space-y-4">
-              {isTechnicalMode && (
-                <Card
-                  className={cn(
-                    "border-l-4",
-                    validationStatus === "safe" && "border-l-primary",
-                    validationStatus === "warning" && "border-l-yellow-500",
-                    validationStatus === "danger" && "border-l-destructive"
-                  )}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant={showSqlPanel ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-7"
+                  onClick={() => setShowSqlPanel((prev) => !prev)}
                 >
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm flex items-center gap-2">
-                      <Shield className="w-4 h-4" />
-                      안전 검증 결과
-                      {getValidationIcon(validationStatus)}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {validationChecks.length ? (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        {validationChecks.map((check, idx) => (
-                          <div key={idx} className="flex items-start gap-2 text-xs">
-                            {check.passed ? (
-                              <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
-                            ) : (
-                              <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
-                            )}
-                            <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
-                            <span className="text-foreground break-words">{check.message}</span>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="text-xs text-muted-foreground">검증 정보가 아직 없습니다.</div>
-                    )}
-                  </CardContent>
-                </Card>
-              )}
+                  {showSqlPanel ? "SQL 숨기기" : "SQL 보기"}
+                </Button>
+                <Button
+                  variant={showQueryResultPanel ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-7"
+                  onClick={() => setShowQueryResultPanel((prev) => !prev)}
+                >
+                  {showQueryResultPanel ? "쿼리 결과 숨기기" : "쿼리 결과 보기"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1 ml-auto"
+                  onClick={handleResetConversation}
+                  disabled={isLoading || !hasConversation}
+                >
+                  <Trash2 className="w-3 h-3" />
+                  대화 초기화
+                </Button>
+              </div>
 
+              <Card
+                className={cn(
+                  "border-l-4",
+                  validationStatus === "safe" && "border-l-primary",
+                  validationStatus === "warning" && "border-l-yellow-500",
+                  validationStatus === "danger" && "border-l-destructive"
+                )}
+              >
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Shield className="w-4 h-4" />
+                    안전 검증 결과
+                    {getValidationIcon(validationStatus)}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {validationChecks.length ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {validationChecks.map((check, idx) => (
+                        <div key={idx} className="flex items-start gap-2 text-xs">
+                          {check.passed ? (
+                            <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
+                          ) : (
+                            <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
+                          )}
+                          <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
+                          <span className="text-foreground break-words">{check.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted-foreground">검증 정보가 아직 없습니다.</div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {showSqlPanel && (
               <Card>
                 <CardHeader className="pb-2">
                   <div className="flex items-center justify-between">
@@ -1595,7 +1661,9 @@ export function QueryView() {
                   )}
                 </CardContent>
               </Card>
+              )}
 
+              {showQueryResultPanel && (
               <Card>
                 <CardHeader className="pb-2">
                   <div className="flex items-center justify-between">
@@ -1692,6 +1760,7 @@ export function QueryView() {
                   )}
                 </CardContent>
               </Card>
+              )}
 
               <Card>
                 <CardHeader className="pb-2">
@@ -1868,21 +1937,10 @@ export function QueryView() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
-                    <h4 className="font-medium text-foreground mb-2">요약</h4>
-                    <p className="text-sm text-muted-foreground">
-                      {summary || "요약 정보가 아직 없습니다. 결과 실행 후 요약이 표시됩니다."}
-                    </p>
+                    <h4 className="font-medium text-foreground mb-2">데이터 분석 인사이트</h4>
+                    <p className="text-sm text-muted-foreground whitespace-pre-line">{integratedInsight}</p>
                     {source && <p className="text-xs text-muted-foreground mt-2">source: {source}</p>}
                   </div>
-                  {riskScore != null && (
-                    <div className="p-4 rounded-lg bg-secondary/50 border border-border">
-                      <h4 className="font-medium text-foreground mb-2">위험도</h4>
-                      <div className="text-sm text-muted-foreground">
-                        위험 점수: <span className="text-foreground">{riskScore}</span>
-                        {riskIntent ? ` (${riskIntent})` : ""}
-                      </div>
-                    </div>
-                  )}
                 </CardContent>
               </Card>
             </div>
