@@ -241,7 +241,11 @@ export function QueryView() {
   ])
   const [isHydrated, setIsHydrated] = useState(false)
   const [isSqlDragging, setIsSqlDragging] = useState(false)
+  const [isDesktopLayout, setIsDesktopLayout] = useState(false)
+  const [resultsPanelWidth, setResultsPanelWidth] = useState(55)
+  const [isPanelResizing, setIsPanelResizing] = useState(false)
   const saveTimerRef = useRef<number | null>(null)
+  const mainContentRef = useRef<HTMLDivElement | null>(null)
   const sqlScrollRef = useRef<HTMLDivElement | null>(null)
   const sqlDragRef = useRef({
     active: false,
@@ -249,6 +253,12 @@ export function QueryView() {
     startY: 0,
     scrollLeft: 0,
     scrollTop: 0,
+  })
+  const panelResizeRef = useRef({
+    active: false,
+    startX: 0,
+    startRightWidth: 55,
+    containerWidth: 0,
   })
 
   const payload = response?.payload
@@ -286,7 +296,29 @@ export function QueryView() {
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
   const hasConversation =
     messages.length > 0 || Boolean(response) || Boolean(runResult) || query.trim().length > 0
+  const shouldShowResizablePanels = showResults && isDesktopLayout
+  const chatPanelStyle = shouldShowResizablePanels ? { width: `${100 - resultsPanelWidth}%` } : undefined
+  const resultsPanelStyle = shouldShowResizablePanels ? { width: `${resultsPanelWidth}%` } : undefined
   const appendSuggestions = (base: string, _suggestions?: string[]) => base
+
+  const handlePanelResizeMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !shouldShowResizablePanels) return
+    const container = mainContentRef.current
+    if (!container) return
+    const rect = container.getBoundingClientRect()
+    if (rect.width <= 0) return
+
+    panelResizeRef.current = {
+      active: true,
+      startX: event.clientX,
+      startRightWidth: resultsPanelWidth,
+      containerWidth: rect.width,
+    }
+    setIsPanelResizing(true)
+    document.body.style.cursor = "col-resize"
+    document.body.style.userSelect = "none"
+    event.preventDefault()
+  }
 
   const handleSqlMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
@@ -326,6 +358,43 @@ export function QueryView() {
     return () => {
       window.removeEventListener("mousemove", handleMouseMove)
       window.removeEventListener("mouseup", stopDragging)
+    }
+  }, [])
+
+  useEffect(() => {
+    const syncDesktopLayout = () => {
+      setIsDesktopLayout(window.innerWidth >= 1024)
+    }
+    syncDesktopLayout()
+    window.addEventListener("resize", syncDesktopLayout)
+    return () => window.removeEventListener("resize", syncDesktopLayout)
+  }, [])
+
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!panelResizeRef.current.active) return
+      const { startX, startRightWidth, containerWidth } = panelResizeRef.current
+      if (containerWidth <= 0) return
+      const deltaPercent = ((event.clientX - startX) / containerWidth) * 100
+      const nextRightWidth = Math.min(70, Math.max(30, startRightWidth - deltaPercent))
+      setResultsPanelWidth(nextRightWidth)
+    }
+
+    const stopResizing = () => {
+      if (!panelResizeRef.current.active) return
+      panelResizeRef.current.active = false
+      setIsPanelResizing(false)
+      document.body.style.cursor = ""
+      document.body.style.userSelect = ""
+    }
+
+    window.addEventListener("mousemove", handleMouseMove)
+    window.addEventListener("mouseup", stopResizing)
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("mouseup", stopResizing)
+      document.body.style.cursor = ""
+      document.body.style.userSelect = ""
     }
   }, [])
 
@@ -1010,9 +1079,15 @@ export function QueryView() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+      <div ref={mainContentRef} className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
         {/* Chat Panel */}
-        <div className="flex-1 flex flex-col lg:border-r border-border min-h-0">
+        <div
+          className={cn(
+            "min-h-0 flex flex-col border-border",
+            shouldShowResizablePanels ? "lg:flex-none" : "flex-1"
+          )}
+          style={chatPanelStyle}
+        >
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 ? (
@@ -1124,9 +1199,33 @@ export function QueryView() {
           </div>
         </div>
 
+        {shouldShowResizablePanels && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="패널 크기 조정"
+            aria-valuemin={30}
+            aria-valuemax={70}
+            aria-valuenow={Math.round(resultsPanelWidth)}
+            onMouseDown={handlePanelResizeMouseDown}
+            className={cn(
+              "hidden lg:flex w-3 shrink-0 items-center justify-center border-x border-border/50 bg-card/30 cursor-col-resize select-none transition-colors",
+              isPanelResizing && "bg-secondary/60"
+            )}
+          >
+            <div className="h-16 w-1 rounded-full bg-border/80" />
+          </div>
+        )}
+
         {/* Results Panel */}
         {showResults && (
-          <div className="lg:w-[55%] min-h-0 flex flex-col overflow-hidden border-t lg:border-t-0 border-border max-h-[50vh] lg:max-h-none">
+          <div
+            className={cn(
+              "min-h-0 flex flex-col overflow-hidden border-t lg:border-t-0 border-border max-h-[50vh] lg:max-h-none",
+              shouldShowResizablePanels && "lg:flex-none"
+            )}
+            style={resultsPanelStyle}
+          >
             <Tabs defaultValue={isTechnicalMode ? "sql" : "results"} className="flex-1 min-h-0 flex flex-col">
               <div className="px-4 pt-2 border-b border-border">
                 <TabsList className="h-9">

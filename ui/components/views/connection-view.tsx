@@ -44,10 +44,19 @@ interface ConnectionSettings {
   username: string
   password?: string
   sslMode?: string
+  defaultSchema?: string
 }
 
 interface TableScopeSettings {
   selected_ids: string[]
+}
+
+interface SaveConnectionResponse {
+  ok: boolean
+  metadata_synced?: boolean
+  owner?: string | null
+  tables?: number
+  reason?: string
 }
 
 interface TableCatalogResponse {
@@ -94,7 +103,8 @@ export function ConnectionView() {
     database: "mimiciv",
     username: "researcher_01",
     password: "",
-    sslMode: "require"
+    sslMode: "require",
+    defaultSchema: ""
   })
 
   const [tableScopes, setTableScopes] = useState<TableScope[]>(DEFAULT_TABLE_SCOPES)
@@ -162,6 +172,11 @@ export function ConnectionView() {
         const data: TableCatalogResponse = await tablesRes.json()
         if (Array.isArray(data?.tables) && data.tables.length > 0) {
           const owner = String(data.owner || "")
+          if (owner) {
+            setConnectionConfig(prev => (
+              prev.defaultSchema?.trim() ? prev : { ...prev, defaultSchema: owner }
+            ))
+          }
           const nextScopes = data.tables.map(table => {
             const name = String(table.name || "")
             const id = name.toLowerCase()
@@ -199,6 +214,7 @@ export function ConnectionView() {
         username: connectionConfig.username,
         password: connectionConfig.password,
         sslMode: connectionConfig.sslMode,
+        defaultSchema: connectionConfig.defaultSchema?.trim() || undefined,
       }
       const tablePayload: TableScopeSettings = {
         selected_ids: tableScopes.filter(t => t.selected).map(t => t.id),
@@ -221,8 +237,20 @@ export function ConnectionView() {
       if (!scopeRes.ok) {
         throw new Error(await readError(scopeRes))
       }
-      setSaveMessage("설정이 저장되었습니다.")
-      await fetchPoolStatus()
+      let message = "설정이 저장되었습니다."
+      const connectionInfo: SaveConnectionResponse | null = await connectionRes.json().catch(() => null)
+      if (connectionInfo?.metadata_synced) {
+        const tableCount = typeof connectionInfo.tables === "number" ? connectionInfo.tables : null
+        const ownerLabel = connectionInfo.owner ? ` (${connectionInfo.owner})` : ""
+        message = tableCount !== null
+          ? `설정 저장 및 테이블 동기화 완료${ownerLabel}: ${tableCount}개`
+          : `설정 저장 및 테이블 동기화 완료${ownerLabel}`
+      } else if (connectionInfo?.metadata_synced === false) {
+        const reason = connectionInfo.reason ? ` - ${connectionInfo.reason}` : ""
+        message = `설정은 저장되었지만 테이블 동기화는 완료되지 않았습니다${reason}`
+      }
+      setSaveMessage(message)
+      await Promise.all([fetchPoolStatus(), loadSettings()])
     } catch (err: any) {
       setSaveError(err?.message || "설정 저장에 실패했습니다.")
     } finally {

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { AppSidebar, type ViewType } from "@/components/app-sidebar"
 import { ConnectionView } from "@/components/views/connection-view"
-import { ContextView } from "@/components/views/context-view"
+// import { ContextView } from "@/components/views/context-view"
 import { QueryView } from "@/components/views/query-view"
 import { DashboardView } from "@/components/views/dashboard-view"
 import { AuditView } from "@/components/views/audit-view"
@@ -45,8 +45,8 @@ export default function Home() {
     switch (currentView) {
       case "connection":
         return <ConnectionView />
-      case "context":
-        return <ContextView />
+      // case "context":
+      //   return <ContextView />
       case "query":
         return <QueryView />
       case "dashboard":
@@ -63,7 +63,7 @@ export default function Home() {
   const getViewTitle = () => {
     switch (currentView) {
       case "connection": return "DB 연결/권한 설정"
-      case "context": return "컨텍스트 편집"
+      // case "context": return "컨텍스트 편집"
       case "query": return "쿼리 & 분석"
       case "dashboard": return "결과 보드"
       case "audit": return "감사 로그"

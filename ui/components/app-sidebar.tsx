@@ -3,7 +3,7 @@
 import { cn } from "@/lib/utils"
 import { 
   Database, 
-  Settings2, 
+  // Settings2,
   MessageSquare, 
   LayoutDashboard, 
   FileText,
@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
-export type ViewType = "connection" | "context" | "query" | "dashboard" | "audit" | "cohort"
+export type ViewType = "connection" | "query" | "dashboard" | "audit" | "cohort"
 
 interface AppSidebarProps {
   currentView: ViewType
@@ -26,7 +26,7 @@ interface AppSidebarProps {
 
 const navItems = [
   { id: "connection" as const, label: "DB 연결", icon: Database, description: "연결/권한 설정" },
-  { id: "context" as const, label: "컨텍스트", icon: Settings2, description: "관리자 설정" },
+  // { id: "context" as const, label: "컨텍스트", icon: Settings2, description: "관리자 설정" },
   { id: "query" as const, label: "쿼리", icon: MessageSquare, description: "질문 & SQL" },
   { id: "dashboard" as const, label: "대시보드", icon: LayoutDashboard, description: "결과 보드" },
   { id: "audit" as const, label: "감사 로그", icon: FileText, description: "의사결정 증적" },
