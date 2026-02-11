@@ -795,6 +795,15 @@ export function QueryView() {
       { label: "컬럼 수", value: String(previewColumns.length) },
       { label: "ROW CAP", value: previewRowCap != null ? String(previewRowCap) : "-" },
     ]
+    const previewPayload =
+      previewColumns.length && previewRows.length
+        ? {
+            columns: previewColumns,
+            rows: previewRows.slice(0, 50),
+            row_count: previewRowCount ?? previewRows.length,
+            row_cap: previewRowCap ?? null,
+          }
+        : undefined
     const newEntry = {
       id: `dashboard-${Date.now()}`,
       title,
@@ -803,6 +812,7 @@ export function QueryView() {
       lastRun: "방금 저장",
       isPinned: true,
       category,
+      preview: previewPayload,
       metrics,
       chartType: "bar",
     }

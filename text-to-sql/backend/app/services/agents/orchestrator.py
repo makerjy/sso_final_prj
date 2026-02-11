@@ -93,6 +93,38 @@ def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_/-]*")
 _MULTI_SPACE_RE = re.compile(r"\s+")
+_CLARIFICATION_SLOT_ORDER = ("period", "cohort", "comparison", "metric")
+_SLOT_LABELS_KO = {
+    "period": "기간",
+    "cohort": "대상 환자",
+    "comparison": "비교 기준",
+    "metric": "지표",
+}
+_SLOT_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "period": (
+        re.compile(r"(최근|지난|작년|올해|전년|전년도|이번)\s*\d*\s*(일|주|개월|달|월|년)?"),
+        re.compile(r"(월별|연도별|주별|일별|기간|time|date|month|year|week|day)", re.IGNORECASE),
+        re.compile(r"(between|from|to)\s+\S+", re.IGNORECASE),
+    ),
+    "cohort": (
+        re.compile(r"(환자|코호트|대상|집단|남성|여성|성별|연령|세\s*이상|세\s*이하|진단|질환)"),
+        re.compile(r"(icu|입원|외래|subject|cohort|group|population|diagnos|disease)", re.IGNORECASE),
+    ),
+    "comparison": (
+        re.compile(r"(비교|대비|전후|차이|증감|군간|대조군)"),
+        re.compile(r"(vs|versus|comparison|compared|before|after)", re.IGNORECASE),
+    ),
+    "metric": (
+        re.compile(r"(사망률|사망|생존율|생존|재입원율|재입원|비율|건수|평균|중앙|중위|재원일수)"),
+        re.compile(r"(rate|ratio|count|mean|median|mortality|survival|readmission|length\s+of\s+stay)", re.IGNORECASE),
+    ),
+}
+_SLOT_OPTION_SAMPLES_KO: dict[str, tuple[str, ...]] = {
+    "period": ("최근 30일", "2025년 전체", "입원 후 30일"),
+    "cohort": ("전체 환자", "65세 이상 환자", "여성 환자"),
+    "comparison": ("비교 없음", "남성 대 여성 비교", "연도별 비교"),
+    "metric": ("사망률", "사망 건수", "생존율"),
+}
 
 
 def _strip_english_tokens_for_korean(text: str) -> str:
@@ -102,6 +134,233 @@ def _strip_english_tokens_for_korean(text: str) -> str:
     cleaned = re.sub(r"\s*[/|]\s*", " / ", cleaned)
     cleaned = _MULTI_SPACE_RE.sub(" ", cleaned).strip(" ,;")
     return cleaned.strip()
+
+
+def _normalize_conversation(conversation: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    if not conversation:
+        return []
+    normalized: list[dict[str, str]] = []
+    for turn in conversation[-12:]:
+        role = str(turn.get("role") or "").strip().lower()
+        content = str(turn.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        normalized.append({"role": role, "content": content[:2000]})
+    return normalized
+
+
+def _extract_slots_from_text(text: str) -> set[str]:
+    if not text:
+        return set()
+    found: set[str] = set()
+    for slot, patterns in _SLOT_PATTERNS.items():
+        for pattern in patterns:
+            if pattern.search(text):
+                found.add(slot)
+                break
+    return found
+
+
+def _truncate_slot_answer(text: str, *, limit: int = 80) -> str:
+    normalized = _MULTI_SPACE_RE.sub(" ", text).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: limit - 1].rstrip()}…"
+
+
+def _is_specific_slot_answer(slot: str, value: str) -> bool:
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    if slot == "comparison":
+        if any(keyword in normalized for keyword in ("비교 없음", "없음", "없다", "no comparison", "none")):
+            return True
+        return slot in _extract_slots_from_text(value)
+    if slot == "metric":
+        return slot in _extract_slots_from_text(value)
+    if slot == "period":
+        if normalized in {"전체", "전체기간", "all", "all period"}:
+            return True
+        return slot in _extract_slots_from_text(value)
+    if slot == "cohort":
+        if normalized in {"전체", "전체 환자", "all", "all patients"}:
+            return True
+        if any(
+            keyword in normalized
+            for keyword in (
+                "남성",
+                "여성",
+                "연령",
+                "세",
+                "이상",
+                "이하",
+                "진단",
+                "질환",
+                "icu",
+                "입원",
+                "외래",
+                "중환자",
+                "male",
+                "female",
+                "age",
+                "diagnos",
+                "disease",
+            )
+        ):
+            return True
+        return "환자" in normalized and len(normalized) <= 12
+    return bool(normalized)
+
+
+def _collect_clarification_memory(
+    question: str,
+    conversation: list[dict[str, Any]] | None,
+) -> tuple[str, set[str], dict[str, str]]:
+    turns = _normalize_conversation(conversation)
+    if question.strip():
+        if not turns or turns[-1]["role"] != "user" or turns[-1]["content"] != question.strip():
+            turns.append({"role": "user", "content": question.strip()})
+
+    base_question = question.strip()
+    for turn in turns:
+        if turn["role"] == "user":
+            base_question = turn["content"]
+            break
+
+    asked_slots: set[str] = set()
+    slot_answers: dict[str, list[str]] = {slot: [] for slot in _CLARIFICATION_SLOT_ORDER}
+    pending_slots: set[str] = set()
+
+    for turn in turns:
+        text = turn["content"].strip()
+        if not text:
+            continue
+        if turn["role"] == "assistant":
+            pending_slots = _extract_slots_from_text(text)
+            asked_slots.update(pending_slots)
+            continue
+
+        detected_slots = _extract_slots_from_text(text)
+        for slot in detected_slots:
+            if text not in slot_answers[slot]:
+                slot_answers[slot].append(text)
+        if pending_slots:
+            for slot in pending_slots:
+                if text not in slot_answers[slot]:
+                    slot_answers[slot].append(text)
+        pending_slots = set()
+
+    latest_answers: dict[str, str] = {}
+    for slot in _CLARIFICATION_SLOT_ORDER:
+        values = slot_answers.get(slot) or []
+        if not values:
+            continue
+        latest_answers[slot] = _truncate_slot_answer(values[-1])
+    return base_question, asked_slots, latest_answers
+
+
+def _infer_required_slots(
+    *,
+    question: str,
+    reason: str,
+    clarification_question: str,
+    options: list[str],
+    example_inputs: list[str],
+    asked_slots: set[str],
+) -> list[str]:
+    required = set(asked_slots)
+    for text in [question, reason, clarification_question, *options, *example_inputs]:
+        required.update(_extract_slots_from_text(text))
+    if not required:
+        required.update({"period", "cohort", "metric"})
+    return [slot for slot in _CLARIFICATION_SLOT_ORDER if slot in required]
+
+
+def _build_korean_examples(
+    *,
+    required_slots: list[str],
+    missing_slots: list[str],
+    known_answers: dict[str, str],
+) -> list[str]:
+    if not missing_slots:
+        return []
+    examples: list[str] = []
+    for idx in range(2):
+        parts: list[str] = []
+        for slot in required_slots:
+            label = _SLOT_LABELS_KO.get(slot, slot)
+            if slot in known_answers:
+                parts.append(f"{label}: {known_answers[slot]}")
+            elif slot in missing_slots:
+                sample_values = _SLOT_OPTION_SAMPLES_KO.get(slot) or ()
+                if sample_values:
+                    parts.append(f"{label}: {sample_values[idx % len(sample_values)]}")
+        if parts:
+            examples.append(" / ".join(parts))
+    return examples[:3]
+
+
+def _build_korean_consolidated_clarification(
+    *,
+    question: str,
+    reason: str,
+    clarification_question: str,
+    options: list[str],
+    example_inputs: list[str],
+    conversation: list[dict[str, Any]] | None,
+) -> tuple[str, list[str], list[str], dict[str, str]]:
+    base_question, asked_slots, raw_answers = _collect_clarification_memory(question, conversation)
+    required_slots = _infer_required_slots(
+        question=base_question,
+        reason=reason,
+        clarification_question=clarification_question,
+        options=options,
+        example_inputs=example_inputs,
+        asked_slots=asked_slots,
+    )
+    if not required_slots:
+        required_slots = ["period", "cohort", "metric"]
+
+    known_answers: dict[str, str] = {}
+    for slot in required_slots:
+        value = raw_answers.get(slot)
+        if value and _is_specific_slot_answer(slot, value):
+            known_answers[slot] = value
+
+    missing_slots = [slot for slot in required_slots if slot not in known_answers]
+    if not missing_slots:
+        # LLM이 추가 확인을 요구하면, 이미 답한 항목 재질문 대신 남은 핵심 항목을 우선 확인한다.
+        fallback_slots = [slot for slot in _CLARIFICATION_SLOT_ORDER if slot not in known_answers]
+        missing_slots = fallback_slots[:2] if fallback_slots else list(required_slots)
+
+    lines: list[str] = []
+    if known_answers:
+        lines.append("현재까지 답변 정리:")
+        for slot in required_slots:
+            value = known_answers.get(slot)
+            if not value:
+                continue
+            lines.append(f"- {_SLOT_LABELS_KO[slot]}: {value}")
+    lines.append("추가로 아래 항목을 한 번에 알려주세요.")
+    for slot in missing_slots:
+        lines.append(f"- {_SLOT_LABELS_KO[slot]}")
+
+    option_candidates: list[str] = []
+    for slot in missing_slots:
+        option_candidates.extend(_SLOT_OPTION_SAMPLES_KO.get(slot, ()))
+    dedup_options: list[str] = []
+    for item in option_candidates:
+        if item not in dedup_options:
+            dedup_options.append(item)
+    examples = _build_korean_examples(
+        required_slots=required_slots,
+        missing_slots=missing_slots,
+        known_answers=known_answers,
+    )
+    if not examples:
+        examples = [item for item in example_inputs if item][:3]
+
+    return "\n".join(lines), dedup_options[:5], examples[:3], known_answers
 
 
 def _default_korean_clarification(question: str) -> tuple[str, list[str], list[str]]:
@@ -125,7 +384,12 @@ def _default_korean_clarification(question: str) -> tuple[str, list[str], list[s
     return reason, options, examples
 
 
-def _normalize_clarifier_payload(payload: dict[str, Any], question: str) -> dict[str, Any]:
+def _normalize_clarifier_payload(
+    payload: dict[str, Any],
+    question: str,
+    *,
+    conversation: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     need_clarification = bool(payload.get("need_clarification"))
     reason = str(payload.get("reason") or "").strip()
     clarification_question = str(payload.get("clarification_question") or "").strip()
@@ -134,6 +398,7 @@ def _normalize_clarifier_payload(payload: dict[str, Any], question: str) -> dict
 
     options = _normalize_string_list(payload.get("options"), limit=5)
     example_inputs = _normalize_string_list(payload.get("example_inputs"), limit=3)
+    known_answers: dict[str, str] = {}
 
     if contains_korean(question):
         reason = _strip_english_tokens_for_korean(reason)
@@ -152,6 +417,20 @@ def _normalize_clarifier_payload(payload: dict[str, Any], question: str) -> dict
             options = default_options
         if not example_inputs:
             example_inputs = default_examples
+        if need_clarification:
+            (
+                clarification_question,
+                options,
+                example_inputs,
+                known_answers,
+            ) = _build_korean_consolidated_clarification(
+                question=question,
+                reason=reason,
+                clarification_question=clarification_question,
+                options=options,
+                example_inputs=example_inputs,
+                conversation=conversation,
+            )
 
     return {
         "need_clarification": need_clarification,
@@ -159,6 +438,7 @@ def _normalize_clarifier_payload(payload: dict[str, Any], question: str) -> dict
         "clarification_question": clarification_question,
         "options": options,
         "example_inputs": example_inputs,
+        "known_answers": known_answers,
         "refined_question": str(payload.get("refined_question") or "").strip(),
         "usage": payload.get("usage", {}),
     }
@@ -197,7 +477,11 @@ def run_oneshot(
         }
         try:
             clarity_raw = evaluate_question_clarity(original_question, conversation=conversation)
-            clarity = _normalize_clarifier_payload(clarity_raw, original_question)
+            clarity = _normalize_clarifier_payload(
+                clarity_raw,
+                original_question,
+                conversation=conversation,
+            )
             _add_llm_cost(clarity.get("usage", {}), "clarify")
         except Exception:
             clarity = {**clarity, "need_clarification": False}
@@ -210,6 +494,7 @@ def run_oneshot(
                     "question": clarity.get("clarification_question"),
                     "options": clarity.get("options", []),
                     "example_inputs": clarity.get("example_inputs", []),
+                    "known_answers": clarity.get("known_answers", {}),
                 },
             }
         if clarity.get("refined_question"):
