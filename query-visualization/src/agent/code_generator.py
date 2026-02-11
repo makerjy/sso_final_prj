@@ -10,6 +10,7 @@ import json
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import plotly.io as pio
 
 from src.utils.logging import log_event
@@ -91,6 +92,29 @@ def generate_chart(
         fig = px.scatter(df, x=x, y=y, color=group)
     elif chart_type == "box" and x and y:
         fig = px.box(df, x=x, y=y, color=group)
+    elif chart_type == "pyramid" and x and y and group:
+        chart_df = _aggregate_frame(df, x, y, None, agg)
+        right_df = _aggregate_frame(df, x, group, None, agg)
+        merged = chart_df.merge(right_df, on=x, how="inner", suffixes=("_left", "_right"))
+        if not merged.empty:
+            fig = go.Figure()
+            fig.add_trace(
+                go.Bar(
+                    y=merged[x],
+                    x=-merged[f"{y}_left"],
+                    name=str(y),
+                    orientation="h",
+                )
+            )
+            fig.add_trace(
+                go.Bar(
+                    y=merged[x],
+                    x=merged[f"{group}_right"],
+                    name=str(group),
+                    orientation="h",
+                )
+            )
+            fig.update_layout(barmode="relative")
 
     if fig is None:
         log_event("codegen.noop", {"chart_type": chart_type})

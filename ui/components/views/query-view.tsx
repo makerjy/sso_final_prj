@@ -1,6 +1,7 @@
 ﻿"use client"
 
 import { useState, useEffect, useMemo, useRef } from "react"
+import dynamic from "next/dynamic"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -123,6 +124,8 @@ interface VisualizationAnalysisCard {
   chart_spec?: VisualizationChartSpec
   reason?: string
   summary?: string
+  figure_json?: Record<string, unknown>
+  code?: string
 }
 
 interface VisualizationResponsePayload {
@@ -149,6 +152,7 @@ interface PersistedQueryState {
 const MAX_PERSIST_ROWS = 200
 const VIZ_CACHE_PREFIX = "viz_cache_v3:"
 const VIZ_CACHE_TTL_MS = 1000 * 60 * 60 * 24
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
 const hashText = (value: string) => {
   let hash = 2166136261
@@ -280,6 +284,16 @@ export function QueryView() {
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       return await fetch(input, { ...init, signal: controller.signal })
+    } catch (error: any) {
+      const message = String(error?.message || "")
+      const isAbort =
+        error?.name === "AbortError" ||
+        error?.name === "TimeoutError" ||
+        /aborted/i.test(message)
+      if (isAbort) {
+        throw new Error("요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.")
+      }
+      throw error
     } finally {
       clearTimeout(timeout)
     }
@@ -412,6 +426,11 @@ export function QueryView() {
     () => (Array.isArray(visualizationResult?.analyses) ? visualizationResult!.analyses![0] : null),
     [visualizationResult]
   )
+  const recommendedFigure = useMemo(() => {
+    const fig = recommendedAnalysis?.figure_json
+    if (fig && typeof fig === "object") return fig as { data?: unknown[]; layout?: Record<string, unknown> }
+    return null
+  }, [recommendedAnalysis])
   const recommendedChart = useMemo(() => {
     const spec = recommendedAnalysis?.chart_spec
     if (!spec || !previewRecords.length) return null
@@ -510,11 +529,12 @@ export function QueryView() {
       .replace(/Detected time-like and numeric columns for a trend chart\.?/gi, "시간형-수치형 조합으로 추세 차트가 적합합니다.")
       .replace(/Detected multiple numeric columns for correlation\.?/gi, "수치형 컬럼 간 상관관계 분석이 적합합니다.")
       .replace(/Detected a single numeric column for distribution\.?/gi, "단일 수치형 컬럼 분포 분석이 적합합니다.")
+      .replace(/^\s*Detected.*$/gim, "")
       .replace(/^Rows:\s*(\d+)$/gim, "결과 행 수: $1")
       .replace(/^source:\s*.+$/gim, "")
       .replace(/^\s*source:\s*.+$/gim, "")
       .replace(/^\s*recommended reason:\s*.+$/gim, "")
-      .replace(/source:\s*llm/gi, "")
+      .replace(/\bsource\s*:\s*llm\b/gi, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim()
   }
@@ -564,7 +584,7 @@ export function QueryView() {
             rows: records,
           }),
         },
-        30000
+        90000
       )
       if (!res.ok) throw new Error(await readError(res))
       const data: VisualizationResponsePayload = await res.json()
@@ -1777,6 +1797,40 @@ export function QueryView() {
                   ) : previewColumns.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
                       결과 테이블이 없어 차트를 표시할 수 없습니다.
+                    </div>
+                  ) : recommendedFigure ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">
+                          {String(recommendedAnalysis?.chart_spec?.chart_type || "plotly").toUpperCase()}
+                        </Badge>
+                        {recommendedAnalysis?.chart_spec?.x && (
+                          <Badge variant="secondary">X: {recommendedAnalysis.chart_spec.x}</Badge>
+                        )}
+                        {recommendedAnalysis?.chart_spec?.y && (
+                          <Badge variant="secondary">Y: {recommendedAnalysis.chart_spec.y}</Badge>
+                        )}
+                      </div>
+                      <div className="h-[380px] w-full rounded-lg border border-border p-2">
+                        <Plot
+                          data={Array.isArray(recommendedFigure.data) ? recommendedFigure.data : []}
+                          layout={{
+                            autosize: true,
+                            margin: { l: 48, r: 16, t: 16, b: 48 },
+                            paper_bgcolor: "transparent",
+                            plot_bgcolor: "transparent",
+                            ...(recommendedFigure.layout || {}),
+                          }}
+                          config={{ responsive: true, displaylogo: false }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
+                      </div>
+                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
+                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
+                          {recommendedAnalysis?.reason && <p>추천 이유: {normalizeInsightText(recommendedAnalysis.reason)}</p>}
+                          {recommendedAnalysis?.summary && <p>요약: {normalizeInsightText(recommendedAnalysis.summary)}</p>}
+                        </div>
+                      )}
                     </div>
                   ) : recommendedChart?.type === "scatter" ? (
                     <div className="space-y-3">

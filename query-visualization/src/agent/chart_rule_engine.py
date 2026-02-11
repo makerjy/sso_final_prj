@@ -183,6 +183,18 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
             "reason": "수치형 컬럼이 2개 이상이라 상관관계 산점도가 적합합니다.",
         }
 
+    # Categorical + two numeric -> pyramid
+    if categorical_cols and len(numeric_cols) >= 2:
+        return {
+            "chart_spec": {
+                "chart_type": "pyramid",
+                "x": categorical_cols[0],
+                "y": numeric_cols[0],
+                "group": numeric_cols[1],
+            },
+            "reason": "범주형 기준 좌우 비교가 가능해 피라미드 막대 차트가 적합합니다.",
+        }
+
     # Categorical + numeric -> bar
     if categorical_cols and numeric_cols:
         return {
