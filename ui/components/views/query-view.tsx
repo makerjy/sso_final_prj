@@ -1,4 +1,4 @@
-"use client"
+﻿"use client"
 
 import { useState, useEffect, useMemo, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -32,6 +32,20 @@ import {
 import { cn } from "@/lib/utils"
 import { SurvivalChart } from "@/components/survival-chart"
 import { useAuth } from "@/components/auth-provider"
+import {
+  ResponsiveContainer,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  ScatterChart,
+  Scatter,
+} from "recharts"
 
 interface ChatMessage {
   id: string
@@ -97,6 +111,26 @@ interface RunResponse {
   sql: string
   result: PreviewData
   policy?: PolicyResult | null
+}
+
+interface VisualizationChartSpec {
+  chart_type?: string
+  x?: string
+  y?: string
+  group?: string
+  agg?: string
+}
+
+interface VisualizationAnalysisCard {
+  chart_spec?: VisualizationChartSpec
+  reason?: string
+  summary?: string
+}
+
+interface VisualizationResponsePayload {
+  sql?: string
+  table_preview?: Array<Record<string, unknown>>
+  analyses?: VisualizationAnalysisCard[]
 }
 
 interface PersistedQueryState {
@@ -229,15 +263,18 @@ export function QueryView() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [response, setResponse] = useState<OneShotResponse | null>(null)
   const [runResult, setRunResult] = useState<RunResponse | null>(null)
+  const [visualizationResult, setVisualizationResult] = useState<VisualizationResponsePayload | null>(null)
+  const [visualizationLoading, setVisualizationLoading] = useState(false)
+  const [visualizationError, setVisualizationError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [boardSaving, setBoardSaving] = useState(false)
   const [boardMessage, setBoardMessage] = useState<string | null>(null)
   const [lastQuestion, setLastQuestion] = useState<string>("")
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])
   const [quickQuestions, setQuickQuestions] = useState<string[]>([
-    "입원 환자 수를 월별로 보여줘.",
+    "입원 환자 수를 월별 추이로 보여줘",
     "가장 흔한 진단 코드는 무엇인가요?",
-    "ICU 재원일수가 가장 긴 환자는 누구인가요?",
+    "ICU 재원일수가 긴 환자군을 알려줘",
   ])
   const [isHydrated, setIsHydrated] = useState(false)
   const [isSqlDragging, setIsSqlDragging] = useState(false)
@@ -290,7 +327,74 @@ export function QueryView() {
   })()
   const summary = demoResult?.summary
   const source = demoResult?.source
+  const previewRecords = useMemo(
+    () =>
+      previewRows.map((row) =>
+        Object.fromEntries(previewColumns.map((col, idx) => [col, row?.[idx]]))
+      ),
+    [previewColumns, previewRows]
+  )
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
+  const recommendedAnalysis = useMemo(
+    () => (Array.isArray(visualizationResult?.analyses) ? visualizationResult!.analyses![0] : null),
+    [visualizationResult]
+  )
+  const recommendedChart = useMemo(() => {
+    const spec = recommendedAnalysis?.chart_spec
+    if (!spec || !previewRecords.length) return null
+    const chartType = String(spec.chart_type || "bar").toLowerCase()
+    const xKey = spec.x && previewColumns.includes(spec.x) ? spec.x : previewColumns[0]
+    const candidateY = spec.y && previewColumns.includes(spec.y) ? spec.y : previewColumns.find((col) => {
+      const v = previewRecords[0]?.[col]
+      return Number.isFinite(Number(v))
+    })
+
+    if (!xKey) return null
+
+    if (chartType === "scatter" && candidateY) {
+      const points = previewRecords
+        .map((row) => ({
+          x: Number(row[xKey]),
+          y: Number(row[candidateY]),
+        }))
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+      return { type: "scatter" as const, xKey, yKey: candidateY, data: points }
+    }
+
+    const grouped = new Map<string, { total: number; count: number }>()
+    for (const row of previewRecords) {
+      const key = String(row[xKey] ?? "")
+      if (!grouped.has(key)) grouped.set(key, { total: 0, count: 0 })
+      const bucket = grouped.get(key)!
+      if (candidateY) {
+        const num = Number(row[candidateY])
+        if (Number.isFinite(num)) {
+          bucket.total += num
+          bucket.count += 1
+        }
+      } else {
+        bucket.count += 1
+      }
+    }
+    const agg = String(spec.agg || (candidateY ? "avg" : "count")).toLowerCase()
+    const data = Array.from(grouped.entries()).map(([x, v]) => {
+      const y =
+        !candidateY || agg === "count"
+          ? v.count
+          : agg === "sum"
+            ? v.total
+            : v.count > 0
+              ? v.total / v.count
+              : 0
+      return { x, y: Number(y.toFixed(4)) }
+    })
+    return {
+      type: chartType === "line" ? ("line" as const) : ("bar" as const),
+      xKey,
+      yKey: candidateY || "count",
+      data,
+    }
+  }, [recommendedAnalysis, previewColumns, previewRecords])
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
@@ -300,6 +404,42 @@ export function QueryView() {
   const chatPanelStyle = shouldShowResizablePanels ? { width: `${100 - resultsPanelWidth}%` } : undefined
   const resultsPanelStyle = shouldShowResizablePanels ? { width: `${resultsPanelWidth}%` } : undefined
   const appendSuggestions = (base: string, _suggestions?: string[]) => base
+
+  const fetchVisualizationPlan = async (sqlText: string, questionText: string, previewData: PreviewData | null) => {
+    if (!sqlText?.trim() || !previewData?.columns?.length || !previewData?.rows?.length) {
+      setVisualizationResult(null)
+      setVisualizationError(null)
+      return
+    }
+    setVisualizationLoading(true)
+    setVisualizationError(null)
+    try {
+      const records = previewData.rows.map((row) =>
+        Object.fromEntries(previewData.columns.map((col, idx) => [col, row?.[idx]]))
+      )
+      const res = await fetchWithTimeout(
+        apiUrl("/visualize"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_query: questionText || lastQuestion || "",
+            sql: sqlText,
+            table_preview: records,
+          }),
+        },
+        30000
+      )
+      if (!res.ok) throw new Error(await readError(res))
+      const data: VisualizationResponsePayload = await res.json()
+      setVisualizationResult(data)
+    } catch (err: any) {
+      setVisualizationResult(null)
+      setVisualizationError(err?.message || "시각화 추천 플랜 조회에 실패했습니다.")
+    } finally {
+      setVisualizationLoading(false)
+    }
+  }
 
   const handlePanelResizeMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !shouldShowResizablePanels) return
@@ -453,113 +593,41 @@ export function QueryView() {
   const buildSuggestions = (questionText: string, columns?: string[]) => {
     const suggestions: string[] = []
     const normalized = questionText.toLowerCase()
-    const cols = (columns || []).map((col) => col.toLowerCase().trim()).filter(Boolean)
-    if (!cols.length) return suggestions
+    const cols = (columns || []).map((col) => col.toLowerCase())
 
-    const hasQuestionToken = (...tokens: string[]) => tokens.some((token) => normalized.includes(token))
-    const hasColLike = (tokens: string[]) => cols.some((col) => tokens.some((token) => col.includes(token)))
-
-    const hasComparisonIntent = hasQuestionToken(
-      "비교",
-      "대비",
-      "차이",
-      "vs",
-      "versus",
-      "comparison",
-      "compared"
-    )
-    const hasTimeIntent = hasQuestionToken(
-      "기간별",
-      "월별",
-      "연도별",
-      "주별",
-      "일별",
-      "추이",
-      "trend",
-      "time series",
-      "over time"
-    )
-    const hasAgeIntent = hasQuestionToken("연령별", "연령대별", "나이별", "age")
-    const hasGenderIntent = hasQuestionToken("성별", "남성", "여성", "gender", "male", "female")
-    const hasRankingIntent = hasQuestionToken("상위", "top", "가장", "highest", "largest", "많은", "내림차순")
-    const hasMetricIntent = hasQuestionToken(
-      "사망률",
-      "사망",
-      "생존율",
-      "재입원율",
-      "비율",
-      "건수",
-      "count",
-      "rate",
-      "ratio",
-      "평균",
-      "중앙",
-      "중위"
-    )
-
-    const hasTimeColumn = hasColLike([
-      "time",
-      "date",
-      "year",
-      "month",
-      "week",
-      "day",
-      "admittime",
-      "dischtime",
-      "intime",
-      "outtime",
-      "charttime",
-      "starttime",
-      "stoptime",
-    ])
-    const hasGenderColumn = hasColLike(["gender", "sex"])
-    const hasAgeColumn = hasColLike(["age"])
-    const hasDiagnosisColumn = hasColLike(["icd", "diagnos", "diag", "long_title"])
-    const hasGroupColumn = hasColLike([
-      "gender",
-      "sex",
-      "age",
-      "year",
-      "month",
-      "week",
-      "day",
-      "icd",
-      "diagnos",
-      "diag",
-      "service",
-      "careunit",
-      "admission_type",
-      "race",
-      "insurance",
-    ])
-    const hasCountColumn = hasColLike(["cnt", "count", "_cnt", "_count", "n_", "num", "admission_cnt"])
-    const hasRateColumn = hasColLike(["rate", "ratio", "pct", "percent", "mortality", "readmission"])
-
-    const pushSuggestion = (text: string) => {
+    const pushUnique = (text: string) => {
       if (!text || suggestions.includes(text)) return
       suggestions.push(text)
     }
 
-    if (hasTimeColumn && !hasTimeIntent) {
-      pushSuggestion("결과를 연도/월 단위 추이로 보여줘.")
+    if (normalized.includes("diagnos") || normalized.includes("진단") || cols.some((c) => c.includes("icd"))) {
+      pushUnique("상위 10개 진단 보기")
+      pushUnique("성별/연령별 진단 분포")
+      pushUnique("진단 추세 보기")
+    } else if (normalized.includes("icu") || normalized.includes("재원") || cols.some((c) => c.includes("stay"))) {
+      pushUnique("ICU 평균 재원일수")
+      pushUnique("ICU 재원일수 분포")
+      pushUnique("ICU 재원 상위 10명")
+    } else if (normalized.includes("입원") || normalized.includes("admission")) {
+      pushUnique("입원 추이 보기")
+      pushUnique("진단별 입원 건수")
+      pushUnique("평균 입원기간")
     }
-    if (hasGenderColumn && !hasGenderIntent && !hasComparisonIntent) {
-      pushSuggestion("결과를 성별로 비교해줘.")
+
+    if (cols.some((c) => c.includes("date") || c.includes("time"))) {
+      pushUnique("기간별 추이")
     }
-    if (hasAgeColumn && !hasAgeIntent && !hasComparisonIntent) {
-      pushSuggestion("결과를 연령대별로 비교해줘.")
+    if (cols.some((c) => c.includes("gender"))) {
+      pushUnique("성별 통계 보기")
     }
-    if (hasDiagnosisColumn && !hasQuestionToken("진단", "diagnos", "icd")) {
-      pushSuggestion("진단 코드 기준으로 상위 항목을 보여줘.")
+    if (cols.some((c) => c.includes("age"))) {
+      pushUnique("연령대별 보기")
     }
-    if (hasGroupColumn && (hasCountColumn || hasRateColumn) && !hasRankingIntent) {
-      pushSuggestion("값이 큰 순서로 상위 10개를 보여줘.")
-    }
-    if (hasGroupColumn && hasCountColumn && !hasRateColumn && !hasMetricIntent) {
-      pushSuggestion("건수뿐 아니라 비율도 함께 보여줘.")
-    }
-    if (hasGroupColumn && hasRateColumn && !hasCountColumn && !hasMetricIntent) {
-      pushSuggestion("비율뿐 아니라 건수도 함께 보여줘.")
+
+    if (suggestions.length === 0) {
+      pushUnique("상위 10개 보기")
+      pushUnique("최근 6개월")
+      pushUnique("성별 통계 보기")
     }
 
     return suggestions.slice(0, 3)
@@ -586,51 +654,22 @@ export function QueryView() {
     return text || `${res.status} ${res.statusText}`
   }
 
-  const isClarificationAssistantMessage = (message: ChatMessage) => {
-    if (message.role !== "assistant") return false
-    const content = message.content.toLowerCase()
-    return (
-      content.includes("추가로 아래 항목") ||
-      content.includes("답변 예시") ||
-      content.includes("질문 범위를 조금 더 좁혀") ||
-      content.includes("clarification") ||
-      content.includes("clarify")
-    )
-  }
-
-  const buildClarificationConversation = (history: ChatMessage[], latestUser: ChatMessage) => {
-    const seed = [...history, latestUser]
-    let clarifyIdx = -1
-    for (let i = seed.length - 1; i >= 0; i -= 1) {
-      if (isClarificationAssistantMessage(seed[i])) {
-        clarifyIdx = i
-        break
-      }
-    }
-    if (clarifyIdx < 0) return seed
-
-    let baseUserIdx = -1
-    for (let i = clarifyIdx - 1; i >= 0; i -= 1) {
-      if (seed[i].role === "user") {
-        baseUserIdx = i
-        break
-      }
-    }
-    const startIdx = baseUserIdx >= 0 ? baseUserIdx : Math.max(clarifyIdx - 1, 0)
-    return seed.slice(startIdx)
-  }
-
   const buildAssistantMessage = (data: OneShotResponse) => {
     if (data.payload.mode === "clarify") {
       const clarify = data.payload.clarification
       const prompt = clarify?.question?.trim() || "질문 범위를 조금 더 좁혀주세요."
       const options = Array.isArray(clarify?.options) ? clarify.options.filter(Boolean) : []
       const examples = Array.isArray(clarify?.example_inputs) ? clarify.example_inputs.filter(Boolean) : []
+      const reason = clarify?.reason?.trim()
       const lines = [prompt]
-      const exampleValues =
-        examples.length > 0 ? examples.slice(0, 3) : options.slice(0, 3)
-      if (exampleValues.length) {
-        lines.push(`답변 예시: ${exampleValues.join(" / ")}`)
+      if (reason) {
+        lines.push(`이유: ${reason}`)
+      }
+      if (options.length) {
+        lines.push(`선택 예시: ${options.slice(0, 4).join(", ")}`)
+      }
+      if (examples.length) {
+        lines.push(`입력 예: ${examples.slice(0, 2).join(" / ")}`)
       }
       return lines.join("\n")
     }
@@ -652,7 +691,7 @@ export function QueryView() {
     const localRiskScore = payload?.final?.risk_score ?? payload?.risk?.risk
     const localRiskIntent = payload?.risk?.intent
     const riskLabel =
-      localRiskScore != null ? `위험도 ${localRiskScore}${localRiskIntent ? ` (${localRiskIntent})` : ""}로 평가됐어요.` : ""
+      localRiskScore != null ? `위험도 ${localRiskScore}${localRiskIntent ? ` (${localRiskIntent})` : ""}로 평가되었어요.` : ""
     return [base, riskLabel].filter(Boolean).join(" ")
   }
 
@@ -765,6 +804,8 @@ export function QueryView() {
     setBoardMessage(null)
     setResponse(null)
     setRunResult(null)
+    setVisualizationResult(null)
+    setVisualizationError(null)
     setEditedSql("")
     setShowResults(false)
     setLastQuestion(trimmed)
@@ -776,9 +817,7 @@ export function QueryView() {
       timestamp: new Date()
     }
     const shouldUseClarificationContext = response?.payload?.mode === "clarify"
-    const conversationSeed = shouldUseClarificationContext
-      ? buildClarificationConversation(messages, newMessage)
-      : [newMessage]
+    const conversationSeed = shouldUseClarificationContext ? [...messages, newMessage] : [newMessage]
     const conversation = conversationSeed
       .slice(-10)
       .map((item) => ({ role: item.role, content: item.content }))
@@ -818,9 +857,6 @@ export function QueryView() {
       }
 
       setShowResults(true)
-      const effectiveQuestionForSuggestions =
-        (typeof data.payload.question === "string" && data.payload.question.trim()) || trimmed
-      setLastQuestion(effectiveQuestionForSuggestions)
       const generatedSql =
         (data.payload.mode === "demo"
           ? data.payload.result?.sql
@@ -831,7 +867,7 @@ export function QueryView() {
       setIsEditing(false)
       const suggestions =
         data.payload.mode === "demo"
-          ? buildSuggestions(effectiveQuestionForSuggestions, data.payload.result?.preview?.columns)
+          ? buildSuggestions(trimmed, data.payload.result?.preview?.columns)
           : []
       setSuggestedQuestions(suggestions)
       const responseMessage: ChatMessage = {
@@ -847,7 +883,7 @@ export function QueryView() {
         await executeAdvancedSql({
           qid: data.qid,
           sql: generatedSql,
-          questionForSuggestions: effectiveQuestionForSuggestions,
+          questionForSuggestions: trimmed,
           addAssistantMessage: true,
         })
       }
@@ -855,14 +891,14 @@ export function QueryView() {
       const message =
         err?.name === "AbortError"
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-          : err?.message || "요청에 실패했습니다."
+          : err?.message || "요청이 실패했습니다."
       setError(message)
       setMessages(prev => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: `오류: ${message}`,
+          content: `?ㅻ쪟: ${message}`,
           timestamp: new Date()
         }
       ])
@@ -875,93 +911,8 @@ export function QueryView() {
     await runQuery(query)
   }
 
-  const classifyClarificationSlot = (text: string) => {
-    const normalized = text.toLowerCase()
-    if (
-      normalized.includes("기간") ||
-      normalized.includes("최근") ||
-      normalized.includes("지난") ||
-      normalized.includes("작년") ||
-      normalized.includes("올해") ||
-      normalized.includes("연도") ||
-      normalized.includes("월") ||
-      normalized.includes("주") ||
-      normalized.includes("일") ||
-      normalized.includes("입원 후") ||
-      normalized.includes("year") ||
-      normalized.includes("month") ||
-      normalized.includes("week") ||
-      normalized.includes("day")
-    ) {
-      return "period" as const
-    }
-    if (
-      normalized.includes("비교") ||
-      normalized.includes("대비") ||
-      normalized.includes("vs") ||
-      normalized.includes("versus") ||
-      normalized.includes("comparison")
-    ) {
-      return "comparison" as const
-    }
-    if (
-      normalized.includes("지표") ||
-      normalized.includes("사망") ||
-      normalized.includes("생존") ||
-      normalized.includes("재입원") ||
-      normalized.includes("비율") ||
-      normalized.includes("건수") ||
-      normalized.includes("평균") ||
-      normalized.includes("중앙") ||
-      normalized.includes("중위")
-    ) {
-      return "metric" as const
-    }
-    if (
-      normalized.includes("환자") ||
-      normalized.includes("대상") ||
-      normalized.includes("코호트") ||
-      normalized.includes("연령") ||
-      normalized.includes("세")
-    ) {
-      return "cohort" as const
-    }
-    return null
-  }
-
-  const toSuggestionSentence = (text: string) => {
-    const trimmed = text.trim()
-    if (!trimmed) return trimmed
-    if (mode !== "clarify") return trimmed
-
-    let value = trimmed
-    value = value.replace(/^답변\s*예시\s*:\s*/i, "").trim()
-    value = value.replace(/^선택\s*예시\s*:\s*/i, "").trim()
-    if (value.includes(" / ")) {
-      value = value.split(" / ")[0].trim()
-    }
-
-    const labelMatch = value.match(/^(기간|대상\s*환자|비교\s*기준|지표)\s*[:：]\s*(.+)$/)
-    if (labelMatch) {
-      const label = labelMatch[1].replace(/\s+/g, "")
-      const content = labelMatch[2].trim()
-      if (!content) return trimmed
-      if (label === "기간") return `기간은 ${content}로 해줘.`
-      if (label === "대상환자") return `대상 환자는 ${content}로 해줘.`
-      if (label === "비교기준") return `비교 기준은 ${content}로 해줘.`
-      return `지표는 ${content}로 해줘.`
-    }
-
-    const slot = classifyClarificationSlot(value)
-    if (slot === "period") return `기간은 ${value}로 해줘.`
-    if (slot === "cohort") return `대상 환자는 ${value}로 해줘.`
-    if (slot === "comparison") return `비교 기준은 ${value}로 해줘.`
-    if (slot === "metric") return `지표는 ${value}로 해줘.`
-    return trimmed
-  }
-
   const handleQuickQuestion = async (text: string) => {
-    await runQuery(toSuggestionSentence(text))
+    await runQuery(text)
   }
 
   const deriveDashboardCategory = (text: string) => {
@@ -998,9 +949,9 @@ export function QueryView() {
     const newEntry = {
       id: `dashboard-${Date.now()}`,
       title,
-      description: summary || "쿼리 결과 저장",
+      description: summary || "쿼리 결과 요약",
       query: displaySql || currentSql,
-      lastRun: "방금 저장",
+      lastRun: "방금 전",
       isPinned: true,
       category,
       preview: previewPayload,
@@ -1022,9 +973,9 @@ export function QueryView() {
       if (!saveRes.ok) {
         throw new Error("save failed")
       }
-      setBoardMessage("결과 보드에 저장했습니다.")
+      setBoardMessage("寃곌낵 蹂대뱶????ν뻽?듬땲??")
     } catch (err) {
-      setBoardMessage("결과 보드 저장에 실패했습니다.")
+      setBoardMessage("寃곌낵 蹂대뱶 ??μ뿉 ?ㅽ뙣?덉뒿?덈떎.")
     } finally {
       setBoardSaving(false)
     }
@@ -1066,6 +1017,11 @@ export function QueryView() {
     setRunResult(data)
     setShowResults(true)
     setIsEditing(false)
+    await fetchVisualizationPlan(
+      (data.sql || sql || "").trim(),
+      questionForSuggestions || lastQuestion || "",
+      data.result || null
+    )
 
     const suggestions = buildSuggestions(questionForSuggestions || lastQuestion, data.result?.columns)
     setSuggestedQuestions(suggestions)
@@ -1077,7 +1033,7 @@ export function QueryView() {
           id: (Date.now() + 1).toString(),
           role: "assistant",
           content: appendSuggestions(
-            `쿼리를 실행했어요. 미리보기로 ${data.result?.row_count ?? 0}행을 가져왔습니다.`,
+            `荑쇰━瑜??ㅽ뻾?덉뼱?? 誘몃━蹂닿린濡?${data.result?.row_count ?? 0}?됱쓣 媛?몄솕?듬땲??`,
             suggestions
           ),
           timestamp: new Date()
@@ -1103,14 +1059,14 @@ export function QueryView() {
       const message =
         err?.name === "AbortError"
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-          : err?.message || "실행에 실패했습니다."
+          : err?.message || "실행이 실패했습니다."
       setError(message)
       setMessages(prev => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: `오류: ${message}`,
+          content: `?ㅻ쪟: ${message}`,
           timestamp: new Date()
         }
       ])
@@ -1156,6 +1112,8 @@ export function QueryView() {
     setMessages([])
     setResponse(null)
     setRunResult(null)
+    setVisualizationResult(null)
+    setVisualizationError(null)
     setShowResults(false)
     setQuery("")
     setEditedSql("")
@@ -1175,7 +1133,7 @@ export function QueryView() {
     if (mode === "demo") {
       return {
         status: "safe" as const,
-        checks: [{ name: "Demo cache", passed: true, message: "캐시 결과" }]
+        checks: [{ name: "Demo cache", passed: true, message: "罹먯떆 寃곌낵" }]
       }
     }
     if (mode === "clarify") {
@@ -1192,7 +1150,7 @@ export function QueryView() {
         : []
     if (policyChecks.length > 0) {
       const passedAll = policyChecks.every((item) => item.passed)
-      checks.push({ name: "PolicyGate", passed: passedAll, message: passedAll ? "통과" : "실패" })
+      checks.push({ name: "PolicyGate", passed: passedAll, message: passedAll ? "?듦낵" : "?ㅽ뙣" })
       for (const item of policyChecks) {
         checks.push({
           name: item.name || "Policy",
@@ -1201,7 +1159,7 @@ export function QueryView() {
         })
       }
     } else {
-      checks.push({ name: "PolicyGate", passed: true, message: "통과" })
+      checks.push({ name: "PolicyGate", passed: true, message: "?듦낵" })
     }
     if (riskScore != null) {
       checks.push({
@@ -1252,7 +1210,7 @@ export function QueryView() {
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
             <h2 className="text-base sm:text-lg font-semibold text-foreground truncate">쿼리 & 분석</h2>
-            <p className="text-[10px] sm:text-xs text-muted-foreground hidden sm:block">자연어로 질문하고 SQL 결과를 확인하세요</p>
+            <p className="text-[10px] sm:text-xs text-muted-foreground hidden sm:block">자연어로 질문하고 SQL 결과를 확인하세요.</p>
           </div>
           <div className="flex items-center gap-2 sm:gap-4 shrink-0">
             <div className="flex items-center gap-1 sm:gap-2">
@@ -1273,7 +1231,7 @@ export function QueryView() {
               disabled={isLoading || !hasConversation}
             >
               <Trash2 className="w-3 h-3" />
-              대화 초기화
+              ???珥덇린??
             </Button>
           </div>
         </div>
@@ -1298,7 +1256,7 @@ export function QueryView() {
                 </div>
                 <h3 className="font-medium text-foreground mb-2">질문을 입력하세요</h3>
                 <p className="text-sm text-muted-foreground max-w-sm">
-                  예: "65세 이상 심부전 환자 코호트 만들어줘, 생존 곡선 그려줘"
+                  예: "65세 이상 환자 코호트를 만들고 생존 곡선을 보여줘"
                 </p>
                 {visibleQuickQuestions.length > 0 && (
                   <div className="mt-4 flex flex-col gap-2 w-full max-w-sm">
@@ -1368,7 +1326,7 @@ export function QueryView() {
               <div className="flex justify-start">
                 <div className="bg-secondary rounded-lg p-3 flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">분석 중...</span>
+                  <span className="text-sm">遺꾩꽍 以?..</span>
                 </div>
               </div>
             )}
@@ -1378,7 +1336,7 @@ export function QueryView() {
           <div className="p-4 border-t border-border">
             <div className="flex gap-2">
               <Textarea
-                placeholder="자연어로 질문하세요..."
+                placeholder="?먯뿰?대줈 吏덈Ц?섏꽭??.."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 className="min-h-[60px] resize-none"
@@ -1404,7 +1362,7 @@ export function QueryView() {
           <div
             role="separator"
             aria-orientation="vertical"
-            aria-label="패널 크기 조정"
+            aria-label="?⑤꼸 ?ш린 議곗젙"
             aria-valuemin={30}
             aria-valuemax={70}
             aria-valuenow={Math.round(resultsPanelWidth)}
@@ -1427,318 +1385,426 @@ export function QueryView() {
             )}
             style={resultsPanelStyle}
           >
-            <Tabs defaultValue={isTechnicalMode ? "sql" : "results"} className="flex-1 min-h-0 flex flex-col">
-              <div className="px-4 pt-2 border-b border-border">
-                <TabsList className="h-9">
-                  {isTechnicalMode && (
-                    <TabsTrigger value="sql" className="gap-1.5 text-xs">
-                      <Code className="w-3.5 h-3.5" />
-                      SQL
-                    </TabsTrigger>
-                  )}
-                  <TabsTrigger value="results" className="gap-1.5 text-xs">
-                    <Table2 className="w-3.5 h-3.5" />
-                    결과
-                  </TabsTrigger>
-                  <TabsTrigger value="chart" className="gap-1.5 text-xs">
-                    <BarChart3 className="w-3.5 h-3.5" />
-                    차트
-                  </TabsTrigger>
-                  <TabsTrigger value="interpretation" className="gap-1.5 text-xs">
-                    <FileText className="w-3.5 h-3.5" />
-                    해석
-                  </TabsTrigger>
-                </TabsList>
-              </div>
-
-              {/* SQL Tab */}
+            <div className="flex-1 overflow-y-auto p-4 pb-6 space-y-4">
               {isTechnicalMode && (
-                <TabsContent value="sql" className="flex-1 min-h-0 overflow-y-auto p-4 pb-6 space-y-4 mt-0">
-                  {/* Validation Panel */}
-                  <Card className={cn(
+                <Card
+                  className={cn(
                     "border-l-4",
                     validationStatus === "safe" && "border-l-primary",
                     validationStatus === "warning" && "border-l-yellow-500",
                     validationStatus === "danger" && "border-l-destructive"
-                  )}>
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm flex items-center gap-2">
-                        <Shield className="w-4 h-4" />
-                        안전 검증 결과
-                        {getValidationIcon(validationStatus)}
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      {validationChecks.length ? (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                          {validationChecks.map((check, idx) => (
-                            <div key={idx} className="flex items-start gap-2 text-xs">
-                              {check.passed ? (
-                                <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
-                              ) : (
-                                <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
-                              )}
-                              <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
-                              <span className="text-foreground break-words">{check.message}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="text-xs text-muted-foreground">검증 정보가 아직 없습니다.</div>
-                      )}
-                    </CardContent>
-                  </Card>
-
-                  {/* SQL Editor */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-sm">생성된 SQL</CardTitle>
-                        <div className="flex items-center gap-2">
-                          {mode === "advanced" && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 gap-1"
-                              onClick={() => handleExecuteEdited()}
-                              disabled={isLoading || !displaySql}
-                            >
-                              {isLoading ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Play className="w-3 h-3" />
-                              )}
-                              실행
-                            </Button>
-                          )}
-                          <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={handleCopySql}>
-                            <Copy className="w-3 h-3" />
-                            복사
-                          </Button>
-                          <Button 
-                            variant="ghost" 
-                            size="sm" 
-                            className="h-7 gap-1"
-                            onClick={() => setIsEditing(!isEditing)}
-                          >
-                            {isEditing ? <Eye className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
-                            {isEditing ? "미리보기" : "편집"}
-                          </Button>
-                        </div>
-                      </div>
-                    </CardHeader>
-                    <CardContent>
-                      {isEditing ? (
-                        <div className="space-y-3">
-                          <Textarea
-                            value={editedSql}
-                            onChange={(e) => setEditedSql(e.target.value)}
-                            className="font-mono text-xs min-h-[200px] bg-secondary/50"
-                          />
-                          <div className="flex items-center gap-2">
-                            <Button 
-                              size="sm" 
-                              onClick={() => handleExecuteEdited(editedSql)}
-                              disabled={isLoading || !editedSql.trim()}
-                              className="gap-1"
-                            >
-                              {isLoading ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Play className="w-3 h-3" />
-                              )}
-                              재검증 후 실행
-                            </Button>
-                            <Button variant="ghost" size="sm" onClick={() => setEditedSql(currentSql)}>
-                              <RefreshCw className="w-3 h-3 mr-1" />
-                              초기화
-                            </Button>
+                  )}
+                >
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <Shield className="w-4 h-4" />
+                      안전 검증 결과
+                      {getValidationIcon(validationStatus)}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {validationChecks.length ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {validationChecks.map((check, idx) => (
+                          <div key={idx} className="flex items-start gap-2 text-xs">
+                            {check.passed ? (
+                              <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
+                            ) : (
+                              <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
+                            )}
+                            <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
+                            <span className="text-foreground break-words">{check.message}</span>
                           </div>
-                          <p className="text-[10px] text-muted-foreground flex items-center gap-1">
-                            <AlertTriangle className="w-3 h-3" />
-                            수정된 SQL은 재검증을 통과해야 실행됩니다
-                          </p>
-                        </div>
-                      ) : (
-                        <div
-                          ref={sqlScrollRef}
-                          onMouseDown={handleSqlMouseDown}
-                          className={cn(
-                            "p-4 pb-6 pr-6 rounded-xl bg-secondary/50 border border-border/60 text-[13px] font-mono leading-7 text-foreground overflow-x-auto overflow-y-visible [scrollbar-gutter:stable]",
-                            "cursor-grab select-none",
-                            isSqlDragging && "cursor-grabbing"
-                          )}
-                        >
-                          {formattedDisplaySql ? (
-                            <pre className="w-max min-w-full whitespace-pre pb-1">
-                              <code dangerouslySetInnerHTML={{ __html: highlightedDisplaySql }} />
-                            </pre>
-                          ) : (
-                            "SQL이 아직 생성되지 않았습니다."
-                          )}
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                </TabsContent>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">검증 정보가 아직 없습니다.</div>
+                    )}
+                  </CardContent>
+                </Card>
               )}
 
-              {/* Results Tab */}
-              <TabsContent value="results" className="flex-1 overflow-y-auto p-4 mt-0">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <CardTitle className="text-sm">쿼리 결과</CardTitle>
-                        {mode && (
-                          <Badge variant="outline" className="text-[10px] uppercase">
-                            {mode}
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="secondary" className="text-xs">
-                          {previewColumns.length ? `${previewRowCount} rows` : "no results"}
-                        </Badge>
-                        {previewRowCap != null && (
-                          <Badge variant="outline" className="text-[10px]">
-                            cap {previewRowCap}
-                          </Badge>
-                        )}
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 gap-1"
-                          onClick={handleSaveToDashboard}
-                          disabled={boardSaving || (!displaySql && !currentSql)}
-                        >
-                          <BookmarkPlus className="w-3 h-3" />
-                          결과 보드에 저장
-                        </Button>
+              <Card>
+                <CardHeader className="pb-2">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-sm">생성된 SQL</CardTitle>
+                    <div className="flex items-center gap-2">
+                      {mode === "advanced" && (
                         <Button
                           variant="ghost"
                           size="sm"
                           className="h-7 gap-1"
-                          onClick={handleDownloadCsv}
-                          disabled={!previewColumns.length}
+                          onClick={() => handleExecuteEdited()}
+                          disabled={isLoading || !displaySql}
                         >
-                          <Download className="w-3 h-3" />
-                          CSV
+                          {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                          실행
+                        </Button>
+                      )}
+                      <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={handleCopySql}>
+                        <Copy className="w-3 h-3" />
+                        복사
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={() => setIsEditing(!isEditing)}>
+                        {isEditing ? <Eye className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
+                        {isEditing ? "미리보기" : "편집"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {isEditing ? (
+                    <div className="space-y-3">
+                      <Textarea
+                        value={editedSql}
+                        onChange={(e) => setEditedSql(e.target.value)}
+                        className="font-mono text-xs min-h-[200px] bg-secondary/50"
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" onClick={() => handleExecuteEdited(editedSql)} disabled={isLoading || !editedSql.trim()} className="gap-1">
+                          {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                          검증 후 실행
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setEditedSql(currentSql)}>
+                          <RefreshCw className="w-3 h-3 mr-1" />
+                          초기화
                         </Button>
                       </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    {boardMessage && (
-                      <div className="mb-3 rounded-lg border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
-                        {boardMessage}
-                      </div>
-                    )}
-                    {error && (
-                      <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                        {error}
-                      </div>
-                    )}
-                    {previewColumns.length ? (
-                      <div className="rounded-lg border border-border overflow-hidden">
-                        <table className="w-full text-xs">
-                          <thead className="bg-secondary/50">
-                            <tr>
-                              {previewColumns.map((col) => (
-                                <th key={col} className="text-left p-2 font-medium">
-                                  {col}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {previewRows.map((row, idx) => (
-                              <tr key={idx} className="border-t border-border hover:bg-secondary/30">
-                                {previewColumns.map((_, colIdx) => {
-                                  const cell = row[colIdx]
-                                  const text = cell == null ? "" : String(cell)
-                                  return (
-                                    <td key={`${idx}-${colIdx}`} className="p-2 font-mono">
-                                      {text}
-                                    </td>
-                                  )
-                                })}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                        <div>결과가 없습니다.</div>
-                        {mode === "advanced" && displaySql && (
-                          <Button size="sm" onClick={() => handleExecuteEdited()} disabled={isLoading}>
-                            {isLoading ? (
-                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                            ) : (
-                              <Play className="w-3 h-3 mr-1" />
-                            )}
-                            실행
-                          </Button>
-                        )}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              {/* Chart Tab */}
-              <TabsContent value="chart" className="flex-1 overflow-y-auto p-4 mt-0">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">결과 시각화</CardTitle>
-                    <CardDescription className="text-xs">실행 결과를 기반으로 시각화를 제공합니다.</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                      {previewColumns.length
-                        ? "현재는 자동 시각화가 연결되어 있지 않습니다. 결과 데이터를 기반으로 차트를 추가할 수 있습니다."
-                        : "쿼리를 실행하면 여기에 시각화가 표시됩니다."}
-                    </div>
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              {/* Interpretation Tab */}
-              <TabsContent value="interpretation" className="flex-1 overflow-y-auto p-4 mt-0">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">분석 해석</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
-                      <h4 className="font-medium text-foreground mb-2">요약</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {summary || "요약 정보를 아직 받지 못했습니다. 결과 실행 후 요약을 표시할 수 있습니다."}
+                      <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3" />
+                        수정한 SQL은 검증을 통과해야 실행됩니다.
                       </p>
-                      {source && (
-                        <p className="text-xs text-muted-foreground mt-2">source: {source}</p>
+                    </div>
+                  ) : (
+                    <div
+                      ref={sqlScrollRef}
+                      onMouseDown={handleSqlMouseDown}
+                      className={cn(
+                        "p-4 pb-6 pr-6 rounded-xl bg-secondary/50 border border-border/60 text-[13px] font-mono leading-7 text-foreground overflow-x-auto overflow-y-visible [scrollbar-gutter:stable]",
+                        "cursor-grab select-none",
+                        isSqlDragging && "cursor-grabbing"
+                      )}
+                    >
+                      {formattedDisplaySql ? (
+                        <pre className="w-max min-w-full whitespace-pre pb-1">
+                          <code dangerouslySetInnerHTML={{ __html: highlightedDisplaySql }} />
+                        </pre>
+                      ) : (
+                        "SQL이 아직 생성되지 않았습니다."
                       )}
                     </div>
+                  )}
+                </CardContent>
+              </Card>
 
-                    {riskScore != null && (
-                      <div className="p-4 rounded-lg bg-secondary/50 border border-border">
-                        <h4 className="font-medium text-foreground mb-2">위험도</h4>
-                        <div className="text-sm text-muted-foreground">
-                          위험 점수: <span className="text-foreground">{riskScore}</span>
-                          {riskIntent ? ` (${riskIntent})` : ""}
-                        </div>
+              <Card>
+                <CardHeader className="pb-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <CardTitle className="text-sm">쿼리 결과</CardTitle>
+                      {mode && (
+                        <Badge variant="outline" className="text-[10px] uppercase">
+                          {mode}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-xs">
+                        {previewColumns.length ? `${previewRowCount} rows` : "no results"}
+                      </Badge>
+                      {previewRowCap != null && (
+                        <Badge variant="outline" className="text-[10px]">
+                          cap {previewRowCap}
+                        </Badge>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 gap-1"
+                        onClick={handleSaveToDashboard}
+                        disabled={boardSaving || (!displaySql && !currentSql)}
+                      >
+                        <BookmarkPlus className="w-3 h-3" />
+                        결과 보드 저장
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1"
+                        onClick={handleDownloadCsv}
+                        disabled={!previewColumns.length}
+                      >
+                        <Download className="w-3 h-3" />
+                        CSV
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {boardMessage && (
+                    <div className="mb-3 rounded-lg border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
+                      {boardMessage}
+                    </div>
+                  )}
+                  {error && (
+                    <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      {error}
+                    </div>
+                  )}
+                  {previewColumns.length ? (
+                    <div className="rounded-lg border border-border overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead className="bg-secondary/50">
+                          <tr>
+                            {previewColumns.map((col) => (
+                              <th key={col} className="text-left p-2 font-medium">
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {previewRows.slice(0, 10).map((row, idx) => (
+                            <tr key={idx} className="border-t border-border hover:bg-secondary/30">
+                              {previewColumns.map((_, colIdx) => {
+                                const cell = row[colIdx]
+                                const text = cell == null ? "" : String(cell)
+                                return (
+                                  <td key={`${idx}-${colIdx}`} className="p-2 font-mono">
+                                    {text}
+                                  </td>
+                                )
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      <div>결과가 없습니다.</div>
+                      {mode === "advanced" && displaySql && (
+                        <Button size="sm" onClick={() => handleExecuteEdited()} disabled={isLoading}>
+                          {isLoading ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
+                          실행
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">시각화 차트</CardTitle>
+                  <CardDescription className="text-xs">결과 테이블 기반 시각화</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {visualizationLoading ? (
+                    <div className="rounded-lg border border-border p-6 text-xs text-muted-foreground">
+                      시각화 추천 플랜을 생성 중입니다...
+                    </div>
+                  ) : visualizationError ? (
+                    <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-6 text-xs text-destructive">
+                      {visualizationError}
+                    </div>
+                  ) : previewColumns.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      결과 테이블이 없어 차트를 표시할 수 없습니다.
+                    </div>
+                  ) : recommendedChart?.type === "scatter" ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">SCATTER</Badge>
+                        <Badge variant="secondary">X: {recommendedChart.xKey}</Badge>
+                        <Badge variant="secondary">Y: {recommendedChart.yKey}</Badge>
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-            </Tabs>
+                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ScatterChart>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis type="number" dataKey="x" tick={{ fontSize: 12 }} />
+                            <YAxis type="number" dataKey="y" tick={{ fontSize: 12 }} />
+                            <Tooltip />
+                            <Legend />
+                            <Scatter data={recommendedChart.data} fill="#3b82f6" name={recommendedChart.yKey} />
+                          </ScatterChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  ) : recommendedChart ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">{recommendedChart.type.toUpperCase()}</Badge>
+                        <Badge variant="secondary">X: {recommendedChart.xKey}</Badge>
+                        <Badge variant="secondary">Y: {recommendedChart.yKey}</Badge>
+                      </div>
+                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
+                        <ResponsiveContainer width="100%" height="100%">
+                          {recommendedChart.type === "line" ? (
+                            <LineChart data={recommendedChart.data}>
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="x" tick={{ fontSize: 12 }} />
+                              <YAxis tick={{ fontSize: 12 }} />
+                              <Tooltip />
+                              <Legend />
+                              <Line type="monotone" dataKey="y" stroke="#10b981" strokeWidth={2} dot={false} />
+                            </LineChart>
+                          ) : (
+                            <BarChart data={recommendedChart.data}>
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="x" tick={{ fontSize: 12 }} />
+                              <YAxis tick={{ fontSize: 12 }} />
+                              <Tooltip />
+                              <Legend />
+                              <Bar dataKey="y" fill="#3b82f6" />
+                            </BarChart>
+                          )}
+                        </ResponsiveContainer>
+                      </div>
+                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
+                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
+                          {recommendedAnalysis?.reason && <p>추천 이유: {recommendedAnalysis.reason}</p>}
+                          {recommendedAnalysis?.summary && <p>요약: {recommendedAnalysis.summary}</p>}
+                        </div>
+                      )}
+                    </div>
+                  ) : survivalChartData?.length ? (
+                    <SurvivalChart
+                      data={survivalChartData}
+                      medianSurvival={medianSurvival}
+                      totalPatients={totalPatients}
+                      totalEvents={totalEvents}
+                    />
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      현재 결과로 생성 가능한 차트가 없습니다. 시간/이벤트 컬럼이 포함되면 생존 차트를 표시합니다.
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">통계 자료</CardTitle>
+                  <CardDescription className="text-xs">컬럼별 MIN, MAX, 평균, NULL 개수</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {previewColumns.length ? (
+                    <div className="rounded-lg border border-border overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-secondary/50">
+                          <tr>
+                            <th className="text-left p-2 font-medium">컬럼</th>
+                            <th className="text-right p-2 font-medium">N</th>
+                            <th className="text-right p-2 font-medium">NULL</th>
+                            <th className="text-right p-2 font-medium">MIN</th>
+                            <th className="text-right p-2 font-medium">MAX</th>
+                            <th className="text-right p-2 font-medium">평균</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {buildSimpleStats(previewColumns, previewRows).map((row) => (
+                            <tr key={row.column} className="border-t border-border">
+                              <td className="p-2 font-medium">{row.column}</td>
+                              <td className="p-2 text-right">{row.count}</td>
+                              <td className="p-2 text-right">{row.nullCount}</td>
+                              <td className="p-2 text-right">{row.min ?? "-"}</td>
+                              <td className="p-2 text-right">{row.max ?? "-"}</td>
+                              <td className="p-2 text-right">{row.avg ?? "-"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      결과가 없어 통계 자료를 표시할 수 없습니다.
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">해석</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
+                    <h4 className="font-medium text-foreground mb-2">요약</h4>
+                    <p className="text-sm text-muted-foreground">
+                      {summary || "요약 정보가 아직 없습니다. 결과 실행 후 요약이 표시됩니다."}
+                    </p>
+                    {source && <p className="text-xs text-muted-foreground mt-2">source: {source}</p>}
+                  </div>
+                  {riskScore != null && (
+                    <div className="p-4 rounded-lg bg-secondary/50 border border-border">
+                      <h4 className="font-medium text-foreground mb-2">위험도</h4>
+                      <div className="text-sm text-muted-foreground">
+                        위험 점수: <span className="text-foreground">{riskScore}</span>
+                        {riskIntent ? ` (${riskIntent})` : ""}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           </div>
         )}
       </div>
     </div>
   )
+}
+
+interface SimpleStatsRow {
+  column: string
+  count: number
+  nullCount: number
+  min: string | null
+  max: string | null
+  avg: string | null
+}
+
+function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
+  return columns.map((column, colIdx) => {
+    const numbers: number[] = []
+    let nullCount = 0
+
+    for (const row of rows) {
+      const value = row?.[colIdx]
+      if (value == null || value === "") {
+        nullCount += 1
+        continue
+      }
+      const num = Number(value)
+      if (Number.isFinite(num)) numbers.push(num)
+      else nullCount += 1
+    }
+
+    if (!numbers.length) {
+      return {
+        column,
+        count: 0,
+        nullCount,
+        min: null,
+        max: null,
+        avg: null,
+      }
+    }
+
+    const min = Math.min(...numbers)
+    const max = Math.max(...numbers)
+    const avg = numbers.reduce((sum, value) => sum + value, 0) / numbers.length
+
+    return {
+      column,
+      count: numbers.length,
+      nullCount,
+      min: Number(min.toFixed(4)).toLocaleString(),
+      max: Number(max.toFixed(4)).toLocaleString(),
+      avg: Number(avg.toFixed(4)).toLocaleString(),
+    }
+  })
 }
 
 function formatSqlForDisplay(sql: string) {

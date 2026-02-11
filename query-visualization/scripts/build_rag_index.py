@@ -1,4 +1,6 @@
 from __future__ import annotations
+from src.db.vector_store import ensure_collection, get_mongo_collection, upsert_embeddings
+from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE
 
 import json
 import sys
@@ -10,9 +12,6 @@ from openai import OpenAI
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(BASE_DIR))
-
-from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE
-from src.db.vector_store import ensure_collection, get_mongo_collection, upsert_embeddings
 
 
 def _load_jsonl(path: Path) -> List[dict]:
@@ -84,7 +83,7 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
 
 def _batch(iterable: List[str], size: int) -> Iterable[List[str]]:
     for i in range(0, len(iterable), size):
-        yield iterable[i : i + size]
+        yield iterable[i: i + size]
 
 
 def build_index() -> None:
@@ -113,9 +112,10 @@ def build_index() -> None:
     for batch_texts in _batch(texts[start_idx:], RAG_BATCH_SIZE):
         batch_embeddings = _embed_texts(batch_texts)
         batch_size = len(batch_texts)
-        batch_metadatas = metadatas[start_idx : start_idx + batch_size]
-        batch_ids = ids[start_idx : start_idx + batch_size]
-        upsert_embeddings(collection, batch_embeddings, batch_metadatas, batch_ids)
+        batch_metadatas = metadatas[start_idx: start_idx + batch_size]
+        batch_ids = ids[start_idx: start_idx + batch_size]
+        upsert_embeddings(collection, batch_embeddings,
+                          batch_metadatas, batch_ids)
         start_idx += batch_size
 
 
