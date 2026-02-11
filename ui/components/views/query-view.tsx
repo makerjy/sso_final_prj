@@ -39,6 +39,7 @@ import {
   YAxis,
   Tooltip,
   Legend,
+  ComposedChart,
   BarChart,
   Bar,
   LineChart,
@@ -147,6 +148,36 @@ interface PersistedQueryState {
 }
 
 const MAX_PERSIST_ROWS = 200
+const VIZ_CACHE_PREFIX = "viz_cache_v1:"
+const VIZ_CACHE_TTL_MS = 1000 * 60 * 60 * 24
+
+const hashText = (value: string) => {
+  let hash = 2166136261
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i)
+    hash +=
+      (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24)
+  }
+  return (hash >>> 0).toString(16)
+}
+
+const buildVizCacheKey = (sqlText: string, questionText: string, previewData: PreviewData | null) => {
+  if (!previewData) return null
+  const columns = previewData.columns || []
+  const rows = previewData.rows || []
+  const rowCount = previewData.row_count ?? rows.length
+  const head = rows.slice(0, 10)
+  const tail = rows.slice(Math.max(0, rows.length - 10))
+  const basis = JSON.stringify({
+    q: (questionText || "").trim(),
+    sql: (sqlText || "").trim(),
+    columns,
+    rowCount,
+    head,
+    tail,
+  })
+  return `${VIZ_CACHE_PREFIX}${hashText(basis)}`
+}
 
 const trimPreview = (preview?: PreviewData): PreviewData | undefined => {
   if (!preview) return preview
@@ -334,6 +365,23 @@ export function QueryView() {
       ),
     [previewColumns, previewRows]
   )
+  const statsRows = useMemo(() => buildSimpleStats(previewColumns, previewRows), [previewColumns, previewRows])
+  const boxPlotRows = useMemo(
+    () =>
+      statsRows
+        .filter((row) => row.count > 0 && row.q1 != null && row.q3 != null && row.min != null && row.max != null)
+        .map((row) => ({
+          column: row.column,
+          min: row.min as number,
+          q1: row.q1 as number,
+          median: row.median as number,
+          q3: row.q3 as number,
+          max: row.max as number,
+          iqrBase: row.q1 as number,
+          iqr: Math.max(0, (row.q3 as number) - (row.q1 as number)),
+        })),
+    [statsRows]
+  )
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
   const recommendedAnalysis = useMemo(
     () => (Array.isArray(visualizationResult?.analyses) ? visualizationResult!.analyses![0] : null),
@@ -411,6 +459,21 @@ export function QueryView() {
       setVisualizationError(null)
       return
     }
+    const cacheKey = buildVizCacheKey(sqlText, questionText, previewData)
+    if (cacheKey) {
+      try {
+        const raw = localStorage.getItem(cacheKey)
+        if (raw) {
+          const parsed = JSON.parse(raw) as { ts?: number; payload?: VisualizationResponsePayload }
+          if (parsed?.payload && parsed?.ts && Date.now() - parsed.ts < VIZ_CACHE_TTL_MS) {
+            setVisualizationResult(parsed.payload)
+            setVisualizationError(null)
+            setVisualizationLoading(false)
+            return
+          }
+        }
+      } catch {}
+    }
     setVisualizationLoading(true)
     setVisualizationError(null)
     try {
@@ -425,7 +488,7 @@ export function QueryView() {
           body: JSON.stringify({
             user_query: questionText || lastQuestion || "",
             sql: sqlText,
-            table_preview: records,
+            rows: records,
           }),
         },
         30000
@@ -433,6 +496,11 @@ export function QueryView() {
       if (!res.ok) throw new Error(await readError(res))
       const data: VisualizationResponsePayload = await res.json()
       setVisualizationResult(data)
+      if (cacheKey) {
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), payload: data }))
+        } catch {}
+      }
     } catch (err: any) {
       setVisualizationResult(null)
       setVisualizationError(err?.message || "시각화 추천 플랜 조회에 실패했습니다.")
@@ -886,6 +954,12 @@ export function QueryView() {
           questionForSuggestions: trimmed,
           addAssistantMessage: true,
         })
+      } else if (data.payload.mode === "demo" && generatedSql.trim()) {
+        await fetchVisualizationPlan(
+          generatedSql.trim(),
+          trimmed,
+          data.payload.result?.preview || null
+        )
       }
     } catch (err: any) {
       const message =
@@ -898,7 +972,7 @@ export function QueryView() {
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: `?ㅻ쪟: ${message}`,
+          content: `오류: ${message}`,
           timestamp: new Date()
         }
       ])
@@ -973,9 +1047,9 @@ export function QueryView() {
       if (!saveRes.ok) {
         throw new Error("save failed")
       }
-      setBoardMessage("寃곌낵 蹂대뱶????ν뻽?듬땲??")
+      setBoardMessage("결과 보드에 저장했습니다.")
     } catch (err) {
-      setBoardMessage("寃곌낵 蹂대뱶 ??μ뿉 ?ㅽ뙣?덉뒿?덈떎.")
+      setBoardMessage("결과 보드 저장에 실패했습니다.")
     } finally {
       setBoardSaving(false)
     }
@@ -1033,7 +1107,7 @@ export function QueryView() {
           id: (Date.now() + 1).toString(),
           role: "assistant",
           content: appendSuggestions(
-            `荑쇰━瑜??ㅽ뻾?덉뼱?? 誘몃━蹂닿린濡?${data.result?.row_count ?? 0}?됱쓣 媛?몄솕?듬땲??`,
+            `쿼리를 실행했어요. 미리보기로 ${data.result?.row_count ?? 0}행을 가져왔습니다.`,
             suggestions
           ),
           timestamp: new Date()
@@ -1066,7 +1140,7 @@ export function QueryView() {
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: `?ㅻ쪟: ${message}`,
+          content: `오류: ${message}`,
           timestamp: new Date()
         }
       ])
@@ -1133,7 +1207,7 @@ export function QueryView() {
     if (mode === "demo") {
       return {
         status: "safe" as const,
-        checks: [{ name: "Demo cache", passed: true, message: "罹먯떆 寃곌낵" }]
+        checks: [{ name: "Demo cache", passed: true, message: "캐시 결과" }]
       }
     }
     if (mode === "clarify") {
@@ -1150,7 +1224,7 @@ export function QueryView() {
         : []
     if (policyChecks.length > 0) {
       const passedAll = policyChecks.every((item) => item.passed)
-      checks.push({ name: "PolicyGate", passed: passedAll, message: passedAll ? "?듦낵" : "?ㅽ뙣" })
+      checks.push({ name: "PolicyGate", passed: passedAll, message: passedAll ? "통과" : "실패" })
       for (const item of policyChecks) {
         checks.push({
           name: item.name || "Policy",
@@ -1159,7 +1233,7 @@ export function QueryView() {
         })
       }
     } else {
-      checks.push({ name: "PolicyGate", passed: true, message: "?듦낵" })
+      checks.push({ name: "PolicyGate", passed: true, message: "통과" })
     }
     if (riskScore != null) {
       checks.push({
@@ -1231,7 +1305,7 @@ export function QueryView() {
               disabled={isLoading || !hasConversation}
             >
               <Trash2 className="w-3 h-3" />
-              ???珥덇린??
+              대화 초기화
             </Button>
           </div>
         </div>
@@ -1687,35 +1761,69 @@ export function QueryView() {
               <Card>
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm">통계 자료</CardTitle>
-                  <CardDescription className="text-xs">컬럼별 MIN, MAX, 평균, NULL 개수</CardDescription>
+                  <CardDescription className="text-xs">컬럼별 MIN, Q1, 중앙값, Q3, MAX, 평균, NULL 개수</CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="space-y-4">
                   {previewColumns.length ? (
-                    <div className="rounded-lg border border-border overflow-x-auto">
-                      <table className="w-full text-xs">
-                        <thead className="bg-secondary/50">
-                          <tr>
-                            <th className="text-left p-2 font-medium">컬럼</th>
-                            <th className="text-right p-2 font-medium">N</th>
-                            <th className="text-right p-2 font-medium">NULL</th>
-                            <th className="text-right p-2 font-medium">MIN</th>
-                            <th className="text-right p-2 font-medium">MAX</th>
-                            <th className="text-right p-2 font-medium">평균</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {buildSimpleStats(previewColumns, previewRows).map((row) => (
-                            <tr key={row.column} className="border-t border-border">
-                              <td className="p-2 font-medium">{row.column}</td>
-                              <td className="p-2 text-right">{row.count}</td>
-                              <td className="p-2 text-right">{row.nullCount}</td>
-                              <td className="p-2 text-right">{row.min ?? "-"}</td>
-                              <td className="p-2 text-right">{row.max ?? "-"}</td>
-                              <td className="p-2 text-right">{row.avg ?? "-"}</td>
+                    <div className="space-y-4">
+                      <div className="rounded-lg border border-border overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-secondary/50">
+                            <tr>
+                              <th className="text-left p-2 font-medium">컬럼</th>
+                              <th className="text-right p-2 font-medium">N</th>
+                              <th className="text-right p-2 font-medium">NULL</th>
+                              <th className="text-right p-2 font-medium">MIN</th>
+                              <th className="text-right p-2 font-medium">Q1</th>
+                              <th className="text-right p-2 font-medium">중앙값</th>
+                              <th className="text-right p-2 font-medium">Q3</th>
+                              <th className="text-right p-2 font-medium">MAX</th>
+                              <th className="text-right p-2 font-medium">평균</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {statsRows.map((row) => (
+                              <tr key={row.column} className="border-t border-border">
+                                <td className="p-2 font-medium">{row.column}</td>
+                                <td className="p-2 text-right">{row.count}</td>
+                                <td className="p-2 text-right">{row.nullCount}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.min)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.q1)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.median)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.q3)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.max)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.avg)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {boxPlotRows.length ? (
+                        <div className="rounded-lg border border-border p-3">
+                          <div className="mb-2 text-xs text-muted-foreground">박스플롯 (컬럼별 분포)</div>
+                          <div className="h-[320px] w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <ComposedChart data={boxPlotRows}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="column" tick={{ fontSize: 12 }} />
+                                <YAxis tick={{ fontSize: 12 }} />
+                                <Tooltip />
+                                <Legend />
+                                <Bar dataKey="iqrBase" stackId="box" fill="transparent" legendType="none" />
+                                <Bar dataKey="iqr" stackId="box" name="IQR (Q1~Q3)" fill="#60a5fa" stroke="#3b82f6" />
+                                <Line type="linear" dataKey="min" name="MIN" stroke="#64748b" dot={false} />
+                                <Line type="linear" dataKey="max" name="MAX" stroke="#64748b" dot={false} />
+                                <Scatter dataKey="median" name="중앙값" fill="#ef4444" />
+                              </ComposedChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
+                          수치형 컬럼이 없어 박스플롯을 생성할 수 없습니다.
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
@@ -1760,9 +1868,12 @@ interface SimpleStatsRow {
   column: string
   count: number
   nullCount: number
-  min: string | null
-  max: string | null
-  avg: string | null
+  min: number | null
+  q1: number | null
+  median: number | null
+  q3: number | null
+  max: number | null
+  avg: number | null
 }
 
 function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
@@ -1787,11 +1898,18 @@ function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
         count: 0,
         nullCount,
         min: null,
+        q1: null,
+        median: null,
+        q3: null,
         max: null,
         avg: null,
       }
     }
 
+    const sorted = [...numbers].sort((a, b) => a - b)
+    const q1 = quantile(sorted, 0.25)
+    const median = quantile(sorted, 0.5)
+    const q3 = quantile(sorted, 0.75)
     const min = Math.min(...numbers)
     const max = Math.max(...numbers)
     const avg = numbers.reduce((sum, value) => sum + value, 0) / numbers.length
@@ -1800,11 +1918,29 @@ function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
       column,
       count: numbers.length,
       nullCount,
-      min: Number(min.toFixed(4)).toLocaleString(),
-      max: Number(max.toFixed(4)).toLocaleString(),
-      avg: Number(avg.toFixed(4)).toLocaleString(),
+      min: Number(min.toFixed(4)),
+      q1: Number(q1.toFixed(4)),
+      median: Number(median.toFixed(4)),
+      q3: Number(q3.toFixed(4)),
+      max: Number(max.toFixed(4)),
+      avg: Number(avg.toFixed(4)),
     }
   })
+}
+
+function quantile(sorted: number[], q: number) {
+  if (!sorted.length) return 0
+  const pos = (sorted.length - 1) * q
+  const base = Math.floor(pos)
+  const rest = pos - base
+  const next = sorted[base + 1]
+  if (next === undefined) return sorted[base]
+  return sorted[base] + rest * (next - sorted[base])
+}
+
+function formatStatNumber(value: number | null) {
+  if (value == null || !Number.isFinite(value)) return "-"
+  return Number(value.toFixed(4)).toLocaleString()
 }
 
 function formatSqlForDisplay(sql: string) {

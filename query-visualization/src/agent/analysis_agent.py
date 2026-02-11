@@ -34,7 +34,18 @@ def _add_elapsed_columns(df: pd.DataFrame) -> pd.DataFrame:
                 return cols[n]
         return None
 
-    chart_col = _col("charttime", "chart_time", "charttimestamp")
+    chart_col = _col(
+        "charttime",
+        "chart_time",
+        "charttimestamp",
+        "starttime",
+        "endtime",
+        "storetime",
+        "outtime",
+        "dischtime",
+        "transfertime",
+        "ordertime",
+    )
     intime_col = _col("intime", "in_time", "icu_intime")
     admittime_col = _col("admittime", "admit_time")
 
