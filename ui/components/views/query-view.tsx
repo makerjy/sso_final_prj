@@ -453,41 +453,113 @@ export function QueryView() {
   const buildSuggestions = (questionText: string, columns?: string[]) => {
     const suggestions: string[] = []
     const normalized = questionText.toLowerCase()
-    const cols = (columns || []).map((col) => col.toLowerCase())
+    const cols = (columns || []).map((col) => col.toLowerCase().trim()).filter(Boolean)
+    if (!cols.length) return suggestions
 
-    const pushUnique = (text: string) => {
+    const hasQuestionToken = (...tokens: string[]) => tokens.some((token) => normalized.includes(token))
+    const hasColLike = (tokens: string[]) => cols.some((col) => tokens.some((token) => col.includes(token)))
+
+    const hasComparisonIntent = hasQuestionToken(
+      "비교",
+      "대비",
+      "차이",
+      "vs",
+      "versus",
+      "comparison",
+      "compared"
+    )
+    const hasTimeIntent = hasQuestionToken(
+      "기간별",
+      "월별",
+      "연도별",
+      "주별",
+      "일별",
+      "추이",
+      "trend",
+      "time series",
+      "over time"
+    )
+    const hasAgeIntent = hasQuestionToken("연령별", "연령대별", "나이별", "age")
+    const hasGenderIntent = hasQuestionToken("성별", "남성", "여성", "gender", "male", "female")
+    const hasRankingIntent = hasQuestionToken("상위", "top", "가장", "highest", "largest", "많은", "내림차순")
+    const hasMetricIntent = hasQuestionToken(
+      "사망률",
+      "사망",
+      "생존율",
+      "재입원율",
+      "비율",
+      "건수",
+      "count",
+      "rate",
+      "ratio",
+      "평균",
+      "중앙",
+      "중위"
+    )
+
+    const hasTimeColumn = hasColLike([
+      "time",
+      "date",
+      "year",
+      "month",
+      "week",
+      "day",
+      "admittime",
+      "dischtime",
+      "intime",
+      "outtime",
+      "charttime",
+      "starttime",
+      "stoptime",
+    ])
+    const hasGenderColumn = hasColLike(["gender", "sex"])
+    const hasAgeColumn = hasColLike(["age"])
+    const hasDiagnosisColumn = hasColLike(["icd", "diagnos", "diag", "long_title"])
+    const hasGroupColumn = hasColLike([
+      "gender",
+      "sex",
+      "age",
+      "year",
+      "month",
+      "week",
+      "day",
+      "icd",
+      "diagnos",
+      "diag",
+      "service",
+      "careunit",
+      "admission_type",
+      "race",
+      "insurance",
+    ])
+    const hasCountColumn = hasColLike(["cnt", "count", "_cnt", "_count", "n_", "num", "admission_cnt"])
+    const hasRateColumn = hasColLike(["rate", "ratio", "pct", "percent", "mortality", "readmission"])
+
+    const pushSuggestion = (text: string) => {
       if (!text || suggestions.includes(text)) return
       suggestions.push(text)
     }
 
-    if (normalized.includes("diagnos") || normalized.includes("진단") || cols.some((c) => c.includes("icd"))) {
-      pushUnique("상위 10개 진단 보기")
-      pushUnique("성별/연령별 진단 분포")
-      pushUnique("진단 최근 추이")
-    } else if (normalized.includes("icu") || normalized.includes("재원") || cols.some((c) => c.includes("stay"))) {
-      pushUnique("ICU 평균 재원일수")
-      pushUnique("ICU 재원일수 분포")
-      pushUnique("ICU 재원 상위 10명")
-    } else if (normalized.includes("입원") || normalized.includes("admission")) {
-      pushUnique("입원 월별 추이")
-      pushUnique("진단별 입원 건수")
-      pushUnique("평균 입원기간")
+    if (hasTimeColumn && !hasTimeIntent) {
+      pushSuggestion("결과를 연도/월 단위 추이로 보여줘.")
     }
-
-    if (cols.some((c) => c.includes("date") || c.includes("time"))) {
-      pushUnique("기간별 추이")
+    if (hasGenderColumn && !hasGenderIntent && !hasComparisonIntent) {
+      pushSuggestion("결과를 성별로 비교해줘.")
     }
-    if (cols.some((c) => c.includes("gender"))) {
-      pushUnique("성별로 나눠 보기")
+    if (hasAgeColumn && !hasAgeIntent && !hasComparisonIntent) {
+      pushSuggestion("결과를 연령대별로 비교해줘.")
     }
-    if (cols.some((c) => c.includes("age"))) {
-      pushUnique("연령대별로 보기")
+    if (hasDiagnosisColumn && !hasQuestionToken("진단", "diagnos", "icd")) {
+      pushSuggestion("진단 코드 기준으로 상위 항목을 보여줘.")
     }
-
-    if (suggestions.length === 0) {
-      pushUnique("상위 10개 보기")
-      pushUnique("최근 6개월")
-      pushUnique("성별로 나눠 보기")
+    if (hasGroupColumn && (hasCountColumn || hasRateColumn) && !hasRankingIntent) {
+      pushSuggestion("값이 큰 순서로 상위 10개를 보여줘.")
+    }
+    if (hasGroupColumn && hasCountColumn && !hasRateColumn && !hasMetricIntent) {
+      pushSuggestion("건수뿐 아니라 비율도 함께 보여줘.")
+    }
+    if (hasGroupColumn && hasRateColumn && !hasCountColumn && !hasMetricIntent) {
+      pushSuggestion("비율뿐 아니라 건수도 함께 보여줘.")
     }
 
     return suggestions.slice(0, 3)
@@ -514,22 +586,51 @@ export function QueryView() {
     return text || `${res.status} ${res.statusText}`
   }
 
+  const isClarificationAssistantMessage = (message: ChatMessage) => {
+    if (message.role !== "assistant") return false
+    const content = message.content.toLowerCase()
+    return (
+      content.includes("추가로 아래 항목") ||
+      content.includes("답변 예시") ||
+      content.includes("질문 범위를 조금 더 좁혀") ||
+      content.includes("clarification") ||
+      content.includes("clarify")
+    )
+  }
+
+  const buildClarificationConversation = (history: ChatMessage[], latestUser: ChatMessage) => {
+    const seed = [...history, latestUser]
+    let clarifyIdx = -1
+    for (let i = seed.length - 1; i >= 0; i -= 1) {
+      if (isClarificationAssistantMessage(seed[i])) {
+        clarifyIdx = i
+        break
+      }
+    }
+    if (clarifyIdx < 0) return seed
+
+    let baseUserIdx = -1
+    for (let i = clarifyIdx - 1; i >= 0; i -= 1) {
+      if (seed[i].role === "user") {
+        baseUserIdx = i
+        break
+      }
+    }
+    const startIdx = baseUserIdx >= 0 ? baseUserIdx : Math.max(clarifyIdx - 1, 0)
+    return seed.slice(startIdx)
+  }
+
   const buildAssistantMessage = (data: OneShotResponse) => {
     if (data.payload.mode === "clarify") {
       const clarify = data.payload.clarification
       const prompt = clarify?.question?.trim() || "질문 범위를 조금 더 좁혀주세요."
       const options = Array.isArray(clarify?.options) ? clarify.options.filter(Boolean) : []
       const examples = Array.isArray(clarify?.example_inputs) ? clarify.example_inputs.filter(Boolean) : []
-      const reason = clarify?.reason?.trim()
       const lines = [prompt]
-      if (reason) {
-        lines.push(`이유: ${reason}`)
-      }
-      if (options.length) {
-        lines.push(`선택 예시: ${options.slice(0, 4).join(", ")}`)
-      }
-      if (examples.length) {
-        lines.push(`답변 예: ${examples.slice(0, 2).join(" / ")}`)
+      const exampleValues =
+        examples.length > 0 ? examples.slice(0, 3) : options.slice(0, 3)
+      if (exampleValues.length) {
+        lines.push(`답변 예시: ${exampleValues.join(" / ")}`)
       }
       return lines.join("\n")
     }
@@ -675,7 +776,9 @@ export function QueryView() {
       timestamp: new Date()
     }
     const shouldUseClarificationContext = response?.payload?.mode === "clarify"
-    const conversationSeed = shouldUseClarificationContext ? [...messages, newMessage] : [newMessage]
+    const conversationSeed = shouldUseClarificationContext
+      ? buildClarificationConversation(messages, newMessage)
+      : [newMessage]
     const conversation = conversationSeed
       .slice(-10)
       .map((item) => ({ role: item.role, content: item.content }))
@@ -715,6 +818,9 @@ export function QueryView() {
       }
 
       setShowResults(true)
+      const effectiveQuestionForSuggestions =
+        (typeof data.payload.question === "string" && data.payload.question.trim()) || trimmed
+      setLastQuestion(effectiveQuestionForSuggestions)
       const generatedSql =
         (data.payload.mode === "demo"
           ? data.payload.result?.sql
@@ -725,7 +831,7 @@ export function QueryView() {
       setIsEditing(false)
       const suggestions =
         data.payload.mode === "demo"
-          ? buildSuggestions(trimmed, data.payload.result?.preview?.columns)
+          ? buildSuggestions(effectiveQuestionForSuggestions, data.payload.result?.preview?.columns)
           : []
       setSuggestedQuestions(suggestions)
       const responseMessage: ChatMessage = {
@@ -741,7 +847,7 @@ export function QueryView() {
         await executeAdvancedSql({
           qid: data.qid,
           sql: generatedSql,
-          questionForSuggestions: trimmed,
+          questionForSuggestions: effectiveQuestionForSuggestions,
           addAssistantMessage: true,
         })
       }
@@ -769,8 +875,93 @@ export function QueryView() {
     await runQuery(query)
   }
 
+  const classifyClarificationSlot = (text: string) => {
+    const normalized = text.toLowerCase()
+    if (
+      normalized.includes("기간") ||
+      normalized.includes("최근") ||
+      normalized.includes("지난") ||
+      normalized.includes("작년") ||
+      normalized.includes("올해") ||
+      normalized.includes("연도") ||
+      normalized.includes("월") ||
+      normalized.includes("주") ||
+      normalized.includes("일") ||
+      normalized.includes("입원 후") ||
+      normalized.includes("year") ||
+      normalized.includes("month") ||
+      normalized.includes("week") ||
+      normalized.includes("day")
+    ) {
+      return "period" as const
+    }
+    if (
+      normalized.includes("비교") ||
+      normalized.includes("대비") ||
+      normalized.includes("vs") ||
+      normalized.includes("versus") ||
+      normalized.includes("comparison")
+    ) {
+      return "comparison" as const
+    }
+    if (
+      normalized.includes("지표") ||
+      normalized.includes("사망") ||
+      normalized.includes("생존") ||
+      normalized.includes("재입원") ||
+      normalized.includes("비율") ||
+      normalized.includes("건수") ||
+      normalized.includes("평균") ||
+      normalized.includes("중앙") ||
+      normalized.includes("중위")
+    ) {
+      return "metric" as const
+    }
+    if (
+      normalized.includes("환자") ||
+      normalized.includes("대상") ||
+      normalized.includes("코호트") ||
+      normalized.includes("연령") ||
+      normalized.includes("세")
+    ) {
+      return "cohort" as const
+    }
+    return null
+  }
+
+  const toSuggestionSentence = (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return trimmed
+    if (mode !== "clarify") return trimmed
+
+    let value = trimmed
+    value = value.replace(/^답변\s*예시\s*:\s*/i, "").trim()
+    value = value.replace(/^선택\s*예시\s*:\s*/i, "").trim()
+    if (value.includes(" / ")) {
+      value = value.split(" / ")[0].trim()
+    }
+
+    const labelMatch = value.match(/^(기간|대상\s*환자|비교\s*기준|지표)\s*[:：]\s*(.+)$/)
+    if (labelMatch) {
+      const label = labelMatch[1].replace(/\s+/g, "")
+      const content = labelMatch[2].trim()
+      if (!content) return trimmed
+      if (label === "기간") return `기간은 ${content}로 해줘.`
+      if (label === "대상환자") return `대상 환자는 ${content}로 해줘.`
+      if (label === "비교기준") return `비교 기준은 ${content}로 해줘.`
+      return `지표는 ${content}로 해줘.`
+    }
+
+    const slot = classifyClarificationSlot(value)
+    if (slot === "period") return `기간은 ${value}로 해줘.`
+    if (slot === "cohort") return `대상 환자는 ${value}로 해줘.`
+    if (slot === "comparison") return `비교 기준은 ${value}로 해줘.`
+    if (slot === "metric") return `지표는 ${value}로 해줘.`
+    return trimmed
+  }
+
   const handleQuickQuestion = async (text: string) => {
-    await runQuery(text)
+    await runQuery(toSuggestionSentence(text))
   }
 
   const deriveDashboardCategory = (text: string) => {

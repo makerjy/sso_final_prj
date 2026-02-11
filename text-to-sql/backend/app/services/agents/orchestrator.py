@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
 import math
 import json
 import re
@@ -94,6 +95,8 @@ def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
 _ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_/-]*")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 _CLARIFICATION_SLOT_ORDER = ("period", "cohort", "comparison", "metric")
+_CURRENT_CALENDAR_YEAR_KO = f"{datetime.now().year}년 전체"
+_CURRENT_CALENDAR_YEAR_EN = f"Calendar year {datetime.now().year}"
 _SLOT_LABELS_KO = {
     "period": "기간",
     "cohort": "대상 환자",
@@ -120,11 +123,40 @@ _SLOT_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     ),
 }
 _SLOT_OPTION_SAMPLES_KO: dict[str, tuple[str, ...]] = {
-    "period": ("최근 30일", "2025년 전체", "입원 후 30일"),
+    "period": ("최근 30일", _CURRENT_CALENDAR_YEAR_KO, "입원 후 30일"),
     "cohort": ("전체 환자", "65세 이상 환자", "여성 환자"),
     "comparison": ("비교 없음", "남성 대 여성 비교", "연도별 비교"),
     "metric": ("사망률", "사망 건수", "생존율"),
 }
+_PERIOD_ONLY_REASON_KO = "질문에 기간 정보가 없어 데이터 범위를 먼저 정해야 합니다."
+_PERIOD_ONLY_REASON_EN = "A time range is required before generating SQL."
+_PERIOD_ONLY_QUESTION_KO = "어떤 기간으로 분석할까요?"
+_PERIOD_ONLY_QUESTION_EN = "What time period should be used?"
+_SLOT_LABEL_ALIASES: dict[str, tuple[str, ...]] = {
+    "period": ("기간", "시간", "date", "time", "날짜"),
+    "cohort": ("대상환자", "대상", "환자군", "코호트", "cohort", "population", "group"),
+    "comparison": ("비교기준", "비교", "대조군", "비교군", "comparison"),
+    "metric": ("지표", "메트릭", "metric", "결과지표", "평가지표"),
+}
+_METRIC_HINTS = (
+    "사망률",
+    "사망 건수",
+    "사망",
+    "생존율",
+    "생존",
+    "재입원율",
+    "재입원",
+    "재원일수",
+    "비율",
+    "건수",
+    "평균",
+    "중앙",
+    "중위",
+)
+_TIME_GRAIN_PATTERN = re.compile(
+    r"(연도별|월별|주별|일별|분기별|추이|시계열|by\s+year|by\s+month|by\s+week|by\s+day|yearly|monthly|weekly|daily|trend|over\s+time)",
+    re.IGNORECASE,
+)
 
 
 def _strip_english_tokens_for_korean(text: str) -> str:
@@ -140,13 +172,94 @@ def _normalize_conversation(conversation: list[dict[str, Any]] | None) -> list[d
     if not conversation:
         return []
     normalized: list[dict[str, str]] = []
-    for turn in conversation[-12:]:
+    for turn in conversation[-20:]:
         role = str(turn.get("role") or "").strip().lower()
         content = str(turn.get("content") or "").strip()
         if role not in {"user", "assistant"} or not content:
             continue
         normalized.append({"role": role, "content": content[:2000]})
     return normalized
+
+
+def _is_clarification_prompt_text(text: str) -> bool:
+    normalized = _MULTI_SPACE_RE.sub(" ", text).strip().lower()
+    if not normalized:
+        return False
+    hints = (
+        "추가로 아래 항목",
+        "답변 예시",
+        "질문 범위를 조금 더 좁혀",
+        "질문 범위를 조금 더",
+        "기간을 알려",
+        "기간으로 분석",
+        "clarify",
+        "clarification",
+        "what time period should be used",
+    )
+    return any(hint in normalized for hint in hints)
+
+
+def _slice_active_clarification_turns(turns: list[dict[str, str]]) -> list[dict[str, str]]:
+    if not turns:
+        return []
+
+    clarify_indices = [
+        idx
+        for idx, turn in enumerate(turns)
+        if turn["role"] == "assistant" and _is_clarification_prompt_text(turn["content"])
+    ]
+
+    start_idx = 0
+    if clarify_indices:
+        chain_start = clarify_indices[-1]
+        while True:
+            prev_idx = next((idx for idx in reversed(clarify_indices) if idx < chain_start), None)
+            if prev_idx is None:
+                break
+            has_non_clarify_assistant = any(
+                turns[pos]["role"] == "assistant" and not _is_clarification_prompt_text(turns[pos]["content"])
+                for pos in range(prev_idx + 1, chain_start)
+            )
+            if has_non_clarify_assistant:
+                break
+            chain_start = prev_idx
+
+        base_idx = next((idx for idx in range(chain_start - 1, -1, -1) if turns[idx]["role"] == "user"), None)
+        start_idx = base_idx if base_idx is not None else chain_start
+    else:
+        latest_user_idx = next((idx for idx in range(len(turns) - 1, -1, -1) if turns[idx]["role"] == "user"), None)
+        start_idx = latest_user_idx if latest_user_idx is not None else 0
+
+    return turns[start_idx:]
+
+
+def _extract_requested_slots_from_assistant(text: str) -> set[str]:
+    if not text:
+        return set()
+
+    requested: set[str] = set()
+    in_requested_section = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "추가로 아래 항목" in line:
+            in_requested_section = True
+            continue
+        if not in_requested_section:
+            continue
+        if line.startswith("답변 예시") or line.startswith("선택 예시") or line.startswith("이유"):
+            break
+        bullet = re.match(r"^[-•]\s*(.+)$", line)
+        if not bullet:
+            continue
+        slot = _slot_from_label(bullet.group(1))
+        if slot:
+            requested.add(slot)
+
+    if requested:
+        return requested
+    return _extract_slots_from_text(text)
 
 
 def _extract_slots_from_text(text: str) -> set[str]:
@@ -161,11 +274,124 @@ def _extract_slots_from_text(text: str) -> set[str]:
     return found
 
 
+def _has_time_grain_intent(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_TIME_GRAIN_PATTERN.search(text))
+
+
 def _truncate_slot_answer(text: str, *, limit: int = 80) -> str:
     normalized = _MULTI_SPACE_RE.sub(" ", text).strip()
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: limit - 1].rstrip()}…"
+
+
+def _normalize_slot_label(label: str) -> str:
+    return re.sub(r"\s+", "", label).strip().lower()
+
+
+def _slot_from_label(label: str) -> str | None:
+    normalized = _normalize_slot_label(label)
+    if not normalized:
+        return None
+    for slot, aliases in _SLOT_LABEL_ALIASES.items():
+        for alias in aliases:
+            alias_normalized = _normalize_slot_label(alias)
+            if normalized == alias_normalized or normalized.startswith(alias_normalized):
+                return slot
+    return None
+
+
+def _push_slot_answer(slot_answers: dict[str, list[str]], slot: str, value: str) -> None:
+    normalized = _truncate_slot_answer(value)
+    if not normalized:
+        return
+    if normalized not in slot_answers[slot]:
+        slot_answers[slot].append(normalized)
+
+
+def _extract_labeled_slot_values(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    chunks = [chunk.strip() for chunk in re.split(r"[\n/]+", text) if chunk.strip()]
+    for chunk in chunks:
+        match = re.match(r"^([^:：]{1,20})\s*[:：]\s*(.+)$", chunk)
+        if not match:
+            continue
+        slot = _slot_from_label(match.group(1))
+        if not slot:
+            continue
+        value = match.group(2).strip()
+        if value:
+            values[slot] = value
+    return values
+
+
+def _extract_slot_value_from_free_text(slot: str, text: str) -> str:
+    compact = _MULTI_SPACE_RE.sub(" ", text).strip(" .")
+    lowered = compact.lower()
+    if not compact:
+        return ""
+
+    if slot == "period":
+        if compact in {"전체", "전체 기간", "전체기간"}:
+            return "전체"
+        match = re.search(
+            r"((최근|지난|작년|올해|전년|전년도|이번)\s*\d*\s*(일|주|개월|달|월|년)?)",
+            compact,
+        )
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    if slot == "comparison":
+        if any(keyword in lowered for keyword in ("비교 없음", "없음", "없다", "no comparison", "none")):
+            return "비교 없음"
+        vs_match = re.search(
+            r"([가-힣A-Za-z0-9_]+)\s*(?:vs|VS|대)\s*([가-힣A-Za-z0-9_]+)",
+            compact,
+        )
+        if vs_match:
+            left = vs_match.group(1).strip()
+            right = vs_match.group(2).strip()
+            if left and right:
+                return f"{left} vs {right}"
+        compare_match = re.search(r"([가-힣A-Za-z0-9\s]{2,20}비교)", compact)
+        if compare_match:
+            return compare_match.group(1).strip()
+        return ""
+
+    if slot == "metric":
+        for hint in _METRIC_HINTS:
+            if hint in compact:
+                if "icu" in lowered and not hint.lower().startswith("icu"):
+                    return f"ICU {hint}"
+                return hint
+        return ""
+
+    if slot == "cohort":
+        if compact in {"전체 환자", "전체"}:
+            return "전체 환자"
+        age_match = re.search(r"(\d+\s*세\s*(이상|이하))", compact)
+        if age_match:
+            return f"{age_match.group(1).strip()} 환자"
+        if "icu" in lowered or "중환자" in compact:
+            return "ICU 환자"
+        if "입원" in compact:
+            return "입원 환자"
+        if "외래" in compact:
+            return "외래 환자"
+        sex_patient_match = re.search(r"(남성|여성)\s*환자", compact)
+        if sex_patient_match:
+            return sex_patient_match.group(0).strip()
+        simple_patient_match = re.search(r"([가-힣A-Za-z0-9\s]{1,18}환자)", compact)
+        if simple_patient_match and "vs" not in lowered and "비교" not in compact:
+            candidate = simple_patient_match.group(1).strip()
+            if candidate:
+                return candidate
+        return ""
+
+    return ""
 
 
 def _is_specific_slot_answer(slot: str, value: str) -> bool:
@@ -183,6 +409,10 @@ def _is_specific_slot_answer(slot: str, value: str) -> bool:
             return True
         return slot in _extract_slots_from_text(value)
     if slot == "cohort":
+        if any(hint in normalized for hint in _METRIC_HINTS):
+            return False
+        if " vs " in normalized or "비교" in normalized:
+            return False
         if normalized in {"전체", "전체 환자", "all", "all patients"}:
             return True
         if any(
@@ -221,8 +451,10 @@ def _collect_clarification_memory(
         if not turns or turns[-1]["role"] != "user" or turns[-1]["content"] != question.strip():
             turns.append({"role": "user", "content": question.strip()})
 
+    scoped_turns = _slice_active_clarification_turns(turns)
+
     base_question = question.strip()
-    for turn in turns:
+    for turn in scoped_turns:
         if turn["role"] == "user":
             base_question = turn["content"]
             break
@@ -231,23 +463,47 @@ def _collect_clarification_memory(
     slot_answers: dict[str, list[str]] = {slot: [] for slot in _CLARIFICATION_SLOT_ORDER}
     pending_slots: set[str] = set()
 
-    for turn in turns:
+    for turn in scoped_turns:
         text = turn["content"].strip()
         if not text:
             continue
         if turn["role"] == "assistant":
-            pending_slots = _extract_slots_from_text(text)
+            pending_slots = _extract_requested_slots_from_assistant(text)
             asked_slots.update(pending_slots)
             continue
 
+        assigned_slots: set[str] = set()
+        labeled_values = _extract_labeled_slot_values(text)
+        for slot, value in labeled_values.items():
+            _push_slot_answer(slot_answers, slot, value)
+            assigned_slots.add(slot)
+
         detected_slots = _extract_slots_from_text(text)
         for slot in detected_slots:
-            if text not in slot_answers[slot]:
-                slot_answers[slot].append(text)
+            if slot in assigned_slots:
+                continue
+            candidate = _extract_slot_value_from_free_text(slot, text)
+            if candidate:
+                _push_slot_answer(slot_answers, slot, candidate)
+                assigned_slots.add(slot)
+
         if pending_slots:
-            for slot in pending_slots:
-                if text not in slot_answers[slot]:
-                    slot_answers[slot].append(text)
+            pending_list = [slot for slot in _CLARIFICATION_SLOT_ORDER if slot in pending_slots]
+            if len(pending_list) == 1:
+                slot = pending_list[0]
+                if slot not in assigned_slots:
+                    candidate = _extract_slot_value_from_free_text(slot, text)
+                    if not candidate and not detected_slots and not labeled_values:
+                        candidate = text
+                    if candidate:
+                        _push_slot_answer(slot_answers, slot, candidate)
+            else:
+                for slot in pending_list:
+                    if slot in assigned_slots:
+                        continue
+                    candidate = _extract_slot_value_from_free_text(slot, text)
+                    if candidate and _is_specific_slot_answer(slot, candidate):
+                        _push_slot_answer(slot_answers, slot, candidate)
         pending_slots = set()
 
     latest_answers: dict[str, str] = {}
@@ -269,32 +525,33 @@ def _infer_required_slots(
     asked_slots: set[str],
 ) -> list[str]:
     required = set(asked_slots)
+    # 기간은 항상 필수 슬롯으로 간주한다.
+    required.add("period")
     for text in [question, reason, clarification_question, *options, *example_inputs]:
         required.update(_extract_slots_from_text(text))
     if not required:
-        required.update({"period", "cohort", "metric"})
+        required.update({"cohort", "metric"})
     return [slot for slot in _CLARIFICATION_SLOT_ORDER if slot in required]
 
 
 def _build_korean_examples(
     *,
-    required_slots: list[str],
     missing_slots: list[str],
-    known_answers: dict[str, str],
 ) -> list[str]:
     if not missing_slots:
         return []
+    if len(missing_slots) == 1:
+        slot = missing_slots[0]
+        sample_values = _SLOT_OPTION_SAMPLES_KO.get(slot) or ()
+        return [item for item in sample_values[:3] if item]
     examples: list[str] = []
     for idx in range(2):
         parts: list[str] = []
-        for slot in required_slots:
+        for slot in missing_slots:
             label = _SLOT_LABELS_KO.get(slot, slot)
-            if slot in known_answers:
-                parts.append(f"{label}: {known_answers[slot]}")
-            elif slot in missing_slots:
-                sample_values = _SLOT_OPTION_SAMPLES_KO.get(slot) or ()
-                if sample_values:
-                    parts.append(f"{label}: {sample_values[idx % len(sample_values)]}")
+            sample_values = _SLOT_OPTION_SAMPLES_KO.get(slot) or ()
+            if sample_values:
+                parts.append(f"{label}: {sample_values[idx % len(sample_values)]}")
         if parts:
             examples.append(" / ".join(parts))
     return examples[:3]
@@ -308,7 +565,7 @@ def _build_korean_consolidated_clarification(
     options: list[str],
     example_inputs: list[str],
     conversation: list[dict[str, Any]] | None,
-) -> tuple[str, list[str], list[str], dict[str, str]]:
+) -> tuple[str, list[str], list[str], dict[str, str], list[str], list[str], str]:
     base_question, asked_slots, raw_answers = _collect_clarification_memory(question, conversation)
     required_slots = _infer_required_slots(
         question=base_question,
@@ -326,12 +583,11 @@ def _build_korean_consolidated_clarification(
         value = raw_answers.get(slot)
         if value and _is_specific_slot_answer(slot, value):
             known_answers[slot] = value
+    # 연도별/월별/추이 같은 질문은 기간을 전체로 기본 해석해 추가 질문을 생략한다.
+    if "period" in required_slots and "period" not in known_answers and _has_time_grain_intent(base_question):
+        known_answers["period"] = "전체"
 
     missing_slots = [slot for slot in required_slots if slot not in known_answers]
-    if not missing_slots:
-        # LLM이 추가 확인을 요구하면, 이미 답한 항목 재질문 대신 남은 핵심 항목을 우선 확인한다.
-        fallback_slots = [slot for slot in _CLARIFICATION_SLOT_ORDER if slot not in known_answers]
-        missing_slots = fallback_slots[:2] if fallback_slots else list(required_slots)
 
     lines: list[str] = []
     if known_answers:
@@ -353,14 +609,45 @@ def _build_korean_consolidated_clarification(
         if item not in dedup_options:
             dedup_options.append(item)
     examples = _build_korean_examples(
-        required_slots=required_slots,
         missing_slots=missing_slots,
-        known_answers=known_answers,
     )
     if not examples:
-        examples = [item for item in example_inputs if item][:3]
+        if len(missing_slots) == 1:
+            examples = [item for item in dedup_options[:3] if item]
+        else:
+            examples = [item for item in example_inputs if item][:3]
 
-    return "\n".join(lines), dedup_options[:5], examples[:3], known_answers
+    return (
+        "\n".join(lines),
+        dedup_options[:5],
+        examples[:3],
+        known_answers,
+        required_slots,
+        missing_slots,
+        base_question,
+    )
+
+
+def _compose_refined_question(
+    *,
+    base_question: str,
+    required_slots: list[str],
+    known_answers: dict[str, str],
+) -> str:
+    details = [
+        f"{_SLOT_LABELS_KO[slot]}: {known_answers[slot]}"
+        for slot in required_slots
+        if slot in known_answers and known_answers[slot]
+    ]
+    if not details:
+        return base_question.strip()
+    suffix = " / ".join(details)
+    prefix = base_question.strip()
+    if not prefix:
+        return suffix
+    if suffix in prefix:
+        return prefix
+    return f"{prefix} ({suffix})"
 
 
 def _default_korean_clarification(question: str) -> tuple[str, list[str], list[str]]:
@@ -390,7 +677,14 @@ def _normalize_clarifier_payload(
     *,
     conversation: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    base_question, _, raw_answers = _collect_clarification_memory(question, conversation)
+    period_answer = raw_answers.get("period", "")
+    has_period_answer = bool(period_answer and _is_specific_slot_answer("period", period_answer))
+    has_time_grain = _has_time_grain_intent(base_question or question)
+    must_ask_period = not has_period_answer and not has_time_grain
+
     need_clarification = bool(payload.get("need_clarification"))
+    refined_question = str(payload.get("refined_question") or "").strip()
     reason = str(payload.get("reason") or "").strip()
     clarification_question = str(payload.get("clarification_question") or "").strip()
     if need_clarification and not clarification_question:
@@ -417,12 +711,15 @@ def _normalize_clarifier_payload(
             options = default_options
         if not example_inputs:
             example_inputs = default_examples
-        if need_clarification:
+        if need_clarification or must_ask_period:
             (
                 clarification_question,
                 options,
                 example_inputs,
                 known_answers,
+                required_slots,
+                missing_slots,
+                base_question,
             ) = _build_korean_consolidated_clarification(
                 question=question,
                 reason=reason,
@@ -431,6 +728,26 @@ def _normalize_clarifier_payload(
                 example_inputs=example_inputs,
                 conversation=conversation,
             )
+            if "period" in missing_slots:
+                need_clarification = True
+                reason = _PERIOD_ONLY_REASON_KO
+            if not missing_slots:
+                need_clarification = False
+                if not refined_question:
+                    refined_question = _compose_refined_question(
+                        base_question=base_question,
+                        required_slots=required_slots,
+                        known_answers=known_answers,
+                    )
+                clarification_question = ""
+                options = []
+                example_inputs = []
+    elif must_ask_period:
+        need_clarification = True
+        reason = reason or _PERIOD_ONLY_REASON_EN
+        clarification_question = _PERIOD_ONLY_QUESTION_EN
+        options = ["Last 30 days", "Last 12 months", _CURRENT_CALENDAR_YEAR_EN]
+        example_inputs = ["Use the last 30 days", f"Use {_CURRENT_CALENDAR_YEAR_EN.lower()}"]
 
     return {
         "need_clarification": need_clarification,
@@ -439,7 +756,7 @@ def _normalize_clarifier_payload(
         "options": options,
         "example_inputs": example_inputs,
         "known_answers": known_answers,
-        "refined_question": str(payload.get("refined_question") or "").strip(),
+        "refined_question": refined_question,
         "usage": payload.get("usage", {}),
     }
 

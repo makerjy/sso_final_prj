@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
 import re
 
 from app.core.config import get_settings
+from app.services.runtime.diagnosis_map_store import match_diagnosis_mappings
+from app.services.runtime.sql_postprocess_rules_store import load_sql_postprocess_rules
+from app.services.runtime.sql_schema_hints_store import load_sql_schema_hints
 
 _COUNT_RE = re.compile(r"^Count rows in ([A-Za-z0-9_]+) \(sampled\)$", re.IGNORECASE)
 _SAMPLE_RE = re.compile(r"^Show sample ([A-Za-z0-9_]+) rows with (.+)$", re.IGNORECASE)
@@ -49,379 +52,62 @@ _TIME_WINDOW_RE = re.compile(
     r"(?:\s*-\s*INTERVAL\s*'[^']+'\s*(DAY|MONTH|YEAR))?)?",
     re.IGNORECASE,
 )
+_DIAGNOSIS_TITLE_FILTER_RE = re.compile(
+    r"(?:UPPER|LOWER)?\s*\(\s*(?:[A-Za-z0-9_]+\.)?LONG_TITLE\s*\)\s+(?:LIKE|=)\s+'[^']+'"
+    r"|(?:[A-Za-z0-9_]+\.)?LONG_TITLE\s+(?:LIKE|=)\s+'[^']+'",
+    re.IGNORECASE,
+)
+_ICD_CODE_LIKE_RE = re.compile(
+    r"(?P<lhs>(?:[A-Za-z0-9_]+\.)?ICD_CODE)\s+LIKE\s+(?P<quote>'?)(?P<prefix>[A-Za-z0-9]+)%(?P=quote)",
+    re.IGNORECASE,
+)
+_TO_CHAR_BARE_FMT_RE = re.compile(
+    r"TO_CHAR\s*\(\s*(?P<expr>[^,]+?)\s*,\s*(?P<fmt>YYYY|YYY|YY|Y|MM|MON|MONTH|DD|HH24|MI|SS)\s*\)",
+    re.IGNORECASE,
+)
 
-# Common MIMIC-IV to Oracle schema/table/column mappings
-_TABLE_ALIASES = {
-    "admissions_table": "ADMISSIONS",
-    "anchors": "PATIENTS",
-    "hospital_admissions": "ADMISSIONS",
-    "icu_stays": "ICUSTAYS",
-    "icustay_table": "ICUSTAYS",
-    "icu_patients": "ICUSTAYS",
-    "icu_patient": "ICUSTAYS",
-    "icu_icustays": "ICUSTAYS",
-    "icu_stay": "ICUSTAYS",
-    "transfer_data": "TRANSFERS",
-    "chart_events": "CHARTEVENTS",
-    "chart_event": "CHARTEVENTS",
-    "chart": "CHARTEVENTS",
-    "chart_items": "D_ITEMS",
-    "d_items": "D_ITEMS",
-    "lab_events": "LABEVENTS",
-    "lab_event": "LABEVENTS",
-    "lab_event_table": "LABEVENTS",
-    "labresults": "LABEVENTS",
-    "lab_results": "LABEVENTS",
-    "lab": "LABEVENTS",
-    "lab_table": "LABEVENTS",
-    "lab_items": "D_LABITEMS",
-    "labitems": "D_LABITEMS",
-    "d_labitems": "D_LABITEMS",
-    "labevents": "LABEVENTS",
-    "chartitems": "D_ITEMS",
-    "diagnoses": "DIAGNOSES_ICD",
-    "diagnosis": "DIAGNOSES_ICD",
-    "diagnosis_table": "DIAGNOSES_ICD",
-    "procedures": "PROCEDURES_ICD",
-    "procedure_table": "PROCEDURES_ICD",
-    "medical_procedures": "PROCEDURES_ICD",
-    "prescription": "PRESCRIPTIONS",
-    "med_orders": "PRESCRIPTIONS",
-    "med_order": "PRESCRIPTIONS",
-    "medication_orders": "PRESCRIPTIONS",
-    "medication_order": "PRESCRIPTIONS",
-    "drug_orders": "PRESCRIPTIONS",
-    "drug_order": "PRESCRIPTIONS",
-    "pharmacy_orders": "PRESCRIPTIONS",
-    "pharmacy_order": "PRESCRIPTIONS",
-    "medication_data": "PRESCRIPTIONS",
-    "patient_admissions": "ADMISSIONS",
-    "admission": "ADMISSIONS",
-    "patient": "PATIENTS",
-    "patient_table": "PATIENTS",
-    "patients_table": "PATIENTS",
-    "microbiology": "MICROBIOLOGYEVENTS",
-    "microbiology_events": "MICROBIOLOGYEVENTS",
-    "microbiology_event": "MICROBIOLOGYEVENTS",
-    "microbiology_table": "MICROBIOLOGYEVENTS",
-    "microbiology_results": "MICROBIOLOGYEVENTS",
-    "micro_events": "MICROBIOLOGYEVENTS",
-    "microbiology_tests": "MICROBIOLOGYEVENTS",
-    "organisms_table": "MICROBIOLOGYEVENTS",
-    "organism_table": "MICROBIOLOGYEVENTS",
-    "organisms": "MICROBIOLOGYEVENTS",
-    "antibiotics_usage": "MICROBIOLOGYEVENTS",
-    "antibiotics": "MICROBIOLOGYEVENTS",
-    "antibiotic": "MICROBIOLOGYEVENTS",
-    "drugs": "PRESCRIPTIONS",
-    "service_transitions": "SERVICES",
-    "transitions": "SERVICES",
-    "service": "SERVICES",
-    "services_table": "SERVICES",
-    "transfer": "TRANSFERS",
-    "transfers_table": "TRANSFERS",
-    "emar_details": "EMAR_DETAIL",
-    "emar_detail": "EMAR_DETAIL",
-    "emar_detail_table": "EMAR_DETAIL",
-    "emar_events": "EMAR",
-    "emar": "EMAR",
-    "emar_table": "EMAR",
-    "emar_records": "EMAR",
-    "emar_record": "EMAR",
-    "medication_records": "EMAR",
-    "med_admin": "EMAR",
-    "med_admins": "EMAR",
-    "med_admin_event": "EMAR",
-    "med_admin_events": "EMAR",
-    "med_admin_records": "EMAR",
-    "med_administration": "EMAR",
-    "medication_administration": "EMAR",
-    "medication_administration_records": "EMAR",
-    "med_admin_detail": "EMAR_DETAIL",
-    "med_admin_details": "EMAR_DETAIL",
-    "medication_administration_detail": "EMAR_DETAIL",
-    "medication_administration_details": "EMAR_DETAIL",
-    "procedures_table": "PROCEDURES_ICD",
-    "events": "CHARTEVENTS",
-    "vitals": "CHARTEVENTS",
-    "vital_signs": "CHARTEVENTS",
-    "vital_sign": "CHARTEVENTS",
-    "vitalsigns": "CHARTEVENTS",
-    "input_events": "INPUTEVENTS",
-    "input_event": "INPUTEVENTS",
-    "inputevents": "INPUTEVENTS",
-    "intake_events": "INPUTEVENTS",
-    "infusion_events": "INPUTEVENTS",
-    "infusions": "INPUTEVENTS",
-    "inputs": "INPUTEVENTS",
-    "output_events": "OUTPUTEVENTS",
-    "output_event": "OUTPUTEVENTS",
-    "outputevents": "OUTPUTEVENTS",
-    "urine_output": "OUTPUTEVENTS",
-    "urine_outputs": "OUTPUTEVENTS",
-    "production_data": "OUTPUTEVENTS",
-}
+def _schema_hints() -> dict[str, Any]:
+    return load_sql_schema_hints()
 
-_COLUMN_ALIASES = {
-    "admission_date": "ADMITTIME",
-    "admission_datetime": "ADMITTIME",
-    "admission_location": "ADMISSION_LOCATION",
-    "admission_time": "ADMITTIME",
-    "admitted_date": "ADMITTIME",
-    "admitted_time": "ADMITTIME",
-    "admitted_datetime": "ADMITTIME",
-    "admit_date": "ADMITTIME",
-    "discharge_date": "DISCHTIME",
-    "discharge_datetime": "DISCHTIME",
-    "discharge_location": "DISCHARGE_LOCATION",
-    "discharge_time": "DISCHTIME",
-    "death_datetime": "DEATHTIME",
-    "ed_registration_time": "EDREGTIME",
-    "ed_reg_time": "EDREGTIME",
-    "ed_arrival_time": "EDREGTIME",
-    "ed_out_time": "EDOUTTIME",
-    "ed_discharge_time": "EDOUTTIME",
-    "ed_departure_time": "EDOUTTIME",
-    "ed_departure_datetime": "EDOUTTIME",
-    "admit_time": "ADMITTIME",
-    "admit_date_time": "ADMITTIME",
-    "death_time": "DEATHTIME",
-    "icu_stay_id": "STAY_ID",
-    "icustay_id": "STAY_ID",
-    "event_type": "EVENTTYPE",
-    "warning_flag": "WARNING",
-    "drug_name": "DRUG",
-    "formulation": "FORM_RX",
-    "medication_name": "MEDICATION",
-    "medication_id": "MEDICATION",
-    "med_admin_time": "CHARTTIME",
-    "administration_time": "CHARTTIME",
-    "admin_time": "CHARTTIME",
-    "event_text": "EVENT_TXT",
-    "antibiotic_name": "AB_NAME",
-    "organism": "ORG_NAME",
-    "organism_name": "ORG_NAME",
-    "test": "TEST_NAME",
-    "test_name": "TEST_NAME",
-    "specimen_type": "SPEC_TYPE_DESC",
-    "diagnosis_code": "ICD_CODE",
-    "procedure_code": "ICD_CODE",
-    "diagnosis_id": "ICD_CODE",
-    "procedure_id": "ICD_CODE",
-    "proc_code": "ICD_CODE",
-    "diagnosis_title": "LONG_TITLE",
-    "procedure_title": "LONG_TITLE",
-    "title": "LONG_TITLE",
-    "insurance_id": "INSURANCE",
-    "insurance_type": "INSURANCE",
-    "insurance_provider": "INSURANCE",
-    "primary_insurance": "INSURANCE",
-    "admitting_location": "ADMISSION_LOCATION",
-    "admit_location": "ADMISSION_LOCATION",
-    "discharge_loc": "DISCHARGE_LOCATION",
-    "ethnicity": "RACE",
-    "dob": "ANCHOR_AGE",
-    "birthdate": "ANCHOR_AGE",
-    "primary_language": "LANGUAGE",
-    "hospital_death_flag": "HOSPITAL_EXPIRE_FLAG",
-    "expired_in_hospital": "HOSPITAL_EXPIRE_FLAG",
-    "hospital_expire_flag": "HOSPITAL_EXPIRE_FLAG",
-    "admission_type": "ADMISSION_TYPE",
-    "admission_days": "ADMISSION_LENGTH",
-    "icu_los": "LOS",
-    "icu_length_of_stay": "LOS",
-    "icu_length_of_stay_days": "LOS",
-    "icu_admission_date": "INTIME",
-    "icu_admission_time": "INTIME",
-    "icu_discharge_date": "OUTTIME",
-    "icu_discharge_time": "OUTTIME",
-    "icu_in_time": "INTIME",
-    "icu_out_time": "OUTTIME",
-    "current_service": "CURR_SERVICE",
-    "previous_service": "PREV_SERVICE",
-    "service_transition": "CURR_SERVICE",
-    "event_label": "LABEL",
-    "item_label": "LABEL",
-    "lab_item_label": "LABEL",
-    "chart_item_label": "LABEL",
-    "lab_item_id": "ITEMID",
-    "lab_itemid": "ITEMID",
-    "lab_category": "CATEGORY",
-    "lab_fluid": "FLUID",
-    "age": "ANCHOR_AGE",
-    "age_years": "ANCHOR_AGE",
-    "anchor_age_years": "ANCHOR_AGE",
-    "patient_age": "ANCHOR_AGE",
-    "sex": "GENDER",
-    "patient_gender": "GENDER",
-    "patient_sex": "GENDER",
-    "date_of_death": "DOD",
-    "death_date": "DOD",
-    "anchor_year_range": "ANCHOR_YEAR_GROUP",
-    "anchor_year_bin": "ANCHOR_YEAR_GROUP",
-    "anchor_date": "ANCHOR_YEAR",
-    "patient_id": "SUBJECT_ID",
-    "admission_id": "HADM_ID",
-    "hospital_admission_id": "HADM_ID",
-    "event_time": "CHARTTIME",
-    "chart_time": "CHARTTIME",
-    "store_time": "STORETIME",
-    "order_time": "ORDERTIME",
-    "start_time": "STARTTIME",
-    "stop_time": "STOPTIME",
-    "end_time": "ENDTIME",
-    "transfer_time": "TRANSFERTIME",
-    "transfer_start_date": "INTIME",
-    "transfer_end_date": "OUTTIME",
-    "transfer_start": "INTIME",
-    "transfer_end": "OUTTIME",
-    "duration": "DURATION_DAYS",
-    "service_id": "CURR_SERVICE",
-    "service_transition_id": "CURR_SERVICE",
-    "care_unit": "CAREUNIT",
-    "first_care_unit": "FIRST_CAREUNIT",
-    "last_care_unit": "LAST_CAREUNIT",
-    "stay_id": "STAY_ID",
-    "hadm_id": "HADM_ID",
-    "subject_id": "SUBJECT_ID",
-    "encounter_id": "HADM_ID",
-    "visit_id": "HADM_ID",
-    "hospitalization_id": "HADM_ID",
-    "lab_specimen_id": "SPECIMEN_ID",
-    "value_num": "VALUENUM",
-    "numeric_value": "VALUENUM",
-    "numericvalue": "VALUENUM",
-    "result_value": "VALUE",
-    "result_value_num": "VALUENUM",
-    "lab_value": "VALUE",
-    "value_uom": "VALUEUOM",
-    "value_unit": "VALUEUOM",
-    "lab_value_unit": "VALUEUOM",
-    "lab_flag": "FLAG",
-    "priority": "PRIORITY",
-    "reference_range_low": "REF_RANGE_LOWER",
-    "reference_range_high": "REF_RANGE_UPPER",
-    "abnormal_flag": "FLAG",
-    "lab_priority": "PRIORITY",
-    "lab_comment": "COMMENTS",
-    "lab_comments": "COMMENTS",
-    "doses_per_day": "DOSES_PER_24_HRS",
-    "dose_given": "DOSE_GIVEN",
-    "dose_given_unit": "DOSE_GIVEN_UNIT",
-    "dose_due": "DOSE_DUE",
-    "dose_due_unit": "DOSE_DUE_UNIT",
-    "administration_type": "ADMINISTRATION_TYPE",
-    "output_value": "VALUE",
-    "micro_specimen_id": "MICRO_SPECIMEN_ID",
-    "micro_event_id": "MICROEVENT_ID",
-    "specimen_item_id": "SPEC_ITEMID",
-    "specimen_type_desc": "SPEC_TYPE_DESC",
-    "specimen_type": "SPEC_TYPE_DESC",
-    "test_item_id": "TEST_ITEMID",
-    "organism_item_id": "ORG_ITEMID",
-    "antibiotic_item_id": "AB_ITEMID",
-}
 
-_PATIENTS_ONLY_COLS = {
-    "GENDER",
-    "ANCHOR_AGE",
-    "ANCHOR_YEAR",
-    "ANCHOR_YEAR_GROUP",
-    "DOD",
-}
+def _table_aliases() -> dict[str, str]:
+    value = _schema_hints().get("table_aliases")
+    return value if isinstance(value, dict) else {}
 
-_ADMISSIONS_ONLY_COLS = {
-    "ADMISSION_TYPE",
-    "ADMISSION_LOCATION",
-    "DISCHARGE_LOCATION",
-    "INSURANCE",
-    "MARITAL_STATUS",
-    "RACE",
-    "EDREGTIME",
-    "EDOUTTIME",
-    "HOSPITAL_EXPIRE_FLAG",
-    "ADMITTIME",
-    "DISCHTIME",
-}
 
-_TABLES_WITH_SUBJECT_ID = {
-    "ADMISSIONS",
-    "ICUSTAYS",
-    "CHARTEVENTS",
-    "DATETIMEEVENTS",
-    "LABEVENTS",
-    "MICROBIOLOGYEVENTS",
-    "PRESCRIPTIONS",
-    "DIAGNOSES_ICD",
-    "PROCEDURES_ICD",
-    "SERVICES",
-    "TRANSFERS",
-    "PATIENTS",
-    "EMAR",
-    "EMAR_DETAIL",
-    "INPUTEVENTS",
-    "OUTPUTEVENTS",
-    "INGREDIENTEVENTS",
-    "PROCEDUREEVENTS",
-    "POE",
-}
+def _column_aliases() -> dict[str, str]:
+    value = _schema_hints().get("column_aliases")
+    return value if isinstance(value, dict) else {}
 
-_TABLES_WITH_HADM_ID = {
-    "ADMISSIONS",
-    "ICUSTAYS",
-    "CHARTEVENTS",
-    "DATETIMEEVENTS",
-    "LABEVENTS",
-    "MICROBIOLOGYEVENTS",
-    "PRESCRIPTIONS",
-    "DIAGNOSES_ICD",
-    "PROCEDURES_ICD",
-    "SERVICES",
-    "TRANSFERS",
-    "EMAR",
-    "EMAR_DETAIL",
-    "INPUTEVENTS",
-    "OUTPUTEVENTS",
-    "INGREDIENTEVENTS",
-    "PROCEDUREEVENTS",
-    "POE",
-}
 
-_MICRO_ONLY_COLS = {
-    "MICRO_SPECIMEN_ID",
-    "MICROEVENT_ID",
-    "SPEC_ITEMID",
-    "SPEC_TYPE_DESC",
-    "TEST_ITEMID",
-    "TEST_NAME",
-    "ORG_ITEMID",
-    "ORG_NAME",
-    "AB_ITEMID",
-    "AB_NAME",
-    "ISOLATE_NUM",
-    "QUANTITY",
-    "DILUTION_TEXT",
-    "DILUTION_COMPARISON",
-    "DILUTION_VALUE",
-    "INTERPRETATION",
-}
+def _patients_only_cols() -> set[str]:
+    value = _schema_hints().get("patients_only_cols")
+    return value if isinstance(value, set) else set()
 
-_TIMESTAMP_COLS = {
-    "ADMITTIME",
-    "DISCHTIME",
-    "DEATHTIME",
-    "EDREGTIME",
-    "EDOUTTIME",
-    "INTIME",
-    "OUTTIME",
-    "STARTTIME",
-    "STOPTIME",
-    "ENDTIME",
-    "CHARTTIME",
-    "STORETIME",
-    "TRANSFERTIME",
-    "CHARTDATE",
-}
+
+def _admissions_only_cols() -> set[str]:
+    value = _schema_hints().get("admissions_only_cols")
+    return value if isinstance(value, set) else set()
+
+
+def _tables_with_subject_id() -> set[str]:
+    value = _schema_hints().get("tables_with_subject_id")
+    return value if isinstance(value, set) else set()
+
+
+def _tables_with_hadm_id() -> set[str]:
+    value = _schema_hints().get("tables_with_hadm_id")
+    return value if isinstance(value, set) else set()
+
+
+def _micro_only_cols() -> set[str]:
+    value = _schema_hints().get("micro_only_cols")
+    return value if isinstance(value, set) else set()
+
+
+def _timestamp_cols() -> set[str]:
+    value = _schema_hints().get("timestamp_cols")
+    return value if isinstance(value, set) else set()
 
 _HAS_ICU_RE = re.compile(r"\bHAS_ICU_STAY\b\s*=\s*(?:'Y'|1|TRUE)", re.IGNORECASE)
 _ICU_STAY_RE = re.compile(r"\bICU_STAY\b\s*=\s*(?:'Y'|'YES'|1|TRUE)", re.IGNORECASE)
@@ -647,16 +333,33 @@ def _rewrite_oracle_syntax(sql: str) -> tuple[str, list[str]]:
 def _apply_schema_mappings(sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
+    rules_cfg = load_sql_postprocess_rules().get("schema_aliases", {})
+    table_aliases_cfg = rules_cfg.get("table_aliases", {})
+    column_aliases_cfg = rules_cfg.get("column_aliases", {})
+    table_aliases = dict(_table_aliases())
+    column_aliases = dict(_column_aliases())
+    if isinstance(table_aliases_cfg, dict):
+        table_aliases.update({
+            str(src): str(dest)
+            for src, dest in table_aliases_cfg.items()
+            if str(src).strip() and str(dest).strip()
+        })
+    if isinstance(column_aliases_cfg, dict):
+        column_aliases.update({
+            str(src): str(dest)
+            for src, dest in column_aliases_cfg.items()
+            if str(src).strip() and str(dest).strip()
+        })
 
     # Table name replacements (case-insensitive, word boundaries)
-    for src, dest in _TABLE_ALIASES.items():
+    for src, dest in table_aliases.items():
         pattern = re.compile(rf"\b{re.escape(src)}\b", re.IGNORECASE)
         if pattern.search(text):
             text = pattern.sub(dest, text)
             rules.append(f"table:{src}->{dest}")
 
     # Column name replacements (case-insensitive, word boundaries)
-    for src, dest in _COLUMN_ALIASES.items():
+    for src, dest in column_aliases.items():
         pattern = re.compile(rf"\b{re.escape(src)}\b", re.IGNORECASE)
         if pattern.search(text):
             text = pattern.sub(dest, text)
@@ -674,7 +377,7 @@ def _ensure_patients_join(sql: str) -> tuple[str, list[str]]:
         return text, rules
 
     # Trigger only if patients-only columns appear unqualified
-    needed = [c for c in _PATIENTS_ONLY_COLS if re.search(rf"(?<!\.)\b{c}\b", text, re.IGNORECASE)]
+    needed = [c for c in _patients_only_cols() if re.search(rf"(?<!\.)\b{c}\b", text, re.IGNORECASE)]
     if not needed:
         return text, rules
 
@@ -688,7 +391,7 @@ def _ensure_patients_join(sql: str) -> tuple[str, list[str]]:
     if base_alias.upper() in {"WHERE", "JOIN", "GROUP", "ORDER"}:
         base_alias = base_table
 
-    if base_table.upper() not in _TABLES_WITH_SUBJECT_ID:
+    if base_table.upper() not in _tables_with_subject_id():
         return text, rules
 
     # Insert JOIN before WHERE (or end if WHERE missing)
@@ -724,7 +427,7 @@ def _ensure_admissions_join(sql: str) -> tuple[str, list[str]]:
     if re.search(r"\bADMISSIONS\b", text, re.IGNORECASE):
         return text, rules
 
-    needed = [c for c in _ADMISSIONS_ONLY_COLS if re.search(rf"(?<!\.)\b{c}\b", text, re.IGNORECASE)]
+    needed = [c for c in _admissions_only_cols() if re.search(rf"(?<!\.)\b{c}\b", text, re.IGNORECASE)]
     if not needed:
         return text, rules
 
@@ -736,7 +439,7 @@ def _ensure_admissions_join(sql: str) -> tuple[str, list[str]]:
     if base_alias.upper() in {"WHERE", "JOIN", "GROUP", "ORDER"}:
         base_alias = base_table
 
-    if base_table.upper() not in _TABLES_WITH_SUBJECT_ID:
+    if base_table.upper() not in _tables_with_subject_id():
         return text, rules
 
     join_clause = f" JOIN ADMISSIONS a ON {base_alias}.SUBJECT_ID = a.SUBJECT_ID"
@@ -758,7 +461,7 @@ def _ensure_microbiology_table(sql: str) -> tuple[str, list[str]]:
     if re.search(r"\bMICROBIOLOGYEVENTS\b", text, re.IGNORECASE):
         return text, rules
 
-    needed = [c for c in _MICRO_ONLY_COLS if re.search(rf"(?<!\.)\b{c}\b", text, re.IGNORECASE)]
+    needed = [c for c in _micro_only_cols() if re.search(rf"(?<!\.)\b{c}\b", text, re.IGNORECASE)]
     if not needed:
         return text, rules
 
@@ -1722,7 +1425,7 @@ def _ensure_icd_join(question: str, sql: str) -> tuple[str, list[str]]:
     if base_alias.upper() in {"WHERE", "JOIN", "GROUP", "ORDER"}:
         base_alias = base_table
 
-    if base_table.upper() not in _TABLES_WITH_SUBJECT_ID:
+    if base_table.upper() not in _tables_with_subject_id():
         return text, rules
 
     join_clause = f" JOIN {target} d ON {base_alias}.SUBJECT_ID = d.SUBJECT_ID"
@@ -1757,7 +1460,7 @@ def _rewrite_to_date_cast(sql: str) -> tuple[str, list[str]]:
         nonlocal changed
         col = match.group(1)
         col_name = col.split(".")[-1].upper()
-        if col_name in _TIMESTAMP_COLS:
+        if col_name in _timestamp_cols():
             changed = True
             return f"CAST({col} AS DATE)"
         return match.group(0)
@@ -2142,230 +1845,64 @@ def _ensure_avg_not_null(sql: str) -> tuple[str, list[str]]:
     return text, rules
 
 
-def _rewrite_admissions_with_icd(question: str, sql: str) -> tuple[str, list[str]]:
+def _strip_inpatient_admission_type_filter(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
+    if not re.search(r"\bADMISSION_TYPE\b\s*=\s*'INPATIENT'", text, re.IGNORECASE):
+        return text, rules
+
     q = question.lower()
-    if "admission" not in q or "code" not in q:
-        return text, rules
-
-    target = None
-    if "diagnos" in q:
-        target = "DIAGNOSES_ICD"
-    elif "procedur" in q:
-        target = "PROCEDURES_ICD"
-    if not target:
-        return text, rules
-
-    if re.search(r"\bADMISSIONS\b", text, re.IGNORECASE) and re.search(rf"\b{target}\b", text, re.IGNORECASE):
-        return text, rules
-
-    text = (
-        f"SELECT COUNT(DISTINCT a.HADM_ID) AS cnt "
-        f"FROM ADMISSIONS a JOIN {target} d "
-        f"ON a.SUBJECT_ID = d.SUBJECT_ID AND a.HADM_ID = d.HADM_ID "
-        f"WHERE d.ICD_CODE IS NOT NULL"
-    )
-    rules.append("admissions_with_icd_join")
-    return text, rules
-
-
-def _rewrite_gender_by_icd(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
-    text = sql
-    q = question.lower()
-    if "gender" not in q:
-        return text, rules
-
-    if "diagnos" in q:
-        text = (
-            "SELECT p.GENDER, COUNT(*) AS cnt "
-            "FROM DIAGNOSES_ICD d JOIN PATIENTS p ON d.SUBJECT_ID = p.SUBJECT_ID "
-            "WHERE p.GENDER IS NOT NULL GROUP BY p.GENDER ORDER BY cnt DESC"
+    explicit_admission_type_intent = any(
+        token in q
+        for token in (
+            "admission type",
+            "admission_type",
+            "encounter class",
+            "admit type",
+            "입원 유형",
+            "입원 타입",
+            "입원 형태",
+            "입원 종류",
         )
-        rules.append("diagnoses_by_gender_canonical")
-        return text, rules
-
-    if "procedur" in q:
-        text = (
-            "SELECT p.GENDER, COUNT(*) AS cnt "
-            "FROM PROCEDURES_ICD pr JOIN PATIENTS p ON pr.SUBJECT_ID = p.SUBJECT_ID "
-            "WHERE p.GENDER IS NOT NULL GROUP BY p.GENDER ORDER BY cnt DESC"
-        )
-        rules.append("procedures_by_gender_canonical")
-        return text, rules
-
-    return text, rules
-
-
-def _rewrite_anchor_age_by_admission_type(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
-    q = question.lower()
-    if "anchor age" not in q:
-        return sql, rules
-    if "admission type" not in q and "admission" not in q:
-        return sql, rules
-
-    text = (
-        "SELECT a.ADMISSION_TYPE, AVG(p.ANCHOR_AGE) AS avg_age "
-        "FROM ADMISSIONS a JOIN PATIENTS p ON a.SUBJECT_ID = p.SUBJECT_ID "
-        "WHERE a.ADMISSION_TYPE IS NOT NULL AND p.ANCHOR_AGE IS NOT NULL "
-        "GROUP BY a.ADMISSION_TYPE"
     )
-    rules.append("anchor_age_by_admission_type_canonical")
-    return text, rules
-
-
-def _rewrite_icu_stays_by_gender(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
-    q = question.lower()
-    if "gender" not in q:
-        return sql, rules
-    if "icu stay" not in q and "icu stays" not in q and "icu" not in q:
-        return sql, rules
-
-    text = (
-        "SELECT p.GENDER, COUNT(*) AS cnt "
-        "FROM ICUSTAYS i JOIN PATIENTS p ON i.SUBJECT_ID = p.SUBJECT_ID "
-        "WHERE p.GENDER IS NOT NULL GROUP BY p.GENDER ORDER BY cnt DESC"
-    )
-    rules.append("icu_stays_by_gender_canonical")
-    return text, rules
-
-
-def _rewrite_services_by_gender(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
-    q = question.lower()
-    if "gender" not in q or "service" not in q:
-        return sql, rules
-
-    text = (
-        "SELECT p.GENDER, COUNT(*) AS cnt "
-        "FROM SERVICES s JOIN PATIENTS p ON s.SUBJECT_ID = p.SUBJECT_ID "
-        "WHERE p.GENDER IS NOT NULL GROUP BY p.GENDER ORDER BY cnt DESC"
-    )
-    rules.append("services_by_gender_canonical")
-    return text, rules
-
-
-def _rewrite_avg_per_admission(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
-    text = sql
-    q = question.lower()
-    if "average" not in q or "per admission" not in q:
+    if explicit_admission_type_intent:
         return text, rules
 
-    if "diagnos" in q:
-        text = (
-            "SELECT AVG(diag_cnt) AS avg_diag "
-            "FROM (SELECT HADM_ID, COUNT(*) AS diag_cnt FROM DIAGNOSES_ICD "
-            "WHERE HADM_ID IS NOT NULL GROUP BY HADM_ID) "
-            "WHERE diag_cnt IS NOT NULL"
-        )
-        rules.append("avg_diagnoses_per_admission_canonical")
-        return text, rules
+    column_pattern = r"(?:[A-Za-z0-9_]+\.)?ADMISSION_TYPE"
+    value_pattern = r"'INPATIENT'"
 
-    if "procedur" in q:
-        text = (
-            "SELECT AVG(proc_cnt) AS avg_proc "
-            "FROM (SELECT HADM_ID, COUNT(*) AS proc_cnt FROM PROCEDURES_ICD "
-            "WHERE HADM_ID IS NOT NULL GROUP BY HADM_ID) "
-            "WHERE proc_cnt IS NOT NULL"
-        )
-        rules.append("avg_procedures_per_admission_canonical")
-        return text, rules
-
-    return text, rules
-
-
-def _rewrite_admissions_with_icu(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
-    text = sql
-    q = question.lower()
-    if "admission" not in q or "icu" not in q:
-        return text, rules
-    if re.search(r"\bADMISSIONS\b", text, re.IGNORECASE) and re.search(r"\bICUSTAYS\b", text, re.IGNORECASE):
-        return text, rules
-    if not re.search(r"\bICUSTAYS\b", text, re.IGNORECASE):
-        return text, rules
-
-    # Replace FROM with ADMISSIONS join ICUSTAYS, preserving WHERE.
-    pattern = re.compile(
-        r"\bfrom\s+ICUSTAYS\b(?:\s+(?!WHERE|JOIN|GROUP|ORDER|HAVING)([A-Za-z0-9_]+))?",
-        re.IGNORECASE,
+    # WHERE admission_type='INPATIENT' AND ...
+    text = re.sub(
+        rf"\bWHERE\s+{column_pattern}\s*=\s*{value_pattern}\s+AND\s+",
+        "WHERE ",
+        text,
+        flags=re.IGNORECASE,
     )
-    match = pattern.search(text)
-    if match:
-        icu_alias = match.group(1) or "i"
-        replacement = (
-            f"FROM ADMISSIONS a JOIN ICUSTAYS {icu_alias} "
-            f"ON a.SUBJECT_ID = {icu_alias}.SUBJECT_ID AND a.HADM_ID = {icu_alias}.HADM_ID"
-        )
-        text = pattern.sub(replacement, text, count=1)
-        text = re.sub(r"\bWHERE\s+HADM_ID\b", "WHERE a.HADM_ID", text, flags=re.IGNORECASE)
-    text = re.sub(r"COUNT\(DISTINCT\s+HADM_ID\)", "COUNT(*)", text, flags=re.IGNORECASE)
-    rules.append("admissions_with_icu_join")
-    return text, rules
-
-
-def _rewrite_er_to_icu_hospital_los_compare(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
-    q = question.lower()
-
-    kr_hit = (
-        "응급실" in question
-        and "icu" in q
-        and ("los" in q or "재원" in question)
-        and ("바로" in question or "거쳐" in question or "일반 병동" in question)
+    # ... AND admission_type='INPATIENT'
+    text = re.sub(
+        rf"\s+AND\s+{column_pattern}\s*=\s*{value_pattern}",
+        "",
+        text,
+        flags=re.IGNORECASE,
     )
-    en_hit = (
-        "emergency" in q
-        and "icu" in q
-        and ("los" in q or "length of stay" in q)
-        and ("direct" in q or "ward" in q or "via" in q)
+    # WHERE admission_type='INPATIENT' GROUP/ORDER/HAVING ...
+    text = re.sub(
+        rf"\bWHERE\s+{column_pattern}\s*=\s*{value_pattern}\s+(GROUP\s+BY|ORDER\s+BY|HAVING)\b",
+        r" \1",
+        text,
+        flags=re.IGNORECASE,
     )
-    if not kr_hit and not en_hit:
-        return sql, rules
-
-    text = (
-        "WITH first_icu AS ( "
-        "SELECT i.SUBJECT_ID, i.HADM_ID, MIN(i.INTIME) AS FIRST_ICU_INTIME "
-        "FROM ICUSTAYS i "
-        "WHERE i.INTIME IS NOT NULL "
-        "GROUP BY i.SUBJECT_ID, i.HADM_ID "
-        "), "
-        "pre_icu AS ( "
-        "SELECT f.SUBJECT_ID, f.HADM_ID, "
-        "MAX(CASE WHEN t.CAREUNIT IS NOT NULL AND UPPER(t.CAREUNIT) NOT LIKE '%ICU%' THEN 1 ELSE 0 END) AS HAS_NON_ICU_BEFORE "
-        "FROM first_icu f "
-        "LEFT JOIN TRANSFERS t "
-        "ON t.SUBJECT_ID = f.SUBJECT_ID "
-        "AND t.HADM_ID = f.HADM_ID "
-        "AND NVL(t.OUTTIME, t.INTIME) < f.FIRST_ICU_INTIME "
-        "GROUP BY f.SUBJECT_ID, f.HADM_ID "
-        "), "
-        "path_labeled AS ( "
-        "SELECT f.SUBJECT_ID, f.HADM_ID, "
-        "CASE "
-        "WHEN UPPER(NVL(a.ADMISSION_LOCATION, '')) LIKE '%EMERGENCY%' AND NVL(p.HAS_NON_ICU_BEFORE, 0) = 0 THEN 'Direct_ER_to_ICU' "
-        "WHEN NVL(p.HAS_NON_ICU_BEFORE, 0) = 1 THEN 'Ward_to_ICU' "
-        "ELSE 'Other' "
-        "END AS ICU_PATH "
-        "FROM first_icu f "
-        "JOIN ADMISSIONS a ON a.SUBJECT_ID = f.SUBJECT_ID AND a.HADM_ID = f.HADM_ID "
-        "LEFT JOIN pre_icu p ON p.SUBJECT_ID = f.SUBJECT_ID AND p.HADM_ID = f.HADM_ID "
-        ") "
-        "SELECT l.ICU_PATH, COUNT(*) AS ADMISSION_CNT, "
-        "AVG(CAST(a.DISCHTIME AS DATE) - CAST(a.ADMITTIME AS DATE)) AS AVG_HOSPITAL_LOS "
-        "FROM path_labeled l "
-        "JOIN ADMISSIONS a ON a.SUBJECT_ID = l.SUBJECT_ID AND a.HADM_ID = l.HADM_ID "
-        "WHERE l.ICU_PATH IN ('Direct_ER_to_ICU', 'Ward_to_ICU') "
-        "AND a.ADMITTIME IS NOT NULL "
-        "AND a.DISCHTIME IS NOT NULL "
-        "GROUP BY l.ICU_PATH "
-        "ORDER BY l.ICU_PATH"
+    # WHERE admission_type='INPATIENT' (end)
+    text = re.sub(
+        rf"\bWHERE\s+{column_pattern}\s*=\s*{value_pattern}\s*(;)?\s*$",
+        r"\1",
+        text,
+        flags=re.IGNORECASE,
     )
-    rules.append("er_vs_ward_to_icu_hospital_los_canonical")
+    text = re.sub(r"\bWHERE\s+AND\b", "WHERE", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if text != sql:
+        rules.append("strip_inpatient_admission_type_filter")
     return text, rules
 
 
@@ -2537,7 +2074,7 @@ def _rewrite_icustays_flag(sql: str) -> tuple[str, list[str]]:
             base_alias = m.group(2) or base_table
             if base_alias.upper() in {"WHERE", "JOIN", "GROUP", "ORDER"}:
                 base_alias = base_table
-            if base_table.upper() in _TABLES_WITH_HADM_ID:
+            if base_table.upper() in _tables_with_hadm_id():
                 alias = base_alias
 
     replacement = "HADM_ID IN (SELECT HADM_ID FROM ICUSTAYS)"
@@ -2562,7 +2099,7 @@ def _rewrite_icustays_not_null(sql: str) -> tuple[str, list[str]]:
             base_alias = m.group(2) or base_table
             if base_alias.upper() in {"WHERE", "JOIN", "GROUP", "ORDER"}:
                 base_alias = base_table
-            if base_table.upper() in _TABLES_WITH_HADM_ID:
+            if base_table.upper() in _tables_with_hadm_id():
                 alias = base_alias
 
     replacement = "HADM_ID IN (SELECT HADM_ID FROM ICUSTAYS)"
@@ -2706,7 +2243,7 @@ def _normalize_timestamp_diffs(sql: str) -> tuple[str, list[str]]:
         b = match.group(2)
         a_col = a.split(".")[-1].upper()
         b_col = b.split(".")[-1].upper()
-        if a_col in _TIMESTAMP_COLS and b_col in _TIMESTAMP_COLS:
+        if a_col in _timestamp_cols() and b_col in _timestamp_cols():
             return f"CAST({a} AS DATE) - CAST({b} AS DATE)"
         return match.group(0)
 
@@ -2714,6 +2251,190 @@ def _normalize_timestamp_diffs(sql: str) -> tuple[str, list[str]]:
     if new_text != text:
         rules.append("timestamp_diff_cast_to_date")
     return new_text, rules
+
+
+def _rewrite_diagnosis_title_filter_with_icd_map(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+    diagnosis_cfg = load_sql_postprocess_rules().get("diagnosis_rewrite", {})
+    if not bool(diagnosis_cfg.get("enabled", True)):
+        return text, rules
+
+    table_name = str(diagnosis_cfg.get("table_name") or "DIAGNOSES_ICD").strip().upper()
+    if not table_name:
+        table_name = "DIAGNOSES_ICD"
+    if not re.search(rf"\b{re.escape(table_name)}\b", text, re.IGNORECASE):
+        return text, rules
+    if not _DIAGNOSIS_TITLE_FILTER_RE.search(text):
+        return text, rules
+
+    matched = match_diagnosis_mappings(question)
+    if not matched:
+        return text, rules
+
+    prefixes: list[str] = []
+    for item in matched:
+        for prefix in item.get("icd_prefixes", []):
+            value = str(prefix).strip().upper()
+            if not value or value in prefixes:
+                continue
+            prefixes.append(value)
+    if not prefixes:
+        return text, rules
+
+    dx_alias = _find_table_alias(text, table_name) or table_name
+    like_template = str(diagnosis_cfg.get("icd_like_template") or "{alias}.ICD_CODE LIKE '{prefix}%'")
+    join_operator = str(diagnosis_cfg.get("join_operator") or " OR ")
+    predicates = []
+    for prefix in prefixes:
+        try:
+            predicates.append(like_template.format(alias=dx_alias, prefix=prefix))
+        except Exception:
+            predicates.append(f"{dx_alias}.ICD_CODE LIKE '{prefix}%'")
+    icd_filter = "(" + join_operator.join(predicates) + ")"
+    rewritten = _DIAGNOSIS_TITLE_FILTER_RE.sub(icd_filter, text)
+    if rewritten != text:
+        rules.append("diagnosis_title_filter_to_icd_prefix")
+    return rewritten, rules
+
+
+def _rewrite_mortality_avg_under_diagnosis_join(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+    mortality_cfg = load_sql_postprocess_rules().get("mortality_rewrite", {})
+    if not bool(mortality_cfg.get("enabled", True)):
+        return text, rules
+
+    join_table = str(mortality_cfg.get("join_table") or "DIAGNOSES_ICD").strip().upper() or "DIAGNOSES_ICD"
+    admissions_table = str(mortality_cfg.get("admissions_table") or "ADMISSIONS").strip().upper() or "ADMISSIONS"
+    outcome_column = str(mortality_cfg.get("outcome_column") or "HOSPITAL_EXPIRE_FLAG").strip().upper() or "HOSPITAL_EXPIRE_FLAG"
+    key_column = str(mortality_cfg.get("key_column") or "HADM_ID").strip().upper() or "HADM_ID"
+    numerator_template = str(
+        mortality_cfg.get("numerator_template")
+        or "COUNT(DISTINCT CASE WHEN {expire_ref} = 1 THEN {key_ref} END)"
+    )
+    denominator_template = str(
+        mortality_cfg.get("denominator_template")
+        or "NULLIF(COUNT(DISTINCT {key_ref}), 0)"
+    )
+
+    if not re.search(rf"\bJOIN\s+{re.escape(join_table)}\b", text, re.IGNORECASE):
+        return text, rules
+    if not re.search(r"\bAVG\s*\(", text, re.IGNORECASE):
+        return text, rules
+    if not re.search(rf"\b{re.escape(outcome_column)}\b", text, re.IGNORECASE):
+        return text, rules
+
+    adm_alias = _find_table_alias(text, admissions_table)
+    key_ref = f"{adm_alias}.{key_column}" if adm_alias else key_column
+    expire_ref = f"{adm_alias}.{outcome_column}" if adm_alias else outcome_column
+    try:
+        numerator_expr = numerator_template.format(expire_ref=expire_ref, key_ref=key_ref)
+    except Exception:
+        numerator_expr = f"COUNT(DISTINCT CASE WHEN {expire_ref} = 1 THEN {key_ref} END)"
+    try:
+        denominator_expr = denominator_template.format(key_ref=key_ref, expire_ref=expire_ref)
+    except Exception:
+        denominator_expr = f"NULLIF(COUNT(DISTINCT {key_ref}), 0)"
+    ratio_expr = f"{numerator_expr} / {denominator_expr}"
+
+    expire_ref_pattern = re.escape(expire_ref)
+    changed = False
+
+    direct_avg_re = re.compile(rf"AVG\s*\(\s*{expire_ref_pattern}\s*\)", re.IGNORECASE)
+    rewritten = direct_avg_re.sub(ratio_expr, text)
+    if rewritten != text:
+        changed = True
+        text = rewritten
+
+    case_avg_re = re.compile(
+        rf"AVG\s*\(\s*CASE\s+WHEN\s+{expire_ref_pattern}\s*=\s*1\s+THEN\s+1\s+ELSE\s+0\s+END\s*\)",
+        re.IGNORECASE,
+    )
+    rewritten = case_avg_re.sub(ratio_expr, text)
+    if rewritten != text:
+        changed = True
+        text = rewritten
+
+    if changed:
+        rules.append("mortality_avg_to_distinct_hadm_ratio")
+    return text, rules
+
+
+def _add_icd_version_for_prefix_filters(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+    version_cfg = load_sql_postprocess_rules().get("icd_version_inference", {})
+    if not bool(version_cfg.get("enabled", True)):
+        return text, rules
+
+    table_name = str(version_cfg.get("table_name") or "DIAGNOSES_ICD").strip().upper() or "DIAGNOSES_ICD"
+    version_column = str(version_cfg.get("version_column") or "ICD_VERSION").strip().upper() or "ICD_VERSION"
+    predicate_template = str(
+        version_cfg.get("predicate_template")
+        or "({version_col} = {version} AND {code_expr} LIKE '{prefix}%')"
+    )
+    try:
+        letter_version = int(version_cfg.get("letter_prefix_version", 10))
+    except Exception:
+        letter_version = 10
+    try:
+        digit_version = int(version_cfg.get("digit_prefix_version", 9))
+    except Exception:
+        digit_version = 9
+
+    if not re.search(rf"\b{re.escape(table_name)}\b", text, re.IGNORECASE):
+        return text, rules
+    if re.search(rf"\b{re.escape(version_column)}\b", text, re.IGNORECASE):
+        return text, rules
+    if not _ICD_CODE_LIKE_RE.search(text):
+        return text, rules
+
+    changed = False
+
+    def repl(match: re.Match) -> str:
+        nonlocal changed
+        lhs = match.group("lhs")
+        prefix = match.group("prefix").strip()
+        if not prefix:
+            return match.group(0)
+        first = prefix[0]
+        if first.isalpha():
+            version = letter_version
+        elif first.isdigit():
+            version = digit_version
+        else:
+            return match.group(0)
+        version_col = f"{lhs.rsplit('.', 1)[0]}.{version_column}" if "." in lhs else version_column
+        changed = True
+        try:
+            return predicate_template.format(
+                version_col=version_col,
+                version=version,
+                code_expr=lhs,
+                prefix=prefix,
+            )
+        except Exception:
+            return f"({version_col} = {version} AND {lhs} LIKE '{prefix}%')"
+
+    rewritten = _ICD_CODE_LIKE_RE.sub(repl, text)
+    if changed and rewritten != text:
+        rules.append("add_icd_version_to_prefix_filters")
+        return rewritten, rules
+    return text, rules
+
+
+def _quote_to_char_format_literals(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+    rewritten = _TO_CHAR_BARE_FMT_RE.sub(
+        lambda m: f"TO_CHAR({m.group('expr').strip()}, '{m.group('fmt').upper()}')",
+        text,
+    )
+    if rewritten != text:
+        rules.append("quote_to_char_format_literal")
+        return rewritten, rules
+    return text, rules
 
 
 def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
@@ -2872,7 +2593,16 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     titled, title_rules = _ensure_long_title_join(proc_cleanup_fixed)
     rules.extend(title_rules)
 
-    timed, time_rules = _normalize_timestamp_diffs(titled)
+    diagnosis_map_fixed, diagnosis_map_rules = _rewrite_diagnosis_title_filter_with_icd_map(q, titled)
+    rules.extend(diagnosis_map_rules)
+
+    icd_version_fixed, icd_version_rules = _add_icd_version_for_prefix_filters(diagnosis_map_fixed)
+    rules.extend(icd_version_rules)
+
+    mortality_rate_fixed, mortality_rate_rules = _rewrite_mortality_avg_under_diagnosis_join(icd_version_fixed)
+    rules.extend(mortality_rate_rules)
+
+    timed, time_rules = _normalize_timestamp_diffs(mortality_rate_fixed)
     rules.extend(time_rules)
 
     deduped, dedupe_rules = _dedupe_table_alias(timed)
@@ -2941,7 +2671,10 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     avg_not_null_fixed, avg_not_null_rules = _ensure_avg_not_null(grouped_filtered)
     rules.extend(avg_not_null_rules)
 
-    ordered, order_rules = _ensure_order_by_count(q, avg_not_null_fixed)
+    admission_type_fixed, admission_type_rules = _strip_inpatient_admission_type_filter(q, avg_not_null_fixed)
+    rules.extend(admission_type_rules)
+
+    ordered, order_rules = _ensure_order_by_count(q, admission_type_fixed)
     rules.extend(order_rules)
 
     ordered2, order_alias_rules = _fix_order_by_bad_alias(ordered)
@@ -2953,31 +2686,9 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     update_stripped, update_rules = _strip_for_update(ordered3)
     rules.extend(update_rules)
 
-    admissions_icd_fixed, admissions_icd_rules = _rewrite_admissions_with_icd(q, update_stripped)
-    rules.extend(admissions_icd_rules)
-
-    gender_fixed, gender_rules = _rewrite_gender_by_icd(q, admissions_icd_fixed)
-    rules.extend(gender_rules)
-
-    anchor_age_fixed, anchor_age_rules = _rewrite_anchor_age_by_admission_type(q, gender_fixed)
-    rules.extend(anchor_age_rules)
-
-    icu_gender_fixed, icu_gender_rules = _rewrite_icu_stays_by_gender(q, anchor_age_fixed)
-    rules.extend(icu_gender_rules)
-
-    services_gender_fixed, services_gender_rules = _rewrite_services_by_gender(q, icu_gender_fixed)
-    rules.extend(services_gender_rules)
-
-    avg_adm_fixed, avg_adm_rules = _rewrite_avg_per_admission(q, services_gender_fixed)
-    rules.extend(avg_adm_rules)
-
-    admissions_fixed, admissions_rules = _rewrite_admissions_with_icu(q, avg_adm_fixed)
-    rules.extend(admissions_rules)
-
-    er_icu_los_fixed, er_icu_los_rules = _rewrite_er_to_icu_hospital_los_compare(q, admissions_fixed)
-    rules.extend(er_icu_los_rules)
-
-    reordered, reorder_rules = _reorder_count_select(er_icu_los_fixed)
+    # Do not replace whole SQL by keyword-triggered canonical templates here.
+    # Postprocess should only normalize/fix generated SQL.
+    reordered, reorder_rules = _reorder_count_select(update_stripped)
     rules.extend(reorder_rules)
 
     avg_reordered, avg_reorder_rules = _reorder_avg_select(reordered)
@@ -3004,6 +2715,9 @@ def postprocess_sql(question: str, sql: str) -> tuple[str, list[str]]:
     missing_where_fixed, missing_where_rules = _fix_missing_where_predicate(pushed_fixed)
     rules.extend(missing_where_rules)
 
-    rewritten, rewrite_rules = _rewrite_oracle_syntax(missing_where_fixed)
+    to_char_fixed, to_char_rules = _quote_to_char_format_literals(missing_where_fixed)
+    rules.extend(to_char_rules)
+
+    rewritten, rewrite_rules = _rewrite_oracle_syntax(to_char_fixed)
     rules.extend(rewrite_rules)
     return rewritten, rules

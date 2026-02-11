@@ -4,14 +4,17 @@ from datetime import datetime
 import hashlib
 import math
 import os
+from pathlib import Path
 import random
 from typing import Any
 import uuid
+import json
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.oracle.executor import execute_sql
+from app.services.runtime.diagnosis_map_store import load_diagnosis_icd_map, map_prefixes_for_terms
 from app.services.runtime.state_store import get_state_store
 
 
@@ -29,6 +32,7 @@ DEFAULT_PARAMS = {
 _SAVED_COHORTS_KEY = "cohort::saved"
 _FALLBACK_SAVED_COHORTS: list[dict[str, Any]] = []
 _SURVIVAL_TIME_POINTS = [0, 7, 14, 21, 30, 45, 60, 75, 90, 120, 150, 180]
+_COHORT_COMORBIDITY_SPECS_PATH = Path("var/metadata/cohort_comorbidity_specs.json")
 
 
 class CohortParams(BaseModel):
@@ -81,6 +85,73 @@ def _cohort_sample_rows() -> int:
     except Exception:
         return 50000
     return max(0, value)
+
+
+def _load_comorbidity_specs() -> list[dict[str, Any]]:
+    if not _COHORT_COMORBIDITY_SPECS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(_COHORT_COMORBIDITY_SPECS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    specs: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        group_key = str(item.get("group_key") or "").strip()
+        group_label = str(item.get("group_label") or "").strip()
+        flag_col = str(item.get("flag_col") or "").strip()
+        if not group_key or not group_label or not flag_col:
+            continue
+        map_terms_raw = item.get("map_terms") or []
+        map_terms = [str(term).strip() for term in map_terms_raw if str(term).strip()] if isinstance(map_terms_raw, list) else []
+        fallback_raw = item.get("fallback_prefixes") or []
+        fallback_prefixes = [str(prefix).strip().upper() for prefix in fallback_raw if str(prefix).strip()] if isinstance(fallback_raw, list) else []
+        try:
+            sort_order = int(item.get("sort_order") or len(specs) + 1)
+        except Exception:
+            sort_order = len(specs) + 1
+        specs.append({
+            "group_key": group_key,
+            "group_label": group_label,
+            "flag_col": flag_col,
+            "sort_order": sort_order,
+            "map_terms": map_terms,
+            "fallback_prefixes": fallback_prefixes,
+        })
+
+    return specs
+
+
+def _icd_prefix_condition(dx_code_expr: str, prefixes: list[str]) -> str:
+    parts = [f"{dx_code_expr} LIKE '{prefix}%'" for prefix in prefixes if prefix]
+    if not parts:
+        return "1 = 0"
+    return "(" + " OR ".join(parts) + ")"
+
+
+def _comorbidity_specs_from_mapping(dx_code_expr: str) -> list[dict[str, Any]]:
+    base_specs = _load_comorbidity_specs()
+    if not base_specs:
+        return []
+    diagnosis_map = load_diagnosis_icd_map()
+    specs: list[dict[str, Any]] = []
+    for base in base_specs:
+        mapped_prefixes = map_prefixes_for_terms(diagnosis_map, list(base.get("map_terms", [])))
+        prefixes = mapped_prefixes or [str(item).strip().upper() for item in base.get("fallback_prefixes", []) if str(item).strip()]
+        if not prefixes:
+            continue
+        specs.append({
+            "group_key": base["group_key"],
+            "group_label": base["group_label"],
+            "flag_col": base["flag_col"],
+            "sort_order": int(base["sort_order"]),
+            "condition_sql": _icd_prefix_condition(dx_code_expr, prefixes),
+        })
+    return specs
 
 
 def _cohort_cte(params: CohortParams) -> str:
@@ -226,64 +297,69 @@ def _cohort_sql_bundle(params: CohortParams) -> dict[str, str]:
         "ELSE 3 END"
     )
     dx_code_expr = "UPPER(REPLACE(NVL(d.ICD_CODE, ''), '.', ''))"
-    diabetes_cond = (
-        f"({dx_code_expr} LIKE 'E10%' OR {dx_code_expr} LIKE 'E11%' OR {dx_code_expr} LIKE 'E12%' "
-        f"OR {dx_code_expr} LIKE 'E13%' OR {dx_code_expr} LIKE 'E14%' OR {dx_code_expr} LIKE '250%')"
-    )
-    heart_failure_cond = f"({dx_code_expr} LIKE 'I50%' OR {dx_code_expr} LIKE '428%')"
-    ckd_cond = f"({dx_code_expr} LIKE 'N18%' OR {dx_code_expr} LIKE '585%')"
-    copd_cond = (
-        f"({dx_code_expr} LIKE 'J44%' OR {dx_code_expr} LIKE '491%' "
-        f"OR {dx_code_expr} LIKE '492%' OR {dx_code_expr} LIKE '496%')"
-    )
-    sepsis_cond = f"({dx_code_expr} LIKE 'A40%' OR {dx_code_expr} LIKE 'A41%' OR {dx_code_expr} LIKE 'R652%')"
-    dx_flags_cte = (
-        ", dx_flags AS ( "
-        "SELECT d.HADM_ID, "
-        f"MAX(CASE WHEN {diabetes_cond} THEN 1 ELSE 0 END) AS HAS_DIABETES, "
-        f"MAX(CASE WHEN {heart_failure_cond} THEN 1 ELSE 0 END) AS HAS_HEART_FAILURE, "
-        f"MAX(CASE WHEN {ckd_cond} THEN 1 ELSE 0 END) AS HAS_CKD, "
-        f"MAX(CASE WHEN {copd_cond} THEN 1 ELSE 0 END) AS HAS_COPD, "
-        f"MAX(CASE WHEN {sepsis_cond} THEN 1 ELSE 0 END) AS HAS_SEPSIS "
-        "FROM DIAGNOSES_ICD d "
-        "JOIN (SELECT DISTINCT HADM_ID FROM cohort) ch ON ch.HADM_ID = d.HADM_ID "
-        "GROUP BY d.HADM_ID "
-        ") "
-    )
-
-    def comorb_select(group_key: str, group_label: str, flag_col: str, sort_order: int) -> str:
-        return (
-            "SELECT "
-            f"'{group_key}' AS GROUP_KEY, "
-            f"'{group_label}' AS GROUP_LABEL, "
-            "COUNT(*) AS ADMISSION_CNT, "
-            "COUNT(DISTINCT c.SUBJECT_ID) AS PATIENT_CNT, "
-            f"ROUND(100 * AVG({readmit_30_case}), 2) AS READMIT_RATE_PCT, "
-            f"ROUND(100 * AVG({death_case}), 2) AS MORTALITY_RATE_PCT, "
-            f"ROUND(AVG({los_expr}), 2) AS AVG_LOS_DAYS, "
-            f"{sort_order} AS SORT_ORD "
-            "FROM cohort c "
-            "JOIN dx_flags f ON f.HADM_ID = c.HADM_ID "
-            f"WHERE f.{flag_col} = 1"
+    comorbidity_specs = _comorbidity_specs_from_mapping(dx_code_expr)
+    if comorbidity_specs:
+        flag_columns = ", ".join(
+            f"MAX(CASE WHEN {spec['condition_sql']} THEN 1 ELSE 0 END) AS {spec['flag_col']}"
+            for spec in comorbidity_specs
+        )
+        dx_flags_cte = (
+            ", dx_flags AS ( "
+            "SELECT d.HADM_ID, "
+            f"{flag_columns} "
+            "FROM DIAGNOSES_ICD d "
+            "JOIN (SELECT DISTINCT HADM_ID FROM cohort) ch ON ch.HADM_ID = d.HADM_ID "
+            "GROUP BY d.HADM_ID "
+            ") "
         )
 
-    comorbidity_subgroup_sql = (
-        cte
-        + dx_flags_cte
-        + "SELECT GROUP_KEY, GROUP_LABEL, ADMISSION_CNT, PATIENT_CNT, READMIT_RATE_PCT, MORTALITY_RATE_PCT, AVG_LOS_DAYS "
-        "FROM ("
-        + comorb_select("diabetes", "당뇨", "HAS_DIABETES", 1)
-        + " UNION ALL "
-        + comorb_select("heart_failure", "심부전", "HAS_HEART_FAILURE", 2)
-        + " UNION ALL "
-        + comorb_select("ckd", "만성신질환", "HAS_CKD", 3)
-        + " UNION ALL "
-        + comorb_select("copd", "COPD", "HAS_COPD", 4)
-        + " UNION ALL "
-        + comorb_select("sepsis", "패혈증", "HAS_SEPSIS", 5)
-        + ") "
-        "ORDER BY SORT_ORD"
-    )
+        def comorb_select(group_key: str, group_label: str, flag_col: str, sort_order: int) -> str:
+            return (
+                "SELECT "
+                f"'{group_key}' AS GROUP_KEY, "
+                f"'{group_label}' AS GROUP_LABEL, "
+                "COUNT(*) AS ADMISSION_CNT, "
+                "COUNT(DISTINCT c.SUBJECT_ID) AS PATIENT_CNT, "
+                f"ROUND(100 * AVG({readmit_30_case}), 2) AS READMIT_RATE_PCT, "
+                f"ROUND(100 * AVG({death_case}), 2) AS MORTALITY_RATE_PCT, "
+                f"ROUND(AVG({los_expr}), 2) AS AVG_LOS_DAYS, "
+                f"{sort_order} AS SORT_ORD "
+                "FROM cohort c "
+                "JOIN dx_flags f ON f.HADM_ID = c.HADM_ID "
+                f"WHERE f.{flag_col} = 1"
+            )
+
+        comorbidity_union_sql = " UNION ALL ".join(
+            comorb_select(
+                str(spec["group_key"]),
+                str(spec["group_label"]),
+                str(spec["flag_col"]),
+                int(spec["sort_order"]),
+            )
+            for spec in comorbidity_specs
+        )
+        comorbidity_subgroup_sql = (
+            cte
+            + dx_flags_cte
+            + "SELECT GROUP_KEY, GROUP_LABEL, ADMISSION_CNT, PATIENT_CNT, READMIT_RATE_PCT, MORTALITY_RATE_PCT, AVG_LOS_DAYS "
+            "FROM ("
+            + comorbidity_union_sql
+            + ") "
+            "ORDER BY SORT_ORD"
+        )
+    else:
+        comorbidity_subgroup_sql = (
+            cte
+            + "SELECT "
+            "CAST(NULL AS VARCHAR2(64)) AS GROUP_KEY, "
+            "CAST(NULL AS VARCHAR2(128)) AS GROUP_LABEL, "
+            "CAST(NULL AS NUMBER) AS ADMISSION_CNT, "
+            "CAST(NULL AS NUMBER) AS PATIENT_CNT, "
+            "CAST(NULL AS NUMBER) AS READMIT_RATE_PCT, "
+            "CAST(NULL AS NUMBER) AS MORTALITY_RATE_PCT, "
+            "CAST(NULL AS NUMBER) AS AVG_LOS_DAYS "
+            "FROM cohort c WHERE 1 = 0"
+        )
     metrics_sql = (
         cte
         + "SELECT "

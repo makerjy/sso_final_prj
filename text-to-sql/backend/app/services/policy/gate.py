@@ -8,9 +8,23 @@ from app.services.runtime.settings_store import load_table_scope
 
 
 _WRITE_KEYWORDS = re.compile(r"\b(delete|update|insert|merge|drop|alter|truncate)\b", re.IGNORECASE)
-_TABLE_REF = re.compile(r"\b(from|join)\s+([A-Za-z0-9_.$#\"]+)", re.IGNORECASE)
 _CTE_REF = re.compile(r"(?:with|,)\s*([A-Za-z0-9_]+)\s+as\s*\(", re.IGNORECASE)
 _AGG_FN_RE = re.compile(r"\b(count|avg|sum|min|max)\s*\(", re.IGNORECASE)
+_SQL_TOKEN_RE = re.compile(r'"[^"]+"|[A-Za-z_][A-Za-z0-9_.$#]*|[(),]')
+
+_FROM_CLAUSE_END_KEYWORDS = {
+    "where",
+    "group",
+    "having",
+    "order",
+    "union",
+    "intersect",
+    "minus",
+    "connect",
+    "start",
+    "model",
+    "qualify",
+}
 
 _WHERE_OPTIONAL_QUESTION_HINTS = (
     "count",
@@ -51,16 +65,104 @@ def _check(name: str, passed: bool, message: str) -> dict[str, str | bool]:
     return {"name": name, "passed": passed, "message": message}
 
 
-def _extract_table_names(sql: str) -> list[str]:
-    tables: list[str] = []
-    for _, raw in _TABLE_REF.findall(sql):
-        name = raw.strip().strip('"').strip()
-        name = re.sub(r"[(),]", "", name)
-        if "." in name:
-            name = name.split(".")[-1]
-        if name:
-            tables.append(name)
-    return tables
+def _table_ref_candidates(raw: str) -> list[str]:
+    cleaned = raw.strip()
+    cleaned = re.sub(r"[(),;]", "", cleaned)
+    cleaned = cleaned.replace('"', "").strip()
+    if not cleaned:
+        return []
+    parts = [part for part in cleaned.split(".") if part]
+    candidates: list[str] = []
+    if cleaned:
+        candidates.append(cleaned)
+    if parts:
+        candidates.append(parts[-1])
+        if len(parts) >= 2:
+            candidates.append(parts[-2])
+        candidates.append(parts[0])
+    deduped: list[str] = []
+    for item in candidates:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def _extract_table_refs(sql: str) -> list[str]:
+    refs: list[str] = []
+    depth = 0
+    expecting_from_depths: set[int] = set()
+    in_from_clause_depths: set[int] = set()
+    awaiting_table_depth: int | None = None
+
+    for match in _SQL_TOKEN_RE.finditer(sql):
+        token = match.group(0)
+        lowered = token.lower()
+
+        if token == "(":
+            depth += 1
+            continue
+        if token == ")":
+            depth = max(0, depth - 1)
+            expecting_from_depths = {d for d in expecting_from_depths if d <= depth}
+            in_from_clause_depths = {d for d in in_from_clause_depths if d <= depth}
+            if awaiting_table_depth is not None and awaiting_table_depth > depth:
+                awaiting_table_depth = None
+            continue
+
+        if lowered == "select":
+            expecting_from_depths.add(depth)
+            continue
+
+        if lowered == "from":
+            if depth in expecting_from_depths:
+                in_from_clause_depths.add(depth)
+                awaiting_table_depth = depth
+            continue
+
+        if lowered == "join":
+            awaiting_table_depth = depth
+            continue
+
+        if depth in in_from_clause_depths and lowered in _FROM_CLAUSE_END_KEYWORDS:
+            in_from_clause_depths.discard(depth)
+            if awaiting_table_depth == depth:
+                awaiting_table_depth = None
+            continue
+
+        if token == "," and depth in in_from_clause_depths:
+            awaiting_table_depth = depth
+            continue
+
+        if awaiting_table_depth is not None and depth == awaiting_table_depth:
+            if token in {",", "("}:
+                continue
+            refs.append(token)
+            awaiting_table_depth = None
+
+    return refs
+
+
+def _resolve_table_refs(sql: str, *, allowed_tables: set[str], cte_names: set[str]) -> tuple[list[str], list[str]]:
+    resolved_tables: list[str] = []
+    disallowed: list[str] = []
+    for raw in _extract_table_refs(sql):
+        candidates = _table_ref_candidates(raw)
+        if not candidates:
+            continue
+        lowered = [candidate.lower() for candidate in candidates]
+        if any(item in cte_names for item in lowered):
+            continue
+
+        matched = next((candidate for candidate in candidates if candidate.lower() in allowed_tables), None)
+        if matched:
+            resolved_tables.append(matched)
+            continue
+
+        # Fall back to the least-surprising token for diagnostics.
+        fallback = candidates[-1]
+        resolved_tables.append(fallback)
+        disallowed.append(fallback)
+    return resolved_tables, disallowed
 
 
 def _can_skip_where(question: str | None, sql: str) -> bool:
@@ -114,8 +216,11 @@ def precheck_sql(sql: str, question: str | None = None) -> dict[str, object]:
     allowed_tables = {name.lower() for name in load_table_scope() if name}
     if allowed_tables:
         cte_names = {name.lower() for name in _CTE_REF.findall(text)}
-        found_tables = [t for t in _extract_table_names(text) if t.lower() not in cte_names]
-        disallowed = [t for t in found_tables if t.lower() not in allowed_tables]
+        found_tables, disallowed = _resolve_table_refs(
+            text,
+            allowed_tables=allowed_tables,
+            cte_names=cte_names,
+        )
         scope_ok = not disallowed
         if scope_ok:
             checks.append(_check("Table scope", True, f"{len(found_tables)} table references allowed"))

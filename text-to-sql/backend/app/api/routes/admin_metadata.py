@@ -8,6 +8,7 @@ import json
 from app.services.oracle.metadata_extractor import extract_metadata
 from app.services.rag.indexer import reindex
 from app.services.rag.mongo_store import MongoStore
+from app.services.runtime.column_value_store import load_column_value_rows
 
 router = APIRouter()
 rag_router = APIRouter()
@@ -90,8 +91,10 @@ def rag_status():
     return {
         "schema_docs": len(schema.get("tables", {})),
         "sql_examples_docs": _count_jsonl(base / "sql_examples.jsonl"),
-        "join_templates_docs": _count_jsonl(base / "join_templates.jsonl"),
+        "join_templates_docs": _count_jsonl(base / "join_templates.jsonl") + _count_jsonl(base / "sql_templates.jsonl"),
         "glossary_docs": _count_jsonl(base / "glossary_docs.jsonl"),
+        "diagnosis_map_docs": _count_jsonl(base / "diagnosis_icd_map.jsonl"),
+        "column_value_docs": len(load_column_value_rows()),
     }
 
 

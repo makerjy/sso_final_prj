@@ -10,6 +10,8 @@ from app.core.config import get_settings
 from app.services.rag.mongo_store import MongoStore
 from app.services.runtime.context_budget import trim_context_to_budget
 from app.services.runtime.settings_store import load_table_scope
+from app.services.runtime.column_value_store import load_column_value_rows, match_column_value_rows
+from app.services.runtime.diagnosis_map_store import load_diagnosis_icd_map, match_diagnosis_mappings
 
 
 @dataclass
@@ -54,6 +56,58 @@ def _merge_hits(hit_lists: list[list[dict[str, Any]]], k: int) -> list[dict[str,
     return results
 
 
+def _build_diagnosis_map_hits(question: str, *, k: int) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for item in match_diagnosis_mappings(question, diagnosis_map=load_diagnosis_icd_map()):
+        term = str(item.get("term") or "").strip()
+        aliases = [str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]
+        prefixes = [str(prefix).strip().upper() for prefix in item.get("icd_prefixes", []) if str(prefix).strip()]
+        if not term or not prefixes:
+            continue
+
+        hit_score = int(item.get("_score") or 0)
+        prefix_text = ", ".join(f"{prefix}%" for prefix in prefixes)
+        text = (
+            f"Diagnosis mapping: {term} -> ICD_CODE prefixes {prefix_text}. "
+            "Prefer DIAGNOSES_ICD.ICD_CODE LIKE '<prefix>%', not LONG_TITLE keyword matching. "
+            "Use ICD_VERSION=10 for alphabetic prefixes and ICD_VERSION=9 for numeric prefixes."
+        )
+        matches.append({
+            "id": f"diagnosis_map::{term}",
+            "text": text,
+            "metadata": {"type": "diagnosis_map", "term": term},
+            "score": float(hit_score),
+        })
+    if not matches:
+        return []
+    matches.sort(key=lambda entry: float(entry.get("score") or 0.0), reverse=True)
+    return matches[:k]
+
+
+def _build_column_value_hits(question: str, *, k: int) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for idx, item in enumerate(match_column_value_rows(question, rows=load_column_value_rows(), k=max(k, 8))):
+        table = str(item.get("table") or "").strip().upper()
+        column = str(item.get("column") or "").strip().upper()
+        value = str(item.get("value") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if not table or not column or not value:
+            continue
+        score = float(item.get("_score") or 0.0)
+        if description:
+            text = f"Column value hint: {table}.{column} can be '{value}' ({description})."
+        else:
+            text = f"Column value hint: {table}.{column} can be '{value}'."
+        matches.append({
+            "id": f"column_value::{table}.{column}::{idx}",
+            "text": text,
+            "metadata": {"type": "column_value", "table": table, "column": column, "value": value},
+            "score": score,
+        })
+    matches.sort(key=lambda entry: float(entry.get("score") or 0.0), reverse=True)
+    return matches[:k]
+
+
 def build_candidate_context(question: str) -> CandidateContext:
     settings = get_settings()
     store = MongoStore()
@@ -63,6 +117,14 @@ def build_candidate_context(question: str) -> CandidateContext:
     example_hits = store.search(question, k=settings.examples_per_query, where={"type": "example"})
     template_hits = store.search(question, k=settings.templates_per_query, where={"type": "template"})
     glossary_hits = store.search(question, k=settings.rag_top_k, where={"type": "glossary"})
+    diagnosis_map_hits = store.search(question, k=settings.rag_top_k, where={"type": "diagnosis_map"})
+    column_value_hits = store.search(question, k=settings.rag_top_k, where={"type": "column_value"})
+    local_map_hits = _build_diagnosis_map_hits(question, k=settings.rag_top_k)
+    local_column_hits = _build_column_value_hits(question, k=settings.rag_top_k)
+    glossary_hits = _merge_hits(
+        [local_map_hits, diagnosis_map_hits, local_column_hits, column_value_hits, glossary_hits],
+        k=max(settings.rag_top_k, len(local_map_hits), len(local_column_hits)) + 2,
+    )
 
     context = CandidateContext(
         schemas=schema_hits,
@@ -148,6 +210,26 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
     glossary_hits = _merge_hits(
         [store.search(q, k=_per_query_k(settings.rag_top_k), where={"type": "glossary"}) for q in deduped],
         k=settings.rag_top_k,
+    )
+    diagnosis_map_hits = _merge_hits(
+        [store.search(q, k=_per_query_k(settings.rag_top_k), where={"type": "diagnosis_map"}) for q in deduped],
+        k=settings.rag_top_k,
+    )
+    column_value_hits = _merge_hits(
+        [store.search(q, k=_per_query_k(settings.rag_top_k), where={"type": "column_value"}) for q in deduped],
+        k=settings.rag_top_k,
+    )
+    local_map_hits = _merge_hits(
+        [_build_diagnosis_map_hits(q, k=_per_query_k(settings.rag_top_k)) for q in deduped],
+        k=settings.rag_top_k,
+    )
+    local_column_hits = _merge_hits(
+        [_build_column_value_hits(q, k=_per_query_k(settings.rag_top_k)) for q in deduped],
+        k=settings.rag_top_k,
+    )
+    glossary_hits = _merge_hits(
+        [local_map_hits, diagnosis_map_hits, local_column_hits, column_value_hits, glossary_hits],
+        k=max(settings.rag_top_k, len(local_map_hits), len(local_column_hits)) + 2,
     )
 
     context = CandidateContext(

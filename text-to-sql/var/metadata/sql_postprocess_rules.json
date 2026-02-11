@@ -1,0 +1,29 @@
+{
+  "schema_aliases": {
+    "table_aliases": {},
+    "column_aliases": {}
+  },
+  "diagnosis_rewrite": {
+    "enabled": true,
+    "table_name": "DIAGNOSES_ICD",
+    "icd_like_template": "{alias}.ICD_CODE LIKE '{prefix}%'",
+    "join_operator": " OR "
+  },
+  "icd_version_inference": {
+    "enabled": true,
+    "table_name": "DIAGNOSES_ICD",
+    "version_column": "ICD_VERSION",
+    "letter_prefix_version": 10,
+    "digit_prefix_version": 9,
+    "predicate_template": "({version_col} = {version} AND {code_expr} LIKE '{prefix}%')"
+  },
+  "mortality_rewrite": {
+    "enabled": true,
+    "join_table": "DIAGNOSES_ICD",
+    "admissions_table": "ADMISSIONS",
+    "outcome_column": "HOSPITAL_EXPIRE_FLAG",
+    "key_column": "HADM_ID",
+    "numerator_template": "COUNT(DISTINCT CASE WHEN {expire_ref} = 1 THEN {key_ref} END)",
+    "denominator_template": "NULLIF(COUNT(DISTINCT {key_ref}), 0)"
+  }
+}
