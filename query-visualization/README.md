@@ -4,6 +4,26 @@
 
 이 모듈은 자연어 질문과 SQL 결과(ROW 리스트)를 입력받아 분석 의도를 추정하고, 규칙 기반 플랜과 RAG 컨텍스트를 활용해 차트 추천과 결과 시각화를 반환합니다. API, 플랜 엔진, RAG 인덱싱/검색, 스키마 요약 유틸이 포함됩니다.
 
+**Docker 실행**
+
+1. `query-visualization/.env` 파일을 준비합니다. (`OPENAI_API_KEY`, Oracle/Mongo 관련 변수)
+2. 아래 명령으로 API + UI를 함께 실행합니다.
+
+```bash
+docker compose -f query-visualization/deploy/compose/docker-compose.yml up -d --build
+```
+
+서비스 주소
+
+- API: `http://localhost:8080`
+- UI: `http://localhost:3001`
+
+참고
+
+- 기본값은 Oracle thin 모드입니다.
+- Oracle thick 모드가 필요하면 `query-visualization/oracle/instantclient_23_26` 경로에 클라이언트를 두고 `ORACLE_DRIVER_MODE=thick`를 설정합니다.
+- 포트 충돌 시 `VIS_API_HOST_PORT`, `VIS_UI_HOST_PORT` 환경변수로 호스트 포트를 변경할 수 있습니다.
+
 **입출력**
 
 `POST /visualize` 입력
@@ -21,6 +41,11 @@
 | sql | string | 원본 SQL |
 | table_preview | array<object> | 결과 미리보기(상위 20행) |
 | analyses | array<object> | 차트 추천 목록 |
+| insight | string | 통합 분석 요약(가능한 경우 LLM 생성) |
+| fallback_used | boolean | fallback 경로 사용 여부 |
+| fallback_stage | string | fallback 단계(`retry_relaxed` 등) |
+| failure_reasons | array<string> | 시각화 실패/차단 사유 목록 |
+| attempt_count | number | 시도 횟수 (1: normal, 2: relaxed 재시도) |
 
 `analyses` 항목 구조 (`AnalysisCard`)
 

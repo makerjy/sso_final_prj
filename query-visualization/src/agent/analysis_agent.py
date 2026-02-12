@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -126,6 +126,76 @@ def _fallback_insight(user_query: str, df: pd.DataFrame, analyses: List[Analysis
     )
 
 
+def _record_failure(
+    failure_reasons: List[str],
+    reason: str,
+) -> None:
+    normalized = (reason or "").strip()
+    if normalized and normalized not in failure_reasons:
+        failure_reasons.append(normalized)
+
+
+def _has_renderable_chart(analyses: List[AnalysisCard]) -> bool:
+    return any(card.figure_json is not None for card in analyses)
+
+
+def _build_analyses_from_plans(
+    plans: List[Dict[str, Any]],
+    df: pd.DataFrame,
+    failure_reasons: List[str],
+    pass_label: str,
+) -> List[AnalysisCard]:
+    analyses: List[AnalysisCard] = []
+    if not plans:
+        _record_failure(failure_reasons, f"{pass_label}: no_plans")
+        return analyses
+
+    for plan in plans:
+        chart_spec_dict = plan.get("chart_spec") or {}
+        reason = plan.get("reason")
+        chart_type = chart_spec_dict.get("chart_type", "unknown")
+
+        try:
+            chart_spec = ChartSpec(**chart_spec_dict)
+        except Exception as exc:
+            _record_failure(
+                failure_reasons,
+                f"{pass_label}: invalid_chart_spec({chart_type}) - {str(exc)}",
+            )
+            chart_spec = ChartSpec(chart_type="unknown")
+
+        try:
+            chart_result = code_generator.generate_chart(chart_spec_dict, df)
+            if chart_result.get("figure_json") is None:
+                _record_failure(
+                    failure_reasons,
+                    f"{pass_label}: empty_figure({chart_type})",
+                )
+            else:
+                log_event("analysis.chart.success", {"pass": pass_label, "chart_type": chart_type})
+        except Exception as exc:
+            _record_failure(
+                failure_reasons,
+                f"{pass_label}: chart_error({chart_type}) - {str(exc)}",
+            )
+            log_event("analysis.chart.error", {"pass": pass_label, "error": str(exc)})
+            chart_result = {"figure_json": None, "code": None}
+
+        analyses.append(
+            AnalysisCard(
+                chart_spec=chart_spec,
+                reason=reason,
+                figure_json=chart_result.get("figure_json"),
+                code=chart_result.get("code"),
+            )
+        )
+
+    if analyses and not _has_renderable_chart(analyses):
+        _record_failure(failure_reasons, f"{pass_label}: all_figures_empty")
+
+    return analyses
+
+
 def _llm_generate_insight(
     user_query: str,
     sql: str,
@@ -180,6 +250,10 @@ def _llm_generate_insight(
 def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> VisualizationResponse:
     """질문과 데이터프레임을 받아 시각화 추천 결과를 생성."""
     log_event("analysis.start", {"user_query": user_query, "sql": sql})
+    failure_reasons: List[str] = []
+    fallback_used = False
+    fallback_stage: Optional[str] = None
+    attempt_count = 1
 
     # 0) 경과시간 파생 컬럼 추가 (가능한 경우에만)
     df = _add_elapsed_columns(df)
@@ -197,48 +271,64 @@ def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> Visual
     intent_info = intent_extractor.extract_intent(user_query, df_schema, rag_context)
     log_event("analysis.intent", intent_info)
 
-    # 4) 분석 플랜 생성 (여러 개)
-    plans = chart_rule_engine.plan_analyses(intent_info, df, rag_context)
-    log_event("analysis.plans", {"count": len(plans)})
+    # 4) 1차: normal 플랜 생성 및 차트 생성
+    plans = chart_rule_engine.plan_analyses(
+        intent_info,
+        df,
+        rag_context,
+        retry_mode="normal",
+        failure_reasons=failure_reasons,
+    )
+    log_event("analysis.plans", {"mode": "normal", "count": len(plans)})
+    analyses = _build_analyses_from_plans(plans, df, failure_reasons, "normal")
 
-    analyses: List[AnalysisCard] = []
-    for plan in plans:
-        chart_spec_dict = plan.get("chart_spec")
-        reason = plan.get("reason")
+    # 5) 2차: normal 실패 시 relaxed 모드 재시도
+    if not _has_renderable_chart(analyses):
+        fallback_used = True
+        fallback_stage = "retry_relaxed"
+        attempt_count = 2
+        _record_failure(failure_reasons, "normal: no_renderable_chart")
 
-        # chart_spec을 모델로 변환
-        chart_spec = ChartSpec(**chart_spec_dict) if chart_spec_dict else None
+        relaxed_intent_info = dict(intent_info)
+        relaxed_intent_info["group_var"] = None
 
-        # 4) 차트 코드 생성/실행
-        try:
-            chart_result = code_generator.generate_chart(
-                chart_spec_dict or {},
-                df,
-            )
-            log_event("analysis.chart.success", {"chart_type": chart_spec_dict.get("chart_type")})
-        except Exception as exc:
-            log_event("analysis.chart.error", {"error": str(exc)})
-            chart_result = {"figure_json": None, "code": None}
-
-        analyses.append(
-            AnalysisCard(
-                chart_spec=chart_spec or ChartSpec(chart_type="unknown"),
-                reason=reason,
-                figure_json=chart_result.get("figure_json"),
-                code=chart_result.get("code"),
-            )
+        log_event("analysis.retry.start", {"mode": "relaxed"})
+        relaxed_plans = chart_rule_engine.plan_analyses(
+            relaxed_intent_info,
+            df,
+            rag_context,
+            retry_mode="relaxed",
+            failure_reasons=failure_reasons,
         )
+        log_event("analysis.plans", {"mode": "relaxed", "count": len(relaxed_plans)})
+        relaxed_analyses = _build_analyses_from_plans(
+            relaxed_plans,
+            df,
+            failure_reasons,
+            "relaxed",
+        )
+        if relaxed_analyses:
+            analyses = relaxed_analyses
+
+        if not _has_renderable_chart(analyses):
+            _record_failure(failure_reasons, "relaxed: no_renderable_chart")
+        log_event("analysis.retry.done", {"mode": "relaxed", "renderable": _has_renderable_chart(analyses)})
 
     try:
         insight = _llm_generate_insight(user_query, sql, df, analyses, df_schema)
     except Exception as exc:
         log_event("analysis.insight.error", {"error": str(exc)})
+        _record_failure(failure_reasons, f"insight_error: {str(exc)}")
         insight = _fallback_insight(user_query, df, analyses)
 
-    # 5) 결과 묶기
+    # 6) 결과 묶기
     return VisualizationResponse(
         sql=sql,
         table_preview=df.head(20).to_dict(orient="records"),
         analyses=analyses,
         insight=insight,
+        fallback_used=fallback_used,
+        fallback_stage=fallback_stage,
+        failure_reasons=failure_reasons,
+        attempt_count=attempt_count,
     )

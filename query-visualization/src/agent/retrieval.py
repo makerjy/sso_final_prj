@@ -13,9 +13,9 @@ def _build_query_text(user_query: str, df_schema: Dict[str, Any]) -> str:
     columns = df_schema.get("columns", [])
     dtypes = df_schema.get("dtypes", {})
     return (
-        "사용자 질문:\n"
+        "User query:\n"
         f"{user_query}\n\n"
-        "데이터프레임 스키마 요약:\n"
+        "DataFrame schema summary:\n"
         f"- columns: {columns}\n"
         f"- dtypes: {dtypes}\n"
     )
@@ -28,7 +28,7 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
 
 
 def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Vector DB에서 관련 컨텍스트를 검색해 반환."""
+    """Retrieve related context snippets from vector store."""
     try:
         query_text = _build_query_text(user_query, df_schema)
         query_embedding = _embed_texts([query_text])[0]
@@ -49,6 +49,6 @@ def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, An
             "snippets": snippets,
             "context_text": context_text,
         }
-    except Exception as exc:  # pragma: no cover - 환경 의존
+    except Exception as exc:  # pragma: no cover - environment dependent
         log_event("rag.search.error", {"error": str(exc)})
         return {"snippets": [], "context_text": ""}
