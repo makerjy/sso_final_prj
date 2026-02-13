@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.services.agents.clarifier import evaluate_question_clarity
 from app.services.agents.sql_engineer import generate_sql
 from app.services.agents.sql_expert import review_sql
+from app.services.agents.intent_guard import enforce_intent_alignment
 from app.services.agents.sql_planner import plan_query_intent
 from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
 from app.services.agents.translator import contains_korean, translate_to_english
@@ -18,6 +19,10 @@ from app.services.cost_tracker import get_cost_tracker
 from app.services.policy.gate import precheck_sql
 from app.services.runtime.context_builder import build_context_payload, build_context_payload_multi
 from app.services.runtime.risk_classifier import classify
+
+_SQL_EXAMPLES_CACHE: dict[str, Any] | None = None
+_SQL_EXAMPLES_CACHE_PATH: str | None = None
+_SQL_EXACT_KEEP_RE = re.compile(r"[^0-9a-z가-힣]+")
 
 
 def _load_demo_cache(path: str) -> dict[str, Any]:
@@ -36,6 +41,95 @@ def _normalize_question(text: str) -> str:
     cleaned = re.sub(r"[\\uac00-\\ud7a3]", " ", cleaned)
     cleaned = re.sub(r"\\s+", " ", cleaned).strip()
     return cleaned
+
+
+def _normalize_exact_match_question(text: str) -> str:
+    cleaned = str(text or "").strip().lower()
+    cleaned = _SQL_EXACT_KEEP_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _load_sql_examples_cache(path: str) -> dict[str, Any]:
+    global _SQL_EXAMPLES_CACHE, _SQL_EXAMPLES_CACHE_PATH
+    settings = get_settings()
+    files: list[Path] = [Path(path)]
+    if bool(getattr(settings, "sql_examples_include_augmented", True)):
+        augmented_path = Path(str(getattr(settings, "sql_examples_augmented_path", "var/metadata/sql_examples_augmented.jsonl")))
+        if str(augmented_path) not in {str(item) for item in files}:
+            files.append(augmented_path)
+    cache_key = "|".join(str(item) for item in files)
+    if _SQL_EXAMPLES_CACHE is not None and _SQL_EXAMPLES_CACHE_PATH == cache_key:
+        return _SQL_EXAMPLES_CACHE
+
+    by_raw: dict[str, dict[str, str]] = {}
+    by_norm: dict[str, list[dict[str, str]]] = {}
+    for file_path in files:
+        if not file_path.exists():
+            continue
+        for line in file_path.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("question") or "").strip()
+            s = str(item.get("sql") or "").strip()
+            if not q or not s:
+                continue
+            if q in by_raw:
+                continue
+            row = {"question": q, "sql": s}
+            by_raw[q] = row
+            norm = _normalize_exact_match_question(q)
+            if norm:
+                by_norm.setdefault(norm, []).append(row)
+
+    _SQL_EXAMPLES_CACHE = {"by_raw": by_raw, "by_norm": by_norm}
+    _SQL_EXAMPLES_CACHE_PATH = cache_key
+    return _SQL_EXAMPLES_CACHE
+
+
+def _lookup_sql_examples_exact(*questions: str | None) -> dict[str, str] | None:
+    settings = get_settings()
+    if not bool(getattr(settings, "sql_examples_exact_match_enabled", True)):
+        return None
+    cache = _load_sql_examples_cache(str(getattr(settings, "sql_examples_path", "var/metadata/sql_examples.jsonl")))
+    by_raw = cache.get("by_raw", {})
+    by_norm = cache.get("by_norm", {})
+    if not isinstance(by_raw, dict) or not isinstance(by_norm, dict):
+        return None
+
+    for question in questions:
+        text = str(question or "").strip()
+        if not text:
+            continue
+        exact = by_raw.get(text)
+        if isinstance(exact, dict):
+            return exact
+
+    for question in questions:
+        text = str(question or "").strip()
+        if not text:
+            continue
+        norm = _normalize_exact_match_question(text)
+        if not norm:
+            continue
+        candidates = by_norm.get(norm) or []
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            return candidates[0]
+        lowered = text.lower()
+        for candidate in candidates:
+            if str(candidate.get("question") or "").strip().lower() == lowered:
+                return candidate
+        return candidates[0]
+    return None
 
 
 def _lookup_demo_cache(cache: dict[str, Any], question: str) -> dict[str, Any] | None:
@@ -93,6 +187,61 @@ def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
     return items
 
 
+def _inject_exact_match_example_hint(
+    context: dict[str, Any],
+    *,
+    question: str,
+    sql: str,
+) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return context
+    matched_question = str(question or "").strip()
+    matched_sql = str(sql or "").strip()
+    if not matched_question or not matched_sql:
+        return context
+
+    existing_examples = context.get("examples")
+    examples = list(existing_examples) if isinstance(existing_examples, list) else []
+    hint_signature = (
+        _normalize_exact_match_question(matched_question),
+        re.sub(r"\s+", " ", matched_sql).strip().lower(),
+    )
+
+    deduped: list[dict[str, Any]] = []
+    for item in examples:
+        if not isinstance(item, dict):
+            continue
+        item_text = str(item.get("text") or "")
+        item_q = str((item.get("metadata") or {}).get("question") or "").strip()
+        parsed_q = item_q
+        parsed_sql = ""
+        if not parsed_q and "Question:" in item_text and "SQL:" in item_text:
+            m = re.search(r"Question:\s*(.*?)\s*SQL:\s*(.*)$", item_text, re.DOTALL)
+            if m:
+                parsed_q = m.group(1).strip()
+                parsed_sql = m.group(2).strip()
+        signature = (
+            _normalize_exact_match_question(parsed_q),
+            re.sub(r"\s+", " ", parsed_sql).strip().lower(),
+        )
+        if signature == hint_signature:
+            continue
+        deduped.append(item)
+
+    hint = {
+        "id": "example::exact_match_hint",
+        "text": f"Question: {matched_question}\nSQL: {matched_sql}",
+        "metadata": {
+            "type": "example",
+            "source": "sql_examples_exact_match_hint",
+            "question": matched_question,
+        },
+        "score": 1.0,
+    }
+    context["examples"] = [hint, *deduped]
+    return context
+
+
 _QUESTION_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[가-힣]+")
 _PLANNER_COMPLEX_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -148,16 +297,22 @@ def _decide_planner_usage(
     complexity_score = int(risk_info.get("complexity") or 0)
     complexity_threshold = max(0, int(getattr(settings, "planner_complexity_threshold", 1)))
     min_question_tokens = max(1, int(getattr(settings, "planner_min_question_tokens", 16)))
+    effective_complexity_threshold = max(complexity_threshold, 3)
+
+    has_complex_signal = signal_hits > 0
+    has_risk_complexity = complexity_score >= effective_complexity_threshold
+    has_long_question = token_count >= min_question_tokens
+    gate_count = int(has_complex_signal) + int(has_risk_complexity) + int(has_long_question)
 
     reasons: list[str] = []
-    if signal_hits > 0:
+    if has_complex_signal:
         reasons.append("complex_signal")
-    if complexity_score >= complexity_threshold:
+    if has_risk_complexity:
         reasons.append("risk_complexity")
-    if token_count >= min_question_tokens:
+    if has_long_question:
         reasons.append("long_question")
 
-    if reasons:
+    if gate_count >= 2:
         return True, {
             "enabled": True,
             "mode": mode,
@@ -166,19 +321,22 @@ def _decide_planner_usage(
             "signal_hits": signal_hits,
             "risk_complexity": complexity_score,
             "complexity_threshold": complexity_threshold,
+            "effective_complexity_threshold": effective_complexity_threshold,
             "min_question_tokens": min_question_tokens,
+            "gate_count": gate_count,
         }
     return False, {
         "enabled": False,
         "mode": mode,
-        "reason": "simple_query",
+        "reason": "below_complexity_gate",
         "token_count": token_count,
         "signal_hits": signal_hits,
         "risk_complexity": complexity_score,
         "complexity_threshold": complexity_threshold,
+        "effective_complexity_threshold": effective_complexity_threshold,
         "min_question_tokens": min_question_tokens,
+        "gate_count": gate_count,
     }
-
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_/-]*")
 _MULTI_SPACE_RE = re.compile(r"\s+")
@@ -1117,6 +1275,80 @@ def run_oneshot(
             cached["question_en"] = translated_question
             return cached
 
+    exact_match_mode = str(getattr(settings, "sql_examples_exact_match_mode", "hint") or "hint").strip().lower()
+    if exact_match_mode not in {"off", "hint", "short_circuit"}:
+        exact_match_mode = "hint"
+    matched_example_hint: dict[str, str] | None = None
+    matched_example = (
+        _lookup_sql_examples_exact(question, translated_question)
+        if exact_match_mode != "off"
+        else None
+    )
+    if isinstance(matched_example, dict):
+        matched_sql = str(matched_example.get("sql") or "").strip()
+        matched_question = str(matched_example.get("question") or "").strip()
+        if matched_sql and exact_match_mode == "short_circuit":
+            risk_info = classify(translated_question or question)
+            final_payload: dict[str, Any] = {
+                "final_sql": matched_sql,
+                "used_tables": [],
+                "risk_score": int(risk_info.get("risk") or 0),
+                "source": "sql_examples_exact_match",
+                "matched_question": matched_question,
+            }
+            if not skip_policy:
+                profile, profile_reasons = recommend_postprocess_profile(
+                    question,
+                    matched_sql,
+                    default_profile="relaxed",
+                )
+                matched_sql, rules = postprocess_sql(question, matched_sql, profile=profile)
+                final_payload["final_sql"] = matched_sql
+                if rules:
+                    final_payload["postprocess"] = rules
+                if profile_reasons:
+                    final_payload["postprocess_profile"] = profile
+                    final_payload["postprocess_profile_reasons"] = profile_reasons
+            aligned_sql, alignment_rules, unresolved_issues = enforce_intent_alignment(
+                question,
+                matched_sql,
+                planner_intent=None,
+            )
+            if aligned_sql.strip() != matched_sql.strip():
+                matched_sql = aligned_sql
+                final_payload["final_sql"] = matched_sql
+                if alignment_rules:
+                    existing = final_payload.get("postprocess")
+                    base_rules = list(existing) if isinstance(existing, list) else []
+                    for rule in alignment_rules:
+                        if rule not in base_rules:
+                            base_rules.append(rule)
+                    final_payload["postprocess"] = base_rules
+            if unresolved_issues:
+                final_payload["intent_alignment_issues"] = unresolved_issues
+            policy_result = None
+            if not skip_policy and matched_sql:
+                policy_result = precheck_sql(matched_sql, original_question)
+            return {
+                "mode": "advanced",
+                "question": original_question,
+                "question_en": translated_question if translated_question else None,
+                "assumptions": scope_assumptions if scope_assumptions.get("applied") else None,
+                "planner": None,
+                "planner_decision": {
+                    "enabled": False,
+                    "mode": "off",
+                    "reason": "sql_examples_exact_match",
+                },
+                "risk": risk_info,
+                "policy": policy_result,
+                "context": {"schemas": [], "examples": [], "templates": [], "glossary": []},
+                "draft": dict(final_payload),
+                "final": final_payload,
+            }
+        if matched_sql and matched_question:
+            matched_example_hint = {"question": matched_question, "sql": matched_sql}
+
     risk_info = classify(translated_question or question)
     if translated_question and use_rag_multi:
         context = build_context_payload_multi([question, translated_question])
@@ -1124,6 +1356,12 @@ def run_oneshot(
         context = build_context_payload(translated_question)
     else:
         context = build_context_payload(question)
+    if matched_example_hint:
+        context = _inject_exact_match_example_hint(
+            context,
+            question=matched_example_hint.get("question", ""),
+            sql=matched_example_hint.get("sql", ""),
+        )
 
     planner_payload: dict[str, Any] | None = None
     planner_intent: dict[str, Any] | None = None
@@ -1170,8 +1408,11 @@ def run_oneshot(
                     planner_intent=planner_intent,
                 )
                 final_payload = expert
+                expert_applied = True
                 # LLM 경고 문구는 사용하지 않도록 제거
                 final_payload.pop("warnings", None)
+            else:
+                expert_applied = False
 
             usage = final_payload.get("usage", {})
             _add_llm_cost(usage, "oneshot")
@@ -1190,6 +1431,65 @@ def run_oneshot(
                 if profile_reasons:
                     final_payload["postprocess_profile"] = profile
                     final_payload["postprocess_profile_reasons"] = profile_reasons
+
+                aligned_sql, alignment_rules, unresolved_issues = enforce_intent_alignment(
+                    question,
+                    final_payload.get("final_sql") or final_sql,
+                    planner_intent=planner_intent,
+                )
+                if aligned_sql.strip() != str(final_payload.get("final_sql") or "").strip():
+                    final_payload["final_sql"] = aligned_sql
+                    final_sql = aligned_sql
+                    if alignment_rules:
+                        existing = final_payload.get("postprocess")
+                        base_rules = list(existing) if isinstance(existing, list) else []
+                        for rule in alignment_rules:
+                            if rule not in base_rules:
+                                base_rules.append(rule)
+                        final_payload["postprocess"] = base_rules
+                # Planner intent and SQL are inconsistent: run expert once as a targeted realignment pass.
+                if unresolved_issues and planner_intent and not expert_applied:
+                    try:
+                        intent_realign = review_sql(
+                            question,
+                            context,
+                            {**final_payload, "final_sql": final_payload.get("final_sql") or final_sql},
+                            question_en=translated_question,
+                            planner_intent=planner_intent,
+                        )
+                        intent_realign.pop("warnings", None)
+                        _add_llm_cost(intent_realign.get("usage", {}), "oneshot_intent_realign")
+                        realigned_sql = str(intent_realign.get("final_sql") or "").strip()
+                        if realigned_sql:
+                            realigned_sql, realign_post_rules = postprocess_sql(
+                                question,
+                                realigned_sql,
+                                profile="aggressive",
+                            )
+                            realigned_sql, realign_align_rules, unresolved_after_realign = enforce_intent_alignment(
+                                question,
+                                realigned_sql,
+                                planner_intent=planner_intent,
+                            )
+                            if len(unresolved_after_realign) < len(unresolved_issues):
+                                final_payload = intent_realign
+                                final_payload["final_sql"] = realigned_sql
+                                final_sql = realigned_sql
+                                merged_rules: list[str] = []
+                                existing_rules = final_payload.get("postprocess")
+                                if isinstance(existing_rules, list):
+                                    merged_rules.extend(existing_rules)
+                                for rule in [*realign_post_rules, *realign_align_rules]:
+                                    if rule and rule not in merged_rules:
+                                        merged_rules.append(rule)
+                                if merged_rules:
+                                    final_payload["postprocess"] = merged_rules
+                                unresolved_issues = unresolved_after_realign
+                                final_payload["intent_alignment_repair"] = "expert_realign"
+                    except Exception:
+                        pass
+                if unresolved_issues:
+                    final_payload["intent_alignment_issues"] = unresolved_issues
 
             policy_result = None
             if not skip_policy and final_sql:

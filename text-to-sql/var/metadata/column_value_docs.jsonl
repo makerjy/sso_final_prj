@@ -233,10 +233,8 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "AMP", "description": "\uc570\ud50c (Ampoule)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "Appl", "description": "\ub3c4\ud3ec (Application)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "bag", "description": "\ubc31 (Bag)"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "BAG", "description": "\ubc31 (Bag)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "Bottle", "description": "\ubcd1"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "btl", "description": "\ubcd1"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "BTL", "description": "\ubcd1"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "CADD", "description": "Continuous Ambulatory Drug Delivery(CADD) \ud38c\ud504"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "CAP", "description": "\ucea1\uc290 (Capsule)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "DBTL", "description": "Double Bottle"}
@@ -258,13 +256,11 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "mg", "description": "\ubc00\ub9ac\uadf8\ub7a8"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "Million Units", "description": "\ub2e8\uc704 (Unit)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "mL", "description": "\ubc00\ub9ac\ub9ac\ud130"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "ML", "description": "\ubc00\ub9ac\ub9ac\ud130"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "mL UDCUP", "description": "mL Unit Dose Cup"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "NEB", "description": "\ub124\ubdf8\ub77c\uc774\uc800 (Nebulizer solution)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "PACK", "description": "\ud3ec\uc7a5 \ub2e8\uc704 / \uc6a9\ub7c9 \ub2e8\uc704"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "PAD", "description": "\ud328\ub4dc"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "patch", "description": "\ud328\uce58"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "Patch", "description": "\ud328\uce58"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "PEN", "description": "\ud39c\ud615 \uc8fc\uc0ac\uae30"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "PKG", "description": "\ud3ec\uc7a5 \ub2e8\uc704 / \uc6a9\ub7c9 \ub2e8\uc704"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "PKT", "description": "\ud3ec\uc7a5 \ub2e8\uc704 / \uc6a9\ub7c9 \ub2e8\uc704"}
@@ -278,17 +274,13 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "SUPP", "description": "\uc88c\uc57d (Suppository)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "SYR", "description": "\uc8fc\uc0ac\uae30 / \uc2dc\ub9b0\uc9c0"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "syringe", "description": "\uc8fc\uc0ac\uae30 / \uc2dc\ub9b0\uc9c0"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "Syringe", "description": "\uc8fc\uc0ac\uae30 / \uc2dc\ub9b0\uc9c0"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "TAB", "description": "\uc815\uc81c (Tablet)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "TROC", "description": "Troche(\ud2b8\ub85c\ud0a4: \uc785\uc548\uc5d0\uc11c \uc11c\uc11c\ud788 \ub179\uc774\uba74\uc11c \ud761\uc218\ub418\ub294 \uc57d\uc81c)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "TUBE", "description": "\ud29c\ube0c\ud615"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "UDCUP", "description": "Unit Dose Cup"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "UNIT", "description": "\ub2e8\uc704 (Unit)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "units", "description": "\ub2e8\uc704 (Unit)"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "Units", "description": "\ub2e8\uc704 (Unit)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "vial", "description": "\ubc14\uc774\uc54c"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "Vial", "description": "\ubc14\uc774\uc54c"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "VIAL", "description": "\ubc14\uc774\uc54c"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "PRODUCT_UNIT", "value": "WAF", "description": "Wafer(\uad6c\uac15\uc6a9 \ud544\ub984\ud615)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_ADJUSTMENT", "value": "Change Rate", "description": "\uc8fc\uc785\uc18d\ub3c4 \ubcc0\uacbd"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_ADJUSTMENT", "value": "Decrease", "description": "\uc8fc\uc785 \uc18d\ub3c4 \uac10\uc18c"}
@@ -320,7 +312,6 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "Units/Hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "___", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "cc/hr", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "dose", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "doses", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "g", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "g/1L NS", "description": ""}
@@ -334,15 +325,12 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mEq/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mL/h", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mL/hr", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg'ml-mg/ml", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg-mg/mL", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg/ kg/ hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg/day", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg/kg/hour", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg/kg/hr", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg/kg/min", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mcg/min", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mch/kg/min", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mg", "description": ""}
@@ -351,23 +339,18 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mg/960mg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mg/day", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mg/h", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mg/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mg/kg/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mg/ml", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "mgs/min", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "ml/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "nanograms/kg/minute", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "unit", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "unit/hour", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "unit/mL", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "units/hour", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "units/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_RATE_UNIT", "value": "units/kg/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "ng", "description": "Nasogastric (\ube44\uc704\uad00)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "IM", "description": "Intramuscular injection (\uadfc\uc721\uc8fc\uc0ac)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "IV", "description": "Intravenous injection/infusion (\uc815\ub9e5\uc8fc\uc0ac)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "J TUBE", "description": "Jejunostomy Tube (\uacf5\uc7a5\uad00)"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "NG", "description": "Nasogastric (\ube44\uc704\uad00)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "NGT", "description": "Nasogastric (\ube44\uc704\uad00)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "OG", "description": "Orogastric (\uad6c\uc704\uad00)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "OGT", "description": "Orogastric (\uad6c\uc704\uad00)"}
@@ -375,9 +358,7 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "PEG", "description": "Percutaneous Endoscopic Gastrostomy (\uacbd\ud53c\uc801 \uc704\ub8e8\uad00)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "PO", "description": "Per Oral (\uacbd\uad6c \ud22c\uc5ec)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "PR", "description": "Per Rectum (\uc9c1\uc7a5 \ud22c\uc5ec)"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "Po", "description": "Per Oral (\uacbd\uad6c \ud22c\uc5ec)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "SC", "description": "Subcutaneous injection (\ud53c\ud558\uc8fc\uc0ac)"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "ROUTE", "value": "po", "description": "Per Oral (\uacbd\uad6c \ud22c\uc5ec)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_COMPLETE", "value": "N", "description": "\uc544\ub2c8\uc624"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "INFUSION_COMPLETE", "value": "Y", "description": "\uc608\uc815 \uae30\uac04 \ub9cc\ub8cc"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "EMAR_DETAIL", "column": "NEW_IV_BAG_HUNG", "value": "Y", "description": ""}
@@ -806,7 +787,6 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PHARMACY", "column": "DISPENSATION", "value": "NON FORM BULK MED", "description": "\ubcd1\uc6d0 \ucc98\ubc29\uc9d1\uc5d0 \uc5c6\ub294(Non-Formulary) \ub300\ub7c9(Bulk) \uc57d\ubb3c"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PHARMACY", "column": "DISPENSATION", "value": "NON PYXIS MED", "description": "\ud574\ub2f9 \uae30\uae30(Pyxis)\ub97c \ud1b5\ud558\uc9c0 \uc54a\uc74c"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PHARMACY", "column": "DISPENSATION", "value": "OmniCell", "description": "\uc790\ub3d9 \uc57d\ud488 \ubd88\ucd9c\uae30(\ubcd1\uc6d0 \uc790\ub3d9 \uc870\uc81c \uae30\uae30 \ube0c\ub79c\ub4dc\uba85)"}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PHARMACY", "column": "DISPENSATION", "value": "Omnicell", "description": "\uc790\ub3d9 \uc57d\ud488 \ubd88\ucd9c\uae30(\ubcd1\uc6d0 \uc790\ub3d9 \uc870\uc81c \uae30\uae30 \ube0c\ub79c\ub4dc\uba85)"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PHARMACY", "column": "DISPENSATION", "value": "PATIENT MAY TAKE OWN", "description": "\ud658\uc790\uac00 \uc9d1\uc5d0\uc11c \uac00\uc838\uc628 \uc57d\uc744 \uadf8\ub300\ub85c \uc0ac\uc6a9\ud560 \uc218 \uc788\uc74c"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PHARMACY", "column": "DISPENSATION", "value": "Pharmacy Meds", "description": "\uc911\uc559 \uc57d\uad6d\uc5d0\uc11c \uc870\uc81c/\uc900\ube44\ub41c \uc57d"}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PHARMACY", "column": "DISPENSATION", "value": "Self Med Program", "description": "\ud658\uc790\uac00 \uc790\uac00 \ubcf5\uc6a9"}
@@ -1201,7 +1181,6 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mcg/kg/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mcg/kg/min", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mcg/mL", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mcg/ml", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mcg\\ 0 mcg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mcg\\150mcg\\250mcg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg", "description": ""}
@@ -1212,10 +1191,8 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/100 mL", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/24h", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/250 mL", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/250 ml", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/40mg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/50 mL", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/50 ml", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/500 ml", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/day", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/dose", "description": ""}
@@ -1224,22 +1201,16 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/kg/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/m2", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/mL", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg/ml", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg\\ 0 mg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg\\ 150 mg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg\\ 40mg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg\\100 mg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg\\40 mg", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mg\\960 mg", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "million units", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "ml", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "ml/day", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "ml/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "mmol", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "nanogram", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "nanograms/kg/minute", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "scp", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "units", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "units/hr", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "DOSE_UNIT_RX", "value": "units\\ 0 units", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "PRESCRIPTIONS", "column": "ROUTE", "value": "AC", "description": ""}
@@ -1418,7 +1389,6 @@
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "TRANSFERS", "column": "CAREUNIT", "value": "Transplant", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "TRANSFERS", "column": "CAREUNIT", "value": "Trauma SICU (TSICU)", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "TRANSFERS", "column": "CAREUNIT", "value": "UNKNOWN", "description": ""}
-{"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "TRANSFERS", "column": "CAREUNIT", "value": "Unknown", "description": ""}
 {"sheet": "hop_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "TRANSFERS", "column": "CAREUNIT", "value": "Vascular", "description": ""}
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "#/uL", "description": ""}
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "%", "description": ""}
@@ -1440,7 +1410,6 @@
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "dynes*sec/cm5/m2", "description": ""}
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "dynes.sec.cm-5/m2", "description": ""}
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "g/dL", "description": ""}
-{"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "g/dl", "description": ""}
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "g/kg", "description": ""}
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "hour", "description": ""}
 {"sheet": "icu_\uceec\ub7fc\ub0b4 \ucee8\ud150\uce20 \uc815\ubcf4", "table": "CHARTEVENTS", "column": "VALUEUOM", "value": "insp/min", "description": ""}

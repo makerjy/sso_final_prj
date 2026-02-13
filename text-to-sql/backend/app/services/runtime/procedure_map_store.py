@@ -5,8 +5,10 @@ from typing import Any, Iterable
 import json
 import re
 
+from app.core.paths import project_path
 
-_PROCEDURE_MAP_PATH = Path("var/metadata/procedure_icd_map.jsonl")
+
+_PROCEDURE_MAP_PATH = project_path("var/metadata/procedure_icd_map.jsonl")
 _PROCEDURE_MAP_CACHE_MTIME: float = -1.0
 _PROCEDURE_MAP_CACHE: list[dict[str, Any]] = []
 
@@ -113,4 +115,3 @@ def map_prefixes_for_terms(procedure_map: list[dict[str, Any]], terms: Iterable[
             if value and value not in prefixes:
                 prefixes.append(value)
     return prefixes
-

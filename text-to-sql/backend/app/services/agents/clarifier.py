@@ -55,7 +55,7 @@ def evaluate_question_clarity(
     response = client.chat(
         messages=messages,
         model=settings.expert_model,
-        max_tokens=settings.llm_max_output_tokens,
+        max_tokens=max(150, int(getattr(settings, "llm_max_output_tokens_clarifier", settings.llm_max_output_tokens))),
     )
     payload = _extract_json(response["content"])
     payload["usage"] = response.get("usage", {})

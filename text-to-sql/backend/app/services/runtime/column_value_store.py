@@ -7,9 +7,11 @@ import xml.etree.ElementTree as ET
 import json
 import re
 
+from app.core.paths import project_path
 
-_COLUMN_VALUE_JSONL_PATH = Path("var/metadata/column_value_docs.jsonl")
-_COLUMN_VALUE_XLSX_PATH = Path("docs/데이터 탐색 항목_컬럼 값.xlsx")
+
+_COLUMN_VALUE_JSONL_PATH = project_path("var/metadata/column_value_docs.jsonl")
+_COLUMN_VALUE_XLSX_PATH = project_path("docs/데이터 탐색 항목_컬럼 값.xlsx")
 _COLUMN_VALUE_CACHE_MTIME: float = -1.0
 _COLUMN_VALUE_CACHE: list[dict[str, Any]] = []
 
@@ -26,6 +28,62 @@ _HEADER_ALIASES = {
     "description": {"설명", "description", "desc"},
 }
 
+_COLUMN_VALUE_STOPWORDS = {
+    "the",
+    "and",
+    "or",
+    "for",
+    "with",
+    "from",
+    "to",
+    "of",
+    "in",
+    "on",
+    "by",
+    "show",
+    "list",
+    "compare",
+    "vs",
+    "환자",
+    "전체",
+    "비교",
+    "보여줘",
+    "해줘",
+}
+
+_CATEGORY_INTENT_RE = re.compile(
+    r"(admission\s*type|discharge\s*location|admission\s*location|insurance|race|ethnicity|language|status|category|enum|"
+    r"유형|종류|구분|상태|범주|코드값|컬럼\s*값|열\s*값|입원\s*유형|퇴원\s*위치)",
+    re.IGNORECASE,
+)
+
+_SERVICE_INTENT_RE = re.compile(
+    r"(service|department|curr_service|prev_service|진료과|서비스|내과|외과|신경과|정형외과|이비인후과|산부인과|심장외과|흉부외과)",
+    re.IGNORECASE,
+)
+
+_SERVICE_COLUMN_SET = {"CURR_SERVICE", "PREV_SERVICE"}
+_KO_PARTICLE_SUFFIXES = (
+    "에서",
+    "으로",
+    "에게",
+    "까지",
+    "부터",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "와",
+    "과",
+    "의",
+    "도",
+    "만",
+    "로",
+    "에",
+)
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", "", text.lower())
@@ -33,6 +91,21 @@ def _normalize(text: str) -> str:
 
 def _has_korean(text: str) -> bool:
     return bool(re.search(r"[가-힣]", text))
+
+
+def _expand_token_variants(token: str) -> list[str]:
+    text = str(token or "").strip()
+    if not text:
+        return []
+    variants = [text]
+    if not _has_korean(text):
+        return variants
+    for suffix in _KO_PARTICLE_SUFFIXES:
+        if text.endswith(suffix) and len(text) - len(suffix) >= 2:
+            base = text[: -len(suffix)]
+            if base and base not in variants:
+                variants.append(base)
+    return variants
 
 
 def _column_index(ref: str) -> int:
@@ -226,13 +299,18 @@ def load_column_value_rows() -> list[dict[str, Any]]:
 
 
 def match_column_value_rows(question: str, rows: list[dict[str, Any]] | None = None, k: int = 8) -> list[dict[str, Any]]:
-    question_lower = question.lower()
     normalized_question = _normalize(question)
     if not normalized_question:
         return []
     raw_tokens = re.split(r"[^0-9A-Za-z가-힣]+", question.lower())
-    tokens = [token for token in (_normalize(item) for item in raw_tokens) if len(token) >= 2]
+    tokens = [
+        token
+        for token in (_normalize(item) for item in raw_tokens)
+        if len(token) >= 2 and token not in _COLUMN_VALUE_STOPWORDS
+    ]
     token_set = set(tokens)
+    category_intent = bool(_CATEGORY_INTENT_RE.search(question))
+    service_intent = bool(_SERVICE_INTENT_RE.search(question))
     source = rows if rows is not None else load_column_value_rows()
 
     matched: list[dict[str, Any]] = []
@@ -248,52 +326,96 @@ def match_column_value_rows(question: str, rows: list[dict[str, Any]] | None = N
         score = 0
         table_col = _normalize(f"{table}.{column}")
         table_key = _normalize(table)
-        struct_match = False
-
-        # Lightweight intent boosts for frequent categorical asks.
-        if (
-            "입원유형" in normalized_question
-            or "입원 유형" in question_lower
-            or "admission_type" in normalized_question
-            or "admission type" in question_lower
-        ) and table == "ADMISSIONS" and column == "ADMISSION_TYPE":
-            score += 30
-            struct_match = True
-        if ("카테고리" in question or "category" in question_lower) and column == "CATEGORY":
-            score += 18
-            struct_match = True
-        if ("단위" in question or "unit" in question_lower or "uom" in question_lower) and column == "VALUEUOM":
-            score += 18
-            struct_match = True
-
-        if table_col and table_col in normalized_question:
-            score += 24
-            struct_match = True
-        if table_key and table_key in normalized_question:
-            score += 8
-            struct_match = True
+        table_col_match = bool(table_col and table_col in normalized_question)
+        table_match = bool(table_key and table_key in normalized_question)
         column_key = _normalize(column)
-        if column_key and column_key in normalized_question:
+        column_match = bool(column_key and column_key in normalized_question)
+
+        if table_col_match:
+            score += 28
+        elif table_match and column_match:
+            score += 20
+        elif column_match:
             score += 10
-            struct_match = True
+        elif table_match:
+            score += 4
+
+        value_match = False
         value_key = _normalize(value)
-        if len(value_key) >= 4 and value_key in normalized_question:
-            score += 24
+        if len(value_key) >= 3 and value_key in normalized_question:
+            score += 28
+            value_match = True
         else:
-            value_tokens = [token for token in (_normalize(item) for item in re.split(r"[^0-9A-Za-z가-힣]+", value.lower())) if len(token) >= 3]
+            value_tokens = [
+                token
+                for token in (_normalize(item) for item in re.split(r"[^0-9A-Za-z가-힣]+", value.lower()))
+                if len(token) >= 3 and token not in _COLUMN_VALUE_STOPWORDS
+            ]
             if value_tokens and any(token in token_set for token in value_tokens):
-                score += 12
+                score += 14
+                value_match = True
+
+        desc_key = _normalize(description)
+        desc_hits = 0
         for token in tokens:
-            if not token:
+            if len(token) < 2:
                 continue
             is_ko = _has_korean(token)
-            if (len(token) >= 3 or (is_ko and len(token) >= 2)) and token in haystack:
-                score += 6 if is_ko else min(10, len(token))
-        if score <= 0:
+            if len(token) < 3 and not is_ko:
+                continue
+            matched_value = False
+            matched_desc = False
+            for variant in _expand_token_variants(token):
+                if value_key and variant in value_key:
+                    matched_value = True
+                    break
+                if desc_key and variant in desc_key:
+                    matched_desc = True
+            if matched_value:
+                score += 8 if is_ko else 6
+                continue
+            if matched_desc:
+                desc_hits += 1
+                score += 3 if is_ko else 2
+
+        service_desc_match = bool(
+            service_intent
+            and table.upper() == "SERVICES"
+            and column.upper() in _SERVICE_COLUMN_SET
+            and desc_hits > 0
+        )
+        if service_desc_match:
+            # Allow department-name mentions (e.g., 내과/외과) to resolve service codes
+            # even when table/column names are not explicitly stated in the question.
+            score += 10 + min(desc_hits, 2)
+            value_match = True
+            generic_dept_query = (
+                ("내과" in normalized_question or "외과" in normalized_question or "medicine" in normalized_question or "surgery" in normalized_question)
+                and not any(
+                    token in normalized_question
+                    for token in ("심장", "순환기", "종양", "신경", "흉부", "정형", "비뇨", "이비인후", "cardiac", "neuro", "onco", "thoracic", "ortho")
+                )
+            )
+            if generic_dept_query and ("일반" in desc_key or "general" in desc_key):
+                score += 6
+
+        struct_match = table_col_match or (table_match and column_match) or (column_match and category_intent)
+        if not (value_match or struct_match):
             continue
-        if not struct_match and score < 6:
+        min_score = 10 if value_match else 14
+        if score < min_score:
             continue
-        matched.append({**item, "_score": score})
+
+        matched.append({
+            **item,
+            "_score": score,
+            "_struct_match": struct_match,
+            "_value_match": value_match,
+            "_table_match": table_match,
+            "_column_match": column_match,
+            "_table_col_match": table_col_match,
+            "_desc_hits": desc_hits,
+        })
 
     matched.sort(
         key=lambda item: (

@@ -7,8 +7,10 @@ import uuid
 from pathlib import Path
 import json
 import time
+import re
 
 from app.services.agents.orchestrator import run_oneshot
+from app.services.agents.intent_guard import enforce_intent_alignment
 from app.services.agents.sql_expert import repair_sql_after_error
 from app.services.agents.sql_error_templates import apply_sql_error_templates
 from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
@@ -23,10 +25,29 @@ from app.services.runtime.sql_error_repair_store import (
     upsert_learned_sql_fix,
 )
 from app.core.config import get_settings
+from app.core.paths import project_path
 
 router = APIRouter()
 
 _QUERY_STORE: dict[str, dict] = {}
+_ZERO_RESULT_HINTS = (
+    "count",
+    "how many",
+    "number of",
+    "ratio",
+    "rate",
+    "trend",
+    "distribution",
+    "top",
+    "비율",
+    "비중",
+    "건수",
+    "분포",
+    "추이",
+    "상위",
+    "비교",
+    "여부",
+)
 
 
 class OneShotRequest(BaseModel):
@@ -41,6 +62,7 @@ class OneShotRequest(BaseModel):
 class RunRequest(BaseModel):
     qid: str | None = None
     sql: str | None = None
+    question: str | None = None
     user_ack: bool = False
     user_name: str | None = None
     user_role: str | None = None
@@ -81,6 +103,20 @@ def _repair_sql_once(
     if rules:
         repaired["postprocess"] = rules
     return repaired_sql, repaired
+
+
+def _should_attempt_zero_result_repair(question: str, sql: str) -> bool:
+    q = str(question or "").lower()
+    text = str(sql or "")
+    if not q or not text:
+        return False
+    has_intent = any(token in q for token in _ZERO_RESULT_HINTS)
+    has_where = bool(re.search(r"\bwhere\b", text, re.IGNORECASE))
+    has_agg_shape = bool(
+        re.search(r"\bgroup\s+by\b", text, re.IGNORECASE)
+        or re.search(r"\b(count|avg|sum|min|max|stddev|median|ntile)\s*\(", text, re.IGNORECASE)
+    )
+    return has_intent and (has_where or has_agg_shape)
 
 
 @router.post("/oneshot")
@@ -195,7 +231,12 @@ def run_query(req: RunRequest):
             if isinstance(intent_value, dict):
                 planner_intent = intent_value
     if not question:
-        question = "Fix failed SQL while preserving original intent."
+        req_question = str(req.question or "").strip()
+        if req_question:
+            question = req_question
+    if not question:
+        question = ""
+    has_original_question = bool(str(question).strip())
 
     user_name = req.user_name or "사용자"
     user_role = req.user_role or "연구원"
@@ -233,10 +274,16 @@ def run_query(req: RunRequest):
         max_repair_attempts = (
             settings.sql_auto_repair_max_attempts if settings.sql_auto_repair_enabled else 0
         )
-        for attempt in range(max_repair_attempts + 1):
-            postprocess_profile = "relaxed" if attempt == 0 else "aggressive"
+        max_zero_result_attempts = (
+            settings.sql_zero_result_repair_max_attempts if settings.sql_zero_result_repair_enabled else 0
+        )
+        repair_round = 0
+        zero_result_round = 0
+        seen_sql_signatures: set[str] = {current_sql.strip().rstrip(";")}
+        while True:
+            postprocess_profile = "relaxed" if repair_round == 0 else "aggressive"
             postprocess_reasons: list[str] = []
-            if attempt == 0:
+            if repair_round == 0:
                 postprocess_profile, postprocess_reasons = recommend_postprocess_profile(
                     question,
                     current_sql,
@@ -252,7 +299,7 @@ def run_query(req: RunRequest):
             if pre_rules:
                 auto_repair_history.append(
                     {
-                        "attempt": attempt + 1,
+                        "attempt": repair_round + 1,
                         "source": "postprocess",
                         "profile": postprocess_profile,
                         "profile_reasons": postprocess_reasons,
@@ -261,12 +308,98 @@ def run_query(req: RunRequest):
                         "postprocess": pre_rules,
                     }
                 )
+            if has_original_question:
+                guarded_sql, guard_rules, guard_issues = enforce_intent_alignment(
+                    question,
+                    current_sql,
+                    planner_intent=planner_intent,
+                )
+                guard_applied = False
+                if guarded_sql.strip() != current_sql.strip():
+                    current_sql = guarded_sql
+                    guard_applied = True
+                if guard_rules or guard_issues or guard_applied:
+                    auto_repair_history.append(
+                        {
+                            "attempt": repair_round + 1,
+                            "source": "intent_guard",
+                            "error": "",
+                            "risk_score": None,
+                            "postprocess": guard_rules,
+                            "issues": guard_issues,
+                        }
+                    )
             sql = current_sql
             try:
                 policy_result = precheck_sql(current_sql, question)
                 result = execute_sql(current_sql)
                 rows_returned = int(result.get("row_count") or 0)
                 row_cap = int(result.get("row_cap") or 0)
+                if (
+                    rows_returned == 0
+                    and zero_result_round < max_zero_result_attempts
+                    and _should_attempt_zero_result_repair(question, current_sql)
+                ):
+                    zero_sql, zero_rules = postprocess_sql(
+                        question,
+                        current_sql,
+                        profile="aggressive",
+                    )
+                    zero_sql = str(zero_sql or "").strip()
+                    if zero_sql and zero_sql.rstrip(";") != current_sql.rstrip(";"):
+                        signature = zero_sql.rstrip(";")
+                        if signature not in seen_sql_signatures:
+                            current_sql = zero_sql
+                            seen_sql_signatures.add(signature)
+                            zero_result_round += 1
+                            auto_repair_history.append(
+                                {
+                                    "attempt": repair_round + 1,
+                                    "source": "zero_result_postprocess",
+                                    "error": "NO_ROWS_RETURNED",
+                                    "risk_score": None,
+                                    "postprocess": zero_rules,
+                                }
+                            )
+                            continue
+                    if repair_round < max_repair_attempts:
+                        try:
+                            failed_sql = current_sql
+                            repaired_sql, repaired_payload = _repair_sql_once(
+                                question=question,
+                                question_en=question_en,
+                                context=context,
+                                planner_intent=planner_intent,
+                                failed_sql=failed_sql,
+                                error_message="NO_ROWS_RETURNED: query executed successfully but returned 0 rows.",
+                            )
+                            repaired_sql = str(repaired_sql or "").strip()
+                            if repaired_sql and repaired_sql.rstrip(";") != current_sql.rstrip(";"):
+                                signature = repaired_sql.rstrip(";")
+                                if signature not in seen_sql_signatures:
+                                    current_sql = repaired_sql
+                                    seen_sql_signatures.add(signature)
+                                    zero_result_round += 1
+                                    llm_repair_pairs.append(
+                                        {
+                                            "failed_sql": failed_sql,
+                                            "fixed_sql": repaired_sql,
+                                            "error_message": "NO_ROWS_RETURNED",
+                                            "resolution_notes": repaired_payload.get("postprocess", []),
+                                        }
+                                    )
+                                    auto_repair_history.append(
+                                        {
+                                            "attempt": repair_round + 1,
+                                            "source": "zero_result_llm_repair",
+                                            "error": "NO_ROWS_RETURNED",
+                                            "risk_score": repaired_payload.get("risk_score"),
+                                            "postprocess": repaired_payload.get("postprocess", []),
+                                        }
+                                    )
+                                    continue
+                        except Exception:
+                            pass
                 if row_cap and rows_returned >= row_cap:
                     status = "warning"
                 if settings.sql_run_cost_krw > 0:
@@ -300,78 +433,11 @@ def run_query(req: RunRequest):
                     if persisted_rule_ids:
                         response["repair"]["persisted_rule_ids"] = persisted_rule_ids
                 return response
-            except HTTPException as exc:
-                error_message = str(exc.detail) if exc.detail else str(exc)
-                if attempt >= max_repair_attempts:
-                    raise
-                known_fix = find_learned_sql_fix(current_sql, error_message=error_message)
-                if isinstance(known_fix, dict):
-                    known_fixed_sql = str(known_fix.get("fixed_sql") or "").strip()
-                    if known_fixed_sql and known_fixed_sql.strip() != current_sql.strip():
-                        known_rule_id = str(known_fix.get("id") or "").strip()
-                        if known_rule_id:
-                            mark_learned_sql_fix_used(known_rule_id)
-                        current_sql = known_fixed_sql
-                        auto_repair_history.append(
-                            {
-                                "attempt": attempt + 1,
-                                "source": "learned_rule",
-                                "rule_id": known_rule_id,
-                                "error": error_message,
-                                "risk_score": None,
-                                "postprocess": [],
-                            }
-                        )
-                        continue
-                templated_sql, template_rules = apply_sql_error_templates(
-                    question=question,
-                    sql=current_sql,
-                    error_message=error_message,
-                )
-                if templated_sql.strip() and templated_sql.strip() != current_sql.strip():
-                    current_sql = templated_sql
-                    auto_repair_history.append(
-                        {
-                            "attempt": attempt + 1,
-                            "source": "template_repair",
-                            "error": error_message,
-                            "risk_score": None,
-                            "postprocess": template_rules,
-                        }
-                    )
-                    continue
-                failed_sql = current_sql
-                repaired_sql, repaired_payload = _repair_sql_once(
-                    question=question,
-                    question_en=question_en,
-                    context=context,
-                    planner_intent=planner_intent,
-                    failed_sql=failed_sql,
-                    error_message=error_message,
-                )
-                if repaired_sql.strip() == current_sql.strip():
-                    raise
-                current_sql = repaired_sql
-                llm_repair_pairs.append(
-                    {
-                        "failed_sql": failed_sql,
-                        "fixed_sql": repaired_sql,
-                        "error_message": error_message,
-                        "resolution_notes": repaired_payload.get("postprocess", []),
-                    }
-                )
-                auto_repair_history.append(
-                    {
-                        "attempt": attempt + 1,
-                        "source": "llm_repair",
-                        "error": error_message,
-                        "risk_score": repaired_payload.get("risk_score"),
-                        "postprocess": repaired_payload.get("postprocess", []),
-                    }
-                )
             except Exception as exc:  # pragma: no cover - depends on driver/SDK
-                error_message = str(exc)
-                if attempt >= max_repair_attempts:
+                error_message = (
+                    str(exc.detail) if isinstance(exc, HTTPException) and exc.detail else str(exc)
+                )
+                if repair_round >= max_repair_attempts:
                     raise
                 known_fix = find_learned_sql_fix(current_sql, error_message=error_message)
                 if isinstance(known_fix, dict):
@@ -383,7 +449,7 @@ def run_query(req: RunRequest):
                         current_sql = known_fixed_sql
                         auto_repair_history.append(
                             {
-                                "attempt": attempt + 1,
+                                "attempt": repair_round + 1,
                                 "source": "learned_rule",
                                 "rule_id": known_rule_id,
                                 "error": error_message,
@@ -391,6 +457,7 @@ def run_query(req: RunRequest):
                                 "postprocess": [],
                             }
                         )
+                        repair_round += 1
                         continue
                 templated_sql, template_rules = apply_sql_error_templates(
                     question=question,
@@ -401,13 +468,14 @@ def run_query(req: RunRequest):
                     current_sql = templated_sql
                     auto_repair_history.append(
                         {
-                            "attempt": attempt + 1,
+                            "attempt": repair_round + 1,
                             "source": "template_repair",
                             "error": error_message,
                             "risk_score": None,
                             "postprocess": template_rules,
                         }
                     )
+                    repair_round += 1
                     continue
                 failed_sql = current_sql
                 repaired_sql, repaired_payload = _repair_sql_once(
@@ -431,13 +499,14 @@ def run_query(req: RunRequest):
                 )
                 auto_repair_history.append(
                     {
-                        "attempt": attempt + 1,
+                        "attempt": repair_round + 1,
                         "source": "llm_repair",
                         "error": error_message,
                         "risk_score": repaired_payload.get("risk_score"),
                         "postprocess": repaired_payload.get("postprocess", []),
                     }
                 )
+                repair_round += 1
     except HTTPException as exc:
         status = "error"
         error_detail = str(exc.detail) if exc.detail else str(exc)
@@ -508,5 +577,5 @@ def demo_questions():
             return {"questions": list(aliases.keys())}
         return {"questions": [key for key in cache.keys() if key != "_aliases"]}
 
-    questions = _load_questions_jsonl(Path("var/metadata/demo_questions.jsonl"))
+    questions = _load_questions_jsonl(project_path("var/metadata/demo_questions.jsonl"))
     return {"questions": questions}

@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import Any
 import json
 
+from app.core.paths import project_path
 
-_SCHEMA_HINTS_PATH = Path("var/metadata/sql_postprocess_schema_hints.json")
+
+_SCHEMA_HINTS_PATH = project_path("var/metadata/sql_postprocess_schema_hints.json")
 _SCHEMA_HINTS_CACHE_MTIME: float = -1.0
 _SCHEMA_HINTS_CACHE: dict[str, Any] = {}
 
@@ -92,4 +94,3 @@ def load_sql_schema_hints() -> dict[str, Any]:
     _SCHEMA_HINTS_CACHE = built
     _SCHEMA_HINTS_CACHE_MTIME = mtime
     return _SCHEMA_HINTS_CACHE
-

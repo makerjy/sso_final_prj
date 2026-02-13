@@ -5,8 +5,10 @@ from typing import Any, Iterable
 import json
 import re
 
+from app.core.paths import project_path
 
-_DIAGNOSIS_MAP_PATH = Path("var/metadata/diagnosis_icd_map.jsonl")
+
+_DIAGNOSIS_MAP_PATH = project_path("var/metadata/diagnosis_icd_map.jsonl")
 _DIAGNOSIS_MAP_CACHE_MTIME: float = -1.0
 _DIAGNOSIS_MAP_CACHE: list[dict[str, Any]] = []
 

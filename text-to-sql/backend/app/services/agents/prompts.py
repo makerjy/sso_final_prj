@@ -26,6 +26,8 @@ ENGINEER_SYSTEM_PROMPT = (
     "For diagnosis/procedure concept filtering, prefer ICD_CODE prefix predicates from context mappings over LONG_TITLE keyword filtering. "
     "When prefix sets mix alpha/numeric codes, add ICD_VERSION constraints (alpha->10, numeric->9). "
     "For categorical text filters, prefer known value hints from context. "
+    "Do not map clinical department/service intent to ADMISSIONS.ADMISSION_TYPE literals. "
+    "For department/service restrictions use SERVICES.CURR_SERVICE (or PREV_SERVICE only when explicitly requested as previous service). "
     "For admission-level rates, avoid one-to-many join inflation (use EXISTS or DISTINCT HADM_ID denominator). "
     "Avoid gratuitous DISTINCT in simple counts unless user explicitly asks unique/distinct or deduplication is mathematically required. "
     "If the user asks rate/ratio/percentage, return an explicit ratio expression, not counts only. "
@@ -35,7 +37,9 @@ ENGINEER_SYSTEM_PROMPT = (
     "When a specific medication or medication class is named, include an explicit medication filter for that concept. "
     "For microbiology antibiotic frequency intents, prefer MICROBIOLOGYEVENTS.AB_NAME over PRESCRIPTIONS drug name counts. "
     "For diagnosis rate by subgroup, keep numerator and denominator at the same admission grain. "
-    "Use exact categorical values if context provides valid value hints."
+    "Use exact categorical values if context provides valid value hints. "
+    "For open-ended distribution queries phrased as counts by a category (e.g., 'counts by ...'), "
+    "default to top 10 categories ordered by count descending unless user explicitly requests full output."
 )
 
 
@@ -50,6 +54,7 @@ EXPERT_SYSTEM_PROMPT = (
     "Raise risk for likely semantic errors: one-to-many inflation in admission-level rates, wrong join keys, or missing core cohort boundaries implied by question. "
     "Raise risk when ratio/rate intent exists but SQL returns only raw counts without an explicit ratio expression. "
     "Raise risk for exact categorical literals that do not align with known context value hints. "
+    "Raise risk if clinical department intent is implemented with ADMISSIONS.ADMISSION_TYPE instead of SERVICES.CURR_SERVICE/PREV_SERVICE. "
     "Raise risk if user requested stratified comparison but SQL collapses to one aggregate row. "
     "Raise risk if quartile/Q1-Q4 was requested but SQL lacks quantile bucketing logic (e.g., NTILE). "
     "Raise risk if usage amount/dose intent exists but SQL uses only presence/diagnosis without quantitative aggregation. "
@@ -73,6 +78,7 @@ ERROR_REPAIR_SYSTEM_PROMPT = (
     "Never use LIMIT/TOP/FETCH FIRST. "
     "Use schema-valid table/column names only from provided context. "
     "Do not join ITEMID to ICD_CODE; for item-label filtering use D_ITEMS/D_LABITEMS with ITEMID. "
+    "If failed SQL maps department intent to ADMISSIONS.ADMISSION_TYPE, repair to SERVICES.CURR_SERVICE/PREV_SERVICE filtering. "
     "For catheter/device insertion intents, repair toward PROCEDUREEVENTS joined to D_ITEMS with LABEL-based concept predicates. "
     "If one-to-many joins can inflate rates, use admission-grain logic (EXISTS or DISTINCT HADM_ID). "
     "If question asks ratio/rate/percentage, keep ratio output explicit (not counts-only) while preserving grouping intent. "

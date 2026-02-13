@@ -14,6 +14,9 @@ _SQL_TOKEN_RE = re.compile(r'"[^"]+"|[A-Za-z_][A-Za-z0-9_.$#]*|[(),]')
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _LINE_COMMENT_RE = re.compile(r"--[^\r\n]*")
 _SINGLE_QUOTED_LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
+_ROWNUM_LIMIT_RE = re.compile(r"\bROWNUM\s*<=\s*\d+", re.IGNORECASE)
+_FETCH_FIRST_RE = re.compile(r"\bFETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\b", re.IGNORECASE)
+_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+\b", re.IGNORECASE)
 
 _FROM_CLAUSE_END_KEYWORDS = {
     "where",
@@ -42,6 +45,9 @@ _WHERE_OPTIONAL_QUESTION_HINTS = (
     "median",
     "ratio",
     "rate",
+    "share",
+    "proportion",
+    "breakdown",
     "top",
     "most",
     "least",
@@ -53,6 +59,9 @@ _WHERE_OPTIONAL_QUESTION_HINTS = (
     "평균",
     "중앙",
     "비율",
+    "비중",
+    "구성비",
+    "점유율",
     "건수",
     "통계",
     "요약",
@@ -60,6 +69,9 @@ _WHERE_OPTIONAL_QUESTION_HINTS = (
     "하위",
     "몇 명",
     "몇건",
+    "여부",
+    "상태",
+    "플래그",
     "트렌드",
 )
 
@@ -175,14 +187,37 @@ def _resolve_table_refs(sql: str, *, allowed_tables: set[str], cte_names: set[st
     return resolved_tables, disallowed
 
 
-def _can_skip_where(question: str | None, sql: str) -> bool:
+def _has_safe_full_scope_shape(sql: str) -> bool:
+    # Full-scope reads are allowed when the query shape is inherently bounded
+    # (aggregation/grouping) or explicitly row-limited.
+    if bool(_AGG_FN_RE.search(sql)) or bool(re.search(r"\bgroup\s+by\b", sql, re.IGNORECASE)):
+        return True
+    if _ROWNUM_LIMIT_RE.search(sql) or _FETCH_FIRST_RE.search(sql) or _LIMIT_RE.search(sql):
+        return True
+    if bool(re.match(r"^\s*select\s+distinct\b", sql, re.IGNORECASE)):
+        return True
+    return False
+
+
+def _can_skip_where(question: str | None, sql: str) -> tuple[bool, str]:
+    if _has_safe_full_scope_shape(sql):
+        return True, "Safe full-scope read: WHERE optional"
     if not question:
-        return False
+        return False, ""
     q = question.lower()
     if not any(hint in q for hint in _WHERE_OPTIONAL_QUESTION_HINTS):
-        return False
+        return False, ""
     has_aggregate_shape = bool(_AGG_FN_RE.search(sql)) or bool(re.search(r"\bgroup\s+by\b", sql, re.IGNORECASE))
-    return has_aggregate_shape
+    if has_aggregate_shape:
+        return True, "Aggregate question: WHERE optional"
+
+    # Status/flag listing requests (e.g., "... 여부/상태") are often valid full-scope reads
+    # without additional predicates.
+    has_flag_projection = bool(re.search(r"\b[A-Za-z0-9_]*_FLAG\b", sql, re.IGNORECASE))
+    mentions_status_intent = any(token in q for token in ("여부", "상태", "플래그", "status", "flag"))
+    if has_flag_projection and mentions_status_intent:
+        return True, "Status/flag question: WHERE optional"
+    return False, ""
 
 
 def precheck_sql(sql: str, question: str | None = None) -> dict[str, object]:
@@ -217,9 +252,9 @@ def precheck_sql(sql: str, question: str | None = None) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="Join limit exceeded")
 
     has_where = re.search(r"\bwhere\b", text, re.IGNORECASE) is not None
-    where_optional = _can_skip_where(question, text)
+    where_optional, where_reason = _can_skip_where(question, text)
     where_ok = has_where or where_optional
-    where_message = "WHERE clause present" if has_where else "Aggregate question: WHERE optional"
+    where_message = "WHERE clause present" if has_where else (where_reason or "WHERE optional")
     checks.append(_check("WHERE rule", where_ok, where_message))
     if not has_where and not where_optional:
         raise HTTPException(status_code=403, detail="WHERE clause required")

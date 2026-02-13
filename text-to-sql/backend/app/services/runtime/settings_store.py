@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import Any
 import json
 
+from app.core.paths import project_path
 from app.services.runtime.state_store import get_state_store
 
 
-BASE_PATH = Path("var/metadata")
+BASE_PATH = project_path("var/metadata")
 CONNECTION_PATH = BASE_PATH / "connection_settings.json"
 TABLE_SCOPE_PATH = BASE_PATH / "table_scope.json"
 

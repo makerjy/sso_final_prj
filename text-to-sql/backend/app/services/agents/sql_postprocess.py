@@ -432,6 +432,25 @@ def _column_value_index() -> dict[str, dict[str, list[str]]]:
         values = table_bucket.setdefault(column, [])
         if value not in values:
             values.append(value)
+
+    # Some sources include only SERVICES.PREV_SERVICE values, while most analysis
+    # questions filter current service (CURR_SERVICE). Share value catalogs between
+    # the paired columns to avoid zero-row filters from unseen literals.
+    services_bucket = index.get("SERVICES")
+    if isinstance(services_bucket, dict):
+        prev_values = list(services_bucket.get("PREV_SERVICE") or [])
+        curr_values = list(services_bucket.get("CURR_SERVICE") or [])
+        if prev_values and not curr_values:
+            services_bucket["CURR_SERVICE"] = list(prev_values)
+        elif curr_values and not prev_values:
+            services_bucket["PREV_SERVICE"] = list(curr_values)
+        elif prev_values and curr_values:
+            merged: list[str] = []
+            for value in [*prev_values, *curr_values]:
+                if value not in merged:
+                    merged.append(value)
+            services_bucket["PREV_SERVICE"] = list(merged)
+            services_bucket["CURR_SERVICE"] = list(merged)
     return index
 
 
@@ -2294,6 +2313,246 @@ def _append_where_predicate(sql: str, predicate: str) -> str:
     return f"{text} WHERE {predicate}"
 
 
+def _collect_table_aliases(sql: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for match in re.finditer(
+        r"\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+        str(sql or ""),
+        re.IGNORECASE,
+    ):
+        table = str(match.group(1) or "").strip().upper()
+        alias = str(match.group(2) or "").strip().upper()
+        if not table:
+            continue
+        if not alias or alias in {"ON", "WHERE", "GROUP", "ORDER", "INNER", "LEFT", "RIGHT", "FULL", "JOIN"}:
+            alias = table
+        aliases[alias] = table
+    return aliases
+
+
+def _ensure_hadm_not_null_for_distinct_counts(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = str(sql or "").strip()
+    if not text:
+        return text, rules
+
+    alias_tables = _collect_table_aliases(text)
+    aliases = {
+        str(match.group(1) or "").strip().upper()
+        for match in re.finditer(
+            r"\bCOUNT\s*\(\s*DISTINCT\s+([A-Za-z0-9_]+)\.HADM_ID\s*\)",
+            text,
+            re.IGNORECASE,
+        )
+    }
+    if not aliases:
+        return text, rules
+
+    target_tables = {
+        "ADMISSIONS",
+        "SERVICES",
+        "PRESCRIPTIONS",
+        "DIAGNOSES_ICD",
+        "PROCEDURES_ICD",
+        "ICUSTAYS",
+        "TRANSFERS",
+        "PROCEDUREEVENTS",
+        "CHARTEVENTS",
+        "LABEVENTS",
+        "MICROBIOLOGYEVENTS",
+    }
+    for alias in sorted(aliases):
+        table = alias_tables.get(alias, alias)
+        if table not in target_tables:
+            continue
+        predicate = f"{alias}.HADM_ID IS NOT NULL"
+        if re.search(rf"\b{re.escape(alias)}\s*\.\s*HADM_ID\s+IS\s+NOT\s+NULL\b", text, re.IGNORECASE):
+            continue
+        updated = _append_where_predicate(text, predicate)
+        if updated != text:
+            text = updated
+            rules.append(f"hadm_not_null_distinct:{alias}")
+
+    return text, rules
+
+
+def _rewrite_prescriptions_hadm_count_to_admissions_exists(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").lower()
+    if not any(token in q for token in ("입원", "admission", "hospitalization", "inpatient", "during admission")):
+        return sql, rules
+
+    text = str(sql or "").strip()
+    if not text:
+        return sql, rules
+    if re.search(r"\bADMISSIONS\b", text, re.IGNORECASE):
+        return sql, rules
+    if not re.search(r"\bFROM\s+PRESCRIPTIONS\b", text, re.IGNORECASE):
+        return sql, rules
+    if not re.search(r"\bCOUNT\s*\(\s*DISTINCT\s+[A-Za-z0-9_]+\.HADM_ID\s*\)", text, re.IGNORECASE):
+        return sql, rules
+
+    from_match = re.search(
+        r"\bFROM\s+PRESCRIPTIONS(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+        text,
+        re.IGNORECASE,
+    )
+    if not from_match:
+        return sql, rules
+    alias = str(from_match.group(1) or "PRESCRIPTIONS").strip()
+    alias_upper = alias.upper()
+    if alias_upper in {"WHERE", "GROUP", "ORDER", "HAVING", "JOIN", "ON"}:
+        alias = "PRESCRIPTIONS"
+
+    where_match = re.search(
+        r"\bWHERE\b(?P<body>.*?)(?:\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    where_body = str(where_match.group("body") or "").strip() if where_match else ""
+    if not where_body:
+        return sql, rules
+
+    hadm_not_null_pattern = rf"(?:\bAND\s+)?\b{re.escape(alias)}\s*\.\s*HADM_ID\s+IS\s+NOT\s+NULL\b(?:\s+AND)?"
+    cleaned_where = re.sub(hadm_not_null_pattern, " ", where_body, flags=re.IGNORECASE)
+    cleaned_where = re.sub(r"\bAND\s+AND\b", "AND", cleaned_where, flags=re.IGNORECASE)
+    cleaned_where = re.sub(r"^\s*AND\s+", "", cleaned_where, flags=re.IGNORECASE)
+    cleaned_where = re.sub(r"\s+AND\s*$", "", cleaned_where, flags=re.IGNORECASE)
+    cleaned_where = re.sub(r"\s{2,}", " ", cleaned_where).strip()
+
+    exists_predicates = [f"{alias}.HADM_ID = a.HADM_ID"]
+    if cleaned_where:
+        exists_predicates.append(cleaned_where)
+    exists_clause = " AND ".join(exists_predicates)
+    rewritten = (
+        "SELECT COUNT(DISTINCT a.HADM_ID) AS CNT "
+        "FROM ADMISSIONS a "
+        f"WHERE EXISTS (SELECT 1 FROM PRESCRIPTIONS {alias} WHERE {exists_clause})"
+    )
+    rules.append("prescriptions_hadm_count_to_admissions_exists")
+    return rewritten, rules
+
+
+def _ensure_prescriptions_hadm_not_null_for_grouping(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = str(sql or "").strip()
+    if not text:
+        return text, rules
+    if not re.search(r"\bPRESCRIPTIONS\b", text, re.IGNORECASE):
+        return text, rules
+
+    alias_matches = list(
+        re.finditer(
+            r"\bFROM\s+PRESCRIPTIONS(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    for match in alias_matches:
+        alias = str(match.group(1) or "PRESCRIPTIONS").strip()
+        alias_upper = alias.upper()
+        if alias_upper in {"WHERE", "GROUP", "ORDER", "HAVING", "JOIN", "ON"}:
+            alias = "PRESCRIPTIONS"
+            alias_upper = "PRESCRIPTIONS"
+        if not re.search(rf"\bGROUP\s+BY\b[\s\S]*\b{re.escape(alias)}\s*\.\s*HADM_ID\b", text, re.IGNORECASE):
+            continue
+        if re.search(rf"\b{re.escape(alias)}\s*\.\s*HADM_ID\s+IS\s+NOT\s+NULL\b", text, re.IGNORECASE):
+            continue
+
+        where_group_pattern = re.compile(
+            rf"(\bFROM\s+PRESCRIPTIONS(?:\s+(?:AS\s+)?{re.escape(alias)})?\s+\bWHERE\b\s*)(?P<body>.*?)(\bGROUP\s+BY\b)",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        def repl_where_group(found: re.Match[str]) -> str:
+            body = str(found.group("body") or "").rstrip()
+            if body:
+                body = f"{body} AND {alias}.HADM_ID IS NOT NULL "
+            else:
+                body = f"{alias}.HADM_ID IS NOT NULL "
+            return f"{found.group(1)}{body}{found.group(3)}"
+
+        updated = where_group_pattern.sub(repl_where_group, text, count=1)
+        if updated != text:
+            text = updated
+            rules.append(f"prescriptions_hadm_not_null_group:{alias_upper}")
+            continue
+
+        from_group_pattern = re.compile(
+            rf"(\bFROM\s+PRESCRIPTIONS(?:\s+(?:AS\s+)?{re.escape(alias)})?\s*)(\bGROUP\s+BY\b)",
+            re.IGNORECASE,
+        )
+        updated = from_group_pattern.sub(
+            rf"\1WHERE {alias}.HADM_ID IS NOT NULL \2",
+            text,
+            count=1,
+        )
+        if updated != text:
+            text = updated
+            rules.append(f"prescriptions_hadm_not_null_group:{alias_upper}")
+
+    return text, rules
+
+
+def _rewrite_services_hadm_count_to_admissions_join(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").lower()
+    if not any(token in q for token in ("입원", "admission", "hospitalization", "inpatient")):
+        return sql, rules
+
+    text = str(sql or "").strip()
+    if not text:
+        return sql, rules
+    if re.search(r"\bADMISSIONS\b", text, re.IGNORECASE):
+        return sql, rules
+    if not re.search(r"\bFROM\s+SERVICES\b", text, re.IGNORECASE):
+        return sql, rules
+
+    from_match = re.search(
+        r"\bFROM\s+SERVICES(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+        text,
+        re.IGNORECASE,
+    )
+    if not from_match:
+        return sql, rules
+    alias = str(from_match.group(1) or "SERVICES").strip()
+    alias_upper = alias.upper()
+    if alias_upper in {"WHERE", "GROUP", "ORDER", "HAVING", "JOIN", "ON"}:
+        alias = "SERVICES"
+        alias_upper = "SERVICES"
+
+    if not re.search(rf"\bCOUNT\s*\(\s*DISTINCT\s+{re.escape(alias)}\s*\.\s*HADM_ID\s*\)", text, re.IGNORECASE):
+        if not re.search(r"\bCOUNT\s*\(\s*DISTINCT\s+HADM_ID\s*\)", text, re.IGNORECASE):
+            return sql, rules
+
+    where_match = re.search(
+        r"\bWHERE\b(?P<body>.*?)(?:\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    where_body = str(where_match.group("body") or "").strip() if where_match else ""
+    if where_body:
+        if alias_upper != "S":
+            where_body = re.sub(
+                rf"\b{re.escape(alias)}\s*\.",
+                "s.",
+                where_body,
+                flags=re.IGNORECASE,
+            )
+        where_clause = f" WHERE {where_body}"
+    else:
+        where_clause = ""
+
+    rewritten = (
+        "SELECT COUNT(DISTINCT a.HADM_ID) AS CNT "
+        "FROM ADMISSIONS a "
+        "JOIN SERVICES s ON s.HADM_ID = a.HADM_ID"
+        f"{where_clause}"
+    )
+    rules.append("services_hadm_count_to_admissions_join")
+    return rewritten, rules
+
+
 def _rewrite_admissions_icd_count_grain(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     q = str(question or "").lower()
@@ -2529,7 +2788,7 @@ def _strip_transfers_eventtype_filter(question: str, sql: str) -> tuple[str, lis
         return text, rules
 
     column_pattern = r"(?:UPPER\s*\(\s*)?(?:[A-Za-z0-9_]+\.)?EVENTTYPE(?:\s*\))?"
-    value_pattern = r"'TRANSFER'"
+    value_pattern = r"'TRANSFERS?'"
     predicate_pattern = rf"{column_pattern}\s*=\s*{value_pattern}"
 
     text = re.sub(
@@ -4382,7 +4641,33 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     avg_alias_fixed, avg_alias_rules = _normalize_avg_aliases(avg_count_fixed)
     rules.extend(avg_alias_rules)
 
-    ordered_count_fixed, ordered_count_rules = _ensure_order_by_count(q, avg_alias_fixed)
+    hadm_not_null_fixed, hadm_not_null_rules = _ensure_hadm_not_null_for_distinct_counts(avg_alias_fixed)
+    rules.extend(hadm_not_null_rules)
+
+    hadm_group_fixed, hadm_group_rules = _ensure_prescriptions_hadm_not_null_for_grouping(hadm_not_null_fixed)
+    rules.extend(hadm_group_rules)
+
+    admissions_count_fixed, admissions_count_rules = _rewrite_prescriptions_hadm_count_to_admissions_exists(
+        q,
+        hadm_group_fixed,
+    )
+    rules.extend(admissions_count_rules)
+
+    services_adm_fixed, services_adm_rules = _rewrite_services_hadm_count_to_admissions_join(
+        q,
+        admissions_count_fixed,
+    )
+    rules.extend(services_adm_rules)
+
+    # Low-risk categorical literal normalization helps avoid empty-result queries
+    # from unseen enum-like values (e.g., EVENTTYPE='TRANSFERS').
+    categorical_fixed, categorical_rules = _rewrite_unknown_categorical_equals(q, services_adm_fixed)
+    rules.extend(categorical_rules)
+
+    transfers_eventtype_fixed, transfers_eventtype_rules = _strip_transfers_eventtype_filter(q, categorical_fixed)
+    rules.extend(transfers_eventtype_rules)
+
+    ordered_count_fixed, ordered_count_rules = _ensure_order_by_count(q, transfers_eventtype_fixed)
     rules.extend(ordered_count_rules)
 
     ordered, order_rules = _fix_order_by_bad_alias(ordered_count_fixed)
@@ -4418,58 +4703,12 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
 
 
 def _postprocess_sql_conservative(question: str, sql: str) -> tuple[str, list[str]]:
-    rules: list[str] = []
+    # Conservative mode should remain close to model output: start with relaxed
+    # fixes, then apply only a small set of high-signal semantic corrections.
     q = question.strip()
+    text, rules = _postprocess_sql_relaxed(question, sql)
 
-    mapped, map_rules = _apply_schema_mappings(sql)
-    rules.extend(map_rules)
-
-    icu_forced, icu_force_rules = _ensure_icustays_table(q, mapped)
-    rules.extend(icu_force_rules)
-
-    joined_adm, adm_rules = _ensure_admissions_join(icu_forced)
-    rules.extend(adm_rules)
-
-    joined_patients, patient_rules = _ensure_patients_join(joined_adm)
-    rules.extend(patient_rules)
-
-    rewritten_patients_id, patient_id_rules = _rewrite_patients_id(joined_patients)
-    rules.extend(patient_id_rules)
-
-    joined_icd, icd_rules = _ensure_icd_join(question, rewritten_patients_id)
-    rules.extend(icd_rules)
-
-    diag_title_fixed, diag_title_rules = _ensure_diagnosis_title_join(q, joined_icd)
-    rules.extend(diag_title_rules)
-
-    proc_title_fixed, proc_title_rules = _ensure_procedure_title_join(q, diag_title_fixed)
-    rules.extend(proc_title_rules)
-
-    proc_cleanup_fixed, proc_cleanup_rules = _cleanup_procedure_title_joins(proc_title_fixed)
-    rules.extend(proc_cleanup_rules)
-
-    titled, title_rules = _ensure_long_title_join(proc_cleanup_fixed)
-    rules.extend(title_rules)
-
-    rewritten_date_cast, date_cast_rules = _rewrite_to_date_cast(titled)
-    rules.extend(date_cast_rules)
-
-    rewritten_extract_day, extract_day_rules = _rewrite_extract_day_diff(rewritten_date_cast)
-    rules.extend(extract_day_rules)
-
-    rewritten_ts, ts_rules = _rewrite_timestampdiff(rewritten_extract_day)
-    rules.extend(ts_rules)
-
-    rewritten_ext, ext_rules = _rewrite_extract_year(rewritten_ts)
-    rules.extend(ext_rules)
-
-    year_range_fixed, year_range_rules = _rewrite_absolute_year_range(q, rewritten_ext)
-    rules.extend(year_range_rules)
-
-    age_from_diff_fixed, age_from_diff_rules = _rewrite_age_from_sysdate_diff(year_range_fixed)
-    rules.extend(age_from_diff_rules)
-
-    diagnosis_map_fixed, diagnosis_map_rules = _rewrite_diagnosis_title_filter_with_icd_map(q, age_from_diff_fixed)
+    diagnosis_map_fixed, diagnosis_map_rules = _rewrite_diagnosis_title_filter_with_icd_map(q, text)
     rules.extend(diagnosis_map_rules)
 
     procedure_map_fixed, procedure_map_rules = _rewrite_procedure_title_filter_with_icd_map(q, diagnosis_map_fixed)
@@ -4490,99 +4729,10 @@ def _postprocess_sql_conservative(question: str, sql: str) -> tuple[str, list[st
     window_fixed, window_rules = _rewrite_post_window_deathtime_anchor(q, ratio_denom_fixed)
     rules.extend(window_rules)
 
-    timed, time_rules = _normalize_timestamp_diffs(window_fixed)
-    rules.extend(time_rules)
-
-    deduped, dedupe_rules = _dedupe_table_alias(timed)
-    rules.extend(dedupe_rules)
-
-    grouped, group_rules = _fix_orphan_by(deduped)
-    rules.extend(group_rules)
-
-    having_fixed, having_rules = _fix_having_where(grouped)
-    rules.extend(having_rules)
-
-    aligned_icu_keys, align_icu_rules = _align_admissions_icu_match_keys(having_fixed)
-    rules.extend(align_icu_rules)
-
-    admissions_icd_grain_fixed, admissions_icd_grain_rules = _rewrite_admissions_icd_count_grain(q, aligned_icu_keys)
+    admissions_icd_grain_fixed, admissions_icd_grain_rules = _rewrite_admissions_icd_count_grain(q, window_fixed)
     rules.extend(admissions_icd_grain_rules)
 
-    gender_template_fixed, gender_template_rules = _rewrite_count_by_gender_template(q, admissions_icd_grain_fixed)
-    rules.extend(gender_template_rules)
-
-    count_fixed, count_rules = _normalize_count_aliases_for_simple_counts(gender_template_fixed)
-    rules.extend(count_rules)
-
-    grouped_filtered, group_filter_rules = _ensure_group_by_not_null_for_simple_counts(q, count_fixed)
-    rules.extend(group_filter_rules)
-
-    avg_grouped_filtered, avg_group_filter_rules = _ensure_group_by_not_null_for_simple_avg(q, grouped_filtered)
-    rules.extend(avg_group_filter_rules)
-
-    avg_not_null_fixed, avg_not_null_rules = _ensure_avg_not_null(avg_grouped_filtered)
-    rules.extend(avg_not_null_rules)
-
-    avg_alias_fixed, avg_alias_rules = _normalize_avg_aliases(avg_not_null_fixed)
-    rules.extend(avg_alias_rules)
-
-    transfers_eventtype_fixed, transfers_eventtype_rules = _strip_transfers_eventtype_filter(q, avg_alias_fixed)
-    rules.extend(transfers_eventtype_rules)
-
-    ordered_simple_counts, ordered_simple_count_rules = _ensure_order_by_count(q, transfers_eventtype_fixed)
-    rules.extend(ordered_simple_count_rules)
-
-    update_stripped, update_rules = _strip_for_update(ordered_simple_counts)
-    rules.extend(update_rules)
-
-    wrapped, wrap_rules = _wrap_top_n(q, update_stripped)
-    rules.extend(wrap_rules)
-
-    cap_value = get_settings().row_cap
-    if cap_value <= 0:
-        cap_value = 100000
-    capped = wrapped
-    if _should_apply_rownum_cap_conservative(q, wrapped):
-        capped, cap_rules = _apply_rownum_cap(wrapped, cap=cap_value)
-        rules.extend(cap_rules)
-
-    grouped_cap_fixed, grouped_cap_rules = _strip_rownum_cap_for_grouped_tables(capped)
-    rules.extend(grouped_cap_rules)
-
-    categorical_fixed, categorical_rules = _rewrite_unknown_categorical_equals(q, grouped_cap_fixed)
-    rules.extend(categorical_rules)
-
-    transfers_eventtype_final, transfers_eventtype_final_rules = _strip_transfers_eventtype_filter(q, categorical_fixed)
-    rules.extend(transfers_eventtype_final_rules)
-
-    d_items_title_fixed, d_items_title_rules = _rewrite_d_items_long_title_to_label(transfers_eventtype_final)
-    rules.extend(d_items_title_rules)
-
-    scalar_itemid_fixed, scalar_itemid_rules = _rewrite_itemid_scalar_subquery_to_safe_in(d_items_title_fixed)
-    rules.extend(scalar_itemid_rules)
-
-    itemid_icd_fixed, itemid_icd_rules = _rewrite_itemid_icd_join_mismatch(scalar_itemid_fixed)
-    rules.extend(itemid_icd_rules)
-
-    cte_alias_fixed, cte_alias_rules = _fix_cte_projection_alias_mismatch(itemid_icd_fixed)
-    rules.extend(cte_alias_rules)
-
-    label_like_fixed, label_like_rules = _rewrite_label_like_case_insensitive(cte_alias_fixed)
-    rules.extend(label_like_rules)
-
-    label_profile_fixed, label_profile_rules = _rewrite_label_filter_by_intent_profile(q, label_like_fixed)
-    rules.extend(label_profile_rules)
-
-    to_char_fixed, to_char_rules = _quote_to_char_format_literals(label_profile_fixed)
-    rules.extend(to_char_rules)
-
-    rewritten, rewrite_rules = _rewrite_oracle_syntax(to_char_fixed)
-    rules.extend(rewrite_rules)
-    ratio_fixed, ratio_rules = _rewrite_count_columns_to_ratio_by_intent(q, rewritten)
-    rules.extend(ratio_rules)
-    top_fixed, top_rules = _enforce_top_n_wrapper(q, ratio_fixed)
-    rules.extend(top_rules)
-    return top_fixed, rules
+    return admissions_icd_grain_fixed, rules
 
 
 def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tuple[str, list[str]]:
@@ -4864,7 +5014,25 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     avg_alias_fixed, avg_alias_rules = _normalize_avg_aliases(avg_fixed)
     rules.extend(avg_alias_rules)
 
-    time_stripped, time_rules = _strip_time_window_if_absent(q, avg_alias_fixed)
+    hadm_not_null_fixed, hadm_not_null_rules = _ensure_hadm_not_null_for_distinct_counts(avg_alias_fixed)
+    rules.extend(hadm_not_null_rules)
+
+    hadm_group_fixed, hadm_group_rules = _ensure_prescriptions_hadm_not_null_for_grouping(hadm_not_null_fixed)
+    rules.extend(hadm_group_rules)
+
+    admissions_count_fixed, admissions_count_rules = _rewrite_prescriptions_hadm_count_to_admissions_exists(
+        q,
+        hadm_group_fixed,
+    )
+    rules.extend(admissions_count_rules)
+
+    services_adm_fixed, services_adm_rules = _rewrite_services_hadm_count_to_admissions_join(
+        q,
+        admissions_count_fixed,
+    )
+    rules.extend(services_adm_rules)
+
+    time_stripped, time_rules = _strip_time_window_if_absent(q, services_adm_fixed)
     rules.extend(time_rules)
 
     grouped_filtered, group_filter_rules = _ensure_group_by_not_null(q, time_stripped)

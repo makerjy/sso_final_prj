@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from pathlib import Path
 import json
 
+from app.core.paths import project_path
 from app.services.oracle.metadata_extractor import extract_metadata
 from app.services.rag.indexer import reindex
 from app.services.rag.mongo_store import MongoStore
@@ -67,7 +68,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, str]]) -> None:
 
 @router.get("/tables")
 def list_tables():
-    base = Path("var/metadata")
+    base = project_path("var/metadata")
     schema = _load_json(base / "schema_catalog.json") or {}
     owner = schema.get("owner") or ""
     tables = schema.get("tables", {}) if isinstance(schema, dict) else {}
@@ -86,7 +87,7 @@ def list_tables():
 
 @rag_router.get("/status")
 def rag_status():
-    base = Path("var/metadata")
+    base = project_path("var/metadata")
     schema = _load_json(base / "schema_catalog.json") or {"tables": {}}
     return {
         "schema_docs": len(schema.get("tables", {})),
@@ -124,7 +125,7 @@ def rag_docs(
 
 @rag_router.post("/context")
 def save_rag_context(payload: RagContextPayload):
-    base = Path("var/metadata")
+    base = project_path("var/metadata")
 
     joins = [
         {"name": item.name.strip(), "sql": item.sql.strip()}

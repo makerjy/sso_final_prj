@@ -237,6 +237,18 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     schema_catalog = _load_json(base / "schema_catalog.json") or {"tables": {}}
     glossary_items = _load_jsonl(base / "glossary_docs.jsonl")
     example_items = _load_jsonl(base / "sql_examples.jsonl")
+    augmented_example_items = _load_jsonl(base / "sql_examples_augmented.jsonl")
+    if augmented_example_items:
+        seen_questions = {str(item.get("question") or "").strip() for item in example_items if isinstance(item, dict)}
+        for item in augmented_example_items:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            sql = str(item.get("sql") or "").strip()
+            if not question or not sql or question in seen_questions:
+                continue
+            example_items.append({"question": question, "sql": sql})
+            seen_questions.add(question)
     join_template_items = _load_jsonl(base / "join_templates.jsonl")
     sql_template_items = _load_jsonl(base / "sql_templates.jsonl")
     diagnosis_map_items = _load_jsonl(base / "diagnosis_icd_map.jsonl")

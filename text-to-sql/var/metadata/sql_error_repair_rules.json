@@ -20,6 +20,137 @@
       ],
       "success_count": 1,
       "updated_at": 1770880451
+    },
+    {
+      "created_at": 1770963573,
+      "error_signature": "WHERE_REQUIRED",
+      "failed_sql_hash": "063c6dbad723ec31e5b12fd5f4c011759029b43e1e54b3df062aea5b00becf6b",
+      "failed_sql_sample": "SELECT COUNT(*) AS CNT FROM ADMISSIONS",
+      "fixed_sql": "SELECT COUNT(*) AS CNT FROM ADMISSIONS WHERE 1=1",
+      "fixed_sql_hash": "e1acd687cbf7ced4b9d77e77ea9197071f3f84d09e35ba834de0093dbc05467c",
+      "hit_count": 0,
+      "id": "9e608b877ce54659b167bb2dc0052e12",
+      "last_used_at": 1770963573,
+      "success_count": 1,
+      "updated_at": 1770963573
+    },
+    {
+      "created_at": 1770966600,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "578899c0735ccf185d7e811dfb4f4caf3209b2519c524e7035de361e484f6762",
+      "failed_sql_sample": "SELECT ROUND(STDDEV(procedure_count), 2) AS stddev_ecg_telemetry_procedures FROM ( SELECT p.SUBJECT_ID, COUNT(DISTINCT pr.icd_code) AS CNT FROM PATIENTS p JOIN PROCEDURES_ICD pr ON p.SUBJECT_ID = pr.SUBJECT_ID WHERE p.gender = 'M' AND p.anchor_age BETWEEN 81 AND 91 AND pr.icd_code IS NOT NULL AND pr.icd_version IS NOT NULL AND ( (pr.icd_version = 9 AND ( pr.icd_code = '89.52' OR pr.icd_code = '89.54' )) OR (pr.icd_version = 10 AND ( pr.icd_code LIKE '4A02%' OR pr.icd_code LIKE '4A12%' )) ) GROUP",
+      "fixed_sql": "SELECT ROUND(STDDEV(cnt), 2) AS stddev_ecg_telemetry_procedures FROM ( SELECT p.SUBJECT_ID, COUNT(DISTINCT pr.icd_code) AS cnt FROM PATIENTS p JOIN PROCEDURES_ICD pr ON p.SUBJECT_ID = pr.SUBJECT_ID WHERE p.gender = 'M' AND p.anchor_age BETWEEN 81 AND 91 AND pr.icd_code IS NOT NULL AND pr.icd_version IS NOT NULL AND ( (pr.icd_version = 9 AND ( pr.icd_code = '89.52' OR pr.icd_code = '89.54' )) OR (pr.icd_version = 10 AND ( pr.icd_code LIKE '4A02%' OR pr.icd_code LIKE '4A12%' )) ) GROUP BY p.SUBJECT_ID ) patient_procedures;",
+      "fixed_sql_hash": "4cf9ecd1800c3d922a794c2227ec63f96b3b8e09f0cbc08626b9b09132b98225",
+      "hit_count": 12,
+      "id": "96c7c93017d349d5ada46f5ba118f8cb",
+      "last_used_at": 1770969556,
+      "resolution_notes": [
+        "column:subject_id->SUBJECT_ID"
+      ],
+      "success_count": 1,
+      "updated_at": 1770966600
+    },
+    {
+      "created_at": 1770966629,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "819c6da0044b2a92ea3fd040427db11d969680fbaa3ec5158b6c295d31fbf91d",
+      "failed_sql_sample": "SELECT ROUND(STDDEV(procedure_count), 2) as stddev_cabg_procedures FROM ( SELECT p.SUBJECT_ID, COUNT(DISTINCT pr.icd_code) as CNT FROM PATIENTS p JOIN PROCEDURES_ICD pr ON p.SUBJECT_ID = pr.SUBJECT_ID WHERE p.gender = 'F' AND p.anchor_age BETWEEN 41 AND 51 AND ( (pr.icd_version = 9 AND pr.icd_code LIKE '36.1%') OR (pr.icd_version = 10 AND pr.icd_code LIKE '021%') ) GROUP BY p.SUBJECT_ID ) patient_procedures;",
+      "fixed_sql": "SELECT ROUND(STDDEV(CNT), 2) as stddev_cabg_procedures FROM ( SELECT p.SUBJECT_ID, COUNT(DISTINCT pr.icd_code) as CNT FROM PATIENTS p JOIN PROCEDURES_ICD pr ON p.SUBJECT_ID = pr.SUBJECT_ID WHERE p.gender = 'F' AND p.anchor_age BETWEEN 41 AND 51 AND ( (pr.icd_version = 9 AND pr.icd_code LIKE '36.1%') OR (pr.icd_version = 10 AND pr.icd_code LIKE '021%') ) GROUP BY p.SUBJECT_ID ) patient_procedures;",
+      "fixed_sql_hash": "066843e9180735a89a43d611b9d50a82ece939f0b3f7d89ddc167eb637d8ddd7",
+      "hit_count": 7,
+      "id": "abd0ca2b0b26478f97f9fcdf490c211f",
+      "last_used_at": 1770968702,
+      "resolution_notes": [
+        "column:subject_id->SUBJECT_ID"
+      ],
+      "success_count": 1,
+      "updated_at": 1770966629
+    },
+    {
+      "created_at": 1770968970,
+      "error_signature": "ORA-03156",
+      "failed_sql_hash": "27e03960589b01cb0f5af23658bedc4f300b58be02c6bc7a40e2ddc846b685bf",
+      "failed_sql_sample": "SELECT * FROM (SELECT * FROM ( SELECT d.LABEL, COUNT(*) AS cnt FROM LABEVENTS l JOIN D_LABITEMS d ON l.ITEMID = d.ITEMID WHERE d.LABEL IS NOT NULL GROUP BY d.LABEL ORDER BY cnt DESC )) WHERE ROWNUM <= 10",
+      "fixed_sql": "SELECT * FROM (SELECT LABEL, cnt FROM ( SELECT d.LABEL, COUNT(*) AS cnt FROM LABEVENTS l JOIN D_LABITEMS d ON l.ITEMID = d.ITEMID WHERE d.LABEL IS NOT NULL GROUP BY d.LABEL ORDER BY cnt DESC )) WHERE ROWNUM <= 10",
+      "fixed_sql_hash": "07c60cf56d97412f1de73123297788ccc245c9f91e8a1340217352e541db512a",
+      "hit_count": 0,
+      "id": "3b66512d699c4f939079d659b7be1535",
+      "last_used_at": 1770968970,
+      "resolution_notes": [
+        "table:d_labitems->D_LABITEMS",
+        "table:labevents->LABEVENTS",
+        "strip_rownum_before_top_n",
+        "wrap_top_n_rownum:10"
+      ],
+      "success_count": 1,
+      "updated_at": 1770968970
+    },
+    {
+      "created_at": 1770968977,
+      "error_signature": "WHERE_REQUIRED",
+      "failed_sql_hash": "78b6c169de017477119599e074bdba7ccb829388b6466d779acc508ee6a52607",
+      "failed_sql_sample": "SELECT HADM_ID, COUNT(*) AS CNT FROM TRANSFERS GROUP BY HADM_ID",
+      "fixed_sql": "SELECT HADM_ID, COUNT(*) AS CNT FROM TRANSFERS WHERE HADM_ID IS NOT NULL GROUP BY HADM_ID",
+      "fixed_sql_hash": "0c399bbf58580d860bee497d14363b425c642e64f202500d72349e0ab8f1f8c3",
+      "hit_count": 0,
+      "id": "e065c1cf84cd4338b1ca3a9a7a2995bd",
+      "last_used_at": 1770968977,
+      "resolution_notes": [
+        "column:hadm_id->HADM_ID"
+      ],
+      "success_count": 1,
+      "updated_at": 1770968977
+    },
+    {
+      "created_at": 1770969504,
+      "error_signature": "WHERE_REQUIRED",
+      "failed_sql_hash": "17d975cb93cfc6a2f43fb080fe23c9e9692dc12b8529cdd257db47c8bfb6bab2",
+      "failed_sql_sample": "SELECT HADM_ID, SUBJECT_ID, HOSPITAL_EXPIRE_FLAG FROM ADMISSIONS",
+      "fixed_sql": "SELECT HADM_ID, SUBJECT_ID, HOSPITAL_EXPIRE_FLAG FROM ADMISSIONS WHERE HOSPITAL_EXPIRE_FLAG IS NOT NULL",
+      "fixed_sql_hash": "f9dd1cd3eda10b9c4d2d26edce079bd858e1b70911c5e6e7da62956d894ca4e0",
+      "hit_count": 0,
+      "id": "f09da6e4a04a4f0e8e6998c3bb3c4353",
+      "last_used_at": 1770969504,
+      "resolution_notes": [
+        "column:hospital_expire_flag->HOSPITAL_EXPIRE_FLAG",
+        "column:hadm_id->HADM_ID",
+        "column:subject_id->SUBJECT_ID"
+      ],
+      "success_count": 1,
+      "updated_at": 1770969504
+    },
+    {
+      "created_at": 1770970132,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "cd387db97e7612e058cfeb853ff1fce0d549e9582434bbf04c59fcdb47fd7bc5",
+      "failed_sql_sample": "SELECT * FROM (SELECT VENTILATOR_DAYS, COUNT(*) AS COUNT FROM (SELECT HADM_ID, SUM(CAST(ENDTIME AS DATE) - CAST(STARTTIME AS DATE)) AS VENTILATOR_DAYS FROM PROCEDUREEVENTS WHERE ORDERCATEGORYNAME LIKE '%neurosurgery%' AND ITEMID IN (SELECT ITEMID FROM D_ITEMS WHERE UPPER(LABEL) LIKE '%VENTILATOR%') GROUP BY HADM_ID) GROUP BY VENTILATOR_DAYS ORDER BY CNT DESC) WHERE ROWNUM <= 10",
+      "fixed_sql": "SELECT VENTILATOR_DAYS, COUNT(*) AS COUNT FROM (SELECT HADM_ID, SUM(CAST(ENDTIME AS DATE) - CAST(STARTTIME AS DATE)) AS VENTILATOR_DAYS FROM PROCEDUREEVENTS WHERE ORDERCATEGORYNAME LIKE '%neurosurgery%' AND ITEMID IN (SELECT ITEMID FROM D_ITEMS WHERE UPPER(LABEL) LIKE '%VENTILATOR%') GROUP BY HADM_ID) GROUP BY VENTILATOR_DAYS ORDER BY COUNT DESC",
+      "fixed_sql_hash": "1a59e5deb51ba6e698b28951dd6e69e836d3a8281812d34261f53b0bd3491ab6",
+      "hit_count": 0,
+      "id": "2f0ea49db267403f9a415f3495df92c6",
+      "last_used_at": 1770970132,
+      "resolution_notes": [
+        "table:d_items->D_ITEMS",
+        "column:hadm_id->HADM_ID"
+      ],
+      "success_count": 1,
+      "updated_at": 1770970132
+    },
+    {
+      "created_at": 1770971494,
+      "error_signature": "WHERE_REQUIRED",
+      "failed_sql_hash": "f215c38f6b5af5eb81f6add3397470bd9a1e2d7949c8fb32666c399e03021383",
+      "failed_sql_sample": "SELECT HADM_ID, COUNT(TRANSFER_ID) AS CNT FROM TRANSFERS GROUP BY HADM_ID",
+      "fixed_sql": "SELECT HADM_ID, COUNT(TRANSFER_ID) AS CNT FROM TRANSFERS WHERE HADM_ID IS NOT NULL GROUP BY HADM_ID",
+      "fixed_sql_hash": "9d7b301634b12d62e87d9bbcd575f729b89255455efde4796dc867573e5ecc17",
+      "hit_count": 0,
+      "id": "8a3a6490f2fc48a7a2f9a66c10fc6928",
+      "last_used_at": 1770971494,
+      "resolution_notes": [
+        "column:hadm_id->HADM_ID"
+      ],
+      "success_count": 1,
+      "updated_at": 1770971494
     }
   ]
 }

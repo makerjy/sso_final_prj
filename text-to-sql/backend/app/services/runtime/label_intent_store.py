@@ -5,8 +5,10 @@ from typing import Any
 import json
 import re
 
+from app.core.paths import project_path
 
-_LABEL_INTENT_PATH = Path("var/metadata/label_intent_profiles.jsonl")
+
+_LABEL_INTENT_PATH = project_path("var/metadata/label_intent_profiles.jsonl")
 _LABEL_INTENT_CACHE_MTIME: float = -1.0
 _LABEL_INTENT_CACHE: list[dict[str, Any]] = []
 

@@ -37,7 +37,7 @@ def plan_query_intent(
     response = client.chat(
         messages=messages,
         model=settings.planner_model,
-        max_tokens=settings.llm_max_output_tokens,
+        max_tokens=max(150, int(getattr(settings, "llm_max_output_tokens_planner", settings.llm_max_output_tokens))),
     )
     parsed = _extract_json(response["content"])
     if not isinstance(parsed.get("intent"), dict):

@@ -70,7 +70,17 @@ class Settings:
     context_token_budget: int
     examples_per_query: int
     templates_per_query: int
+    sql_examples_path: str
+    sql_examples_augmented_path: str
+    sql_examples_include_augmented: bool
+    sql_examples_exact_match_enabled: bool
+    sql_examples_exact_match_mode: str
     llm_max_output_tokens: int
+    llm_max_output_tokens_engineer: int
+    llm_max_output_tokens_expert: int
+    llm_max_output_tokens_planner: int
+    llm_max_output_tokens_clarifier: int
+    llm_max_output_tokens_repair: int
     llm_timeout_sec: int
     llm_temperature: float
     clarifier_enabled: bool
@@ -91,6 +101,8 @@ class Settings:
     db_timeout_sec: int
     sql_auto_repair_enabled: bool
     sql_auto_repair_max_attempts: int
+    sql_zero_result_repair_enabled: bool
+    sql_zero_result_repair_max_attempts: int
 
     oracle_dsn: str
     oracle_user: str
@@ -109,7 +121,10 @@ class Settings:
     rag_embedding_dim: int
     rag_multi_query: bool
     rag_hybrid_enabled: bool
+    rag_retrieval_mode: str
     rag_hybrid_candidates: int
+    rag_bm25_candidates: int
+    rag_dense_candidates: int
     rag_bm25_max_docs: int
     mongo_uri: str
     mongo_db: str
@@ -134,12 +149,25 @@ def load_settings() -> Settings:
         llm_cost_per_1k_tokens_krw=_int(os.getenv("LLM_COST_PER_1K_TOKENS_KRW"), 1),
         sql_run_cost_krw=_int(os.getenv("SQL_RUN_COST_KRW"), 1),
         engineer_model=_str(os.getenv("ENGINEER_MODEL"), "gpt-4o"),
-        expert_model=_str(os.getenv("EXPERT_MODEL"), "gpt-4o-mini"),
+        expert_model=_str(os.getenv("EXPERT_MODEL"), "gpt-4o"),
         intent_model=_str(os.getenv("INTENT_MODEL"), "local"),
         context_token_budget=_int(os.getenv("CONTEXT_TOKEN_BUDGET"), 2000),
-        examples_per_query=_int(os.getenv("EXAMPLES_PER_QUERY"), 2),
+        examples_per_query=_int(os.getenv("EXAMPLES_PER_QUERY"), 3),
         templates_per_query=_int(os.getenv("TEMPLATES_PER_QUERY"), 1),
+        sql_examples_path=_str(os.getenv("SQL_EXAMPLES_PATH"), "var/metadata/sql_examples.jsonl"),
+        sql_examples_augmented_path=_str(
+            os.getenv("SQL_EXAMPLES_AUGMENTED_PATH"),
+            "var/metadata/sql_examples_augmented.jsonl",
+        ),
+        sql_examples_include_augmented=_bool(os.getenv("SQL_EXAMPLES_INCLUDE_AUGMENTED"), True),
+        sql_examples_exact_match_enabled=_bool(os.getenv("SQL_EXAMPLES_EXACT_MATCH_ENABLED"), True),
+        sql_examples_exact_match_mode=_str(os.getenv("SQL_EXAMPLES_EXACT_MATCH_MODE"), "hint"),
         llm_max_output_tokens=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS"), 500),
+        llm_max_output_tokens_engineer=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS_ENGINEER"), 700),
+        llm_max_output_tokens_expert=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS_EXPERT"), 700),
+        llm_max_output_tokens_planner=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS_PLANNER"), 450),
+        llm_max_output_tokens_clarifier=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS_CLARIFIER"), 450),
+        llm_max_output_tokens_repair=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS_REPAIR"), 900),
         llm_timeout_sec=_int(os.getenv("LLM_TIMEOUT_SEC"), 30),
         llm_temperature=_float(os.getenv("LLM_TEMPERATURE"), 0.0),
         clarifier_enabled=_bool(os.getenv("CLARIFIER_ENABLED"), False),
@@ -155,9 +183,11 @@ def load_settings() -> Settings:
         expert_score_threshold=_int(os.getenv("EXPERT_SCORE_THRESHOLD"), 3),
         max_db_joins=_int(os.getenv("MAX_DB_JOINS"), 3),
         row_cap=_int(os.getenv("ROW_CAP"), 5000),
-        db_timeout_sec=_int(os.getenv("DB_TIMEOUT_SEC"), 15),
+        db_timeout_sec=_int(os.getenv("DB_TIMEOUT_SEC"), 30),
         sql_auto_repair_enabled=_bool(os.getenv("SQL_AUTO_REPAIR_ENABLED"), True),
         sql_auto_repair_max_attempts=_int(os.getenv("SQL_AUTO_REPAIR_MAX_ATTEMPTS"), 1),
+        sql_zero_result_repair_enabled=_bool(os.getenv("SQL_ZERO_RESULT_REPAIR_ENABLED"), True),
+        sql_zero_result_repair_max_attempts=_int(os.getenv("SQL_ZERO_RESULT_REPAIR_MAX_ATTEMPTS"), 1),
         oracle_dsn=_str(os.getenv("ORACLE_DSN"), ""),
         oracle_user=_str(os.getenv("ORACLE_USER"), ""),
         oracle_password=_str(os.getenv("ORACLE_PASSWORD"), ""),
@@ -174,7 +204,10 @@ def load_settings() -> Settings:
         rag_embedding_dim=_int(os.getenv("RAG_EMBEDDING_DIM"), 128),
         rag_multi_query=_bool(os.getenv("RAG_MULTI_QUERY"), True),
         rag_hybrid_enabled=_bool(os.getenv("RAG_HYBRID_ENABLED"), True),
+        rag_retrieval_mode=_str(os.getenv("RAG_RETRIEVAL_MODE"), "bm25_then_rerank"),
         rag_hybrid_candidates=_int(os.getenv("RAG_HYBRID_CANDIDATES"), 20),
+        rag_bm25_candidates=_int(os.getenv("RAG_BM25_CANDIDATES"), 50),
+        rag_dense_candidates=_int(os.getenv("RAG_DENSE_CANDIDATES"), 50),
         rag_bm25_max_docs=_int(os.getenv("RAG_BM25_MAX_DOCS"), 1500),
         mongo_uri=_str(os.getenv("MONGO_URI"), ""),
         mongo_db=_str(os.getenv("MONGO_DB"), "text_to_sql"),

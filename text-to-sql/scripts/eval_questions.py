@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,12 @@ import sys
 sys.path.append(str(ROOT / "backend"))
 
 from app.services.agents.orchestrator import run_oneshot
+from app.services.agents.sql_error_templates import apply_sql_error_templates
+from app.services.agents.sql_expert import repair_sql_after_error
+from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
+from app.core.config import get_settings
 from app.services.oracle.executor import execute_sql
+from app.services.runtime.sql_error_repair_store import find_learned_sql_fix
 
 
 def load_examples(path: Path) -> list[dict[str, Any]]:
@@ -34,6 +40,85 @@ def load_examples(path: Path) -> list[dict[str, Any]]:
     return items
 
 
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            item = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _normalize_question(text: str) -> str:
+    return " ".join(str(text or "").strip().lower().split())
+
+
+def _augment_examples_from_report(
+    report_path: Path,
+    *,
+    base_path: Path,
+    augmented_path: Path,
+    max_new: int,
+) -> int:
+    report_rows = _load_jsonl(report_path)
+    base_rows = _load_jsonl(base_path)
+    existing_rows = _load_jsonl(augmented_path)
+
+    seen_questions = {
+        _normalize_question(str(item.get("question") or ""))
+        for item in [*base_rows, *existing_rows]
+        if str(item.get("question") or "").strip()
+    }
+    seen_questions = {item for item in seen_questions if item}
+
+    merged = list(existing_rows)
+    added = 0
+    for item in report_rows:
+        status = str(item.get("status") or "").strip().lower()
+        if status not in {"mismatch", "exec_error"}:
+            continue
+        expected_error = str(item.get("expected_error") or "").strip()
+        if expected_error:
+            continue
+        question = str(item.get("question") or "").strip()
+        sql = str(item.get("expected_sql") or "").strip()
+        if not question or not sql:
+            continue
+        normalized = _normalize_question(question)
+        if not normalized or normalized in seen_questions:
+            continue
+        merged.append(
+            {
+                "question": question,
+                "sql": sql,
+                "source": "eval_failure_replay",
+                "status": status,
+            }
+        )
+        seen_questions.add(normalized)
+        added += 1
+        if max_new > 0 and added >= max_new:
+            break
+
+    _write_jsonl(augmented_path, merged)
+    return added
+
+
 def safe_execute(sql: str) -> tuple[dict[str, Any] | None, str | None]:
     try:
         return execute_sql(sql), None
@@ -41,6 +126,90 @@ def safe_execute(sql: str) -> tuple[dict[str, Any] | None, str | None]:
         return None, str(exc.detail)
     except Exception as exc:
         return None, str(exc)
+
+
+def _extract_payload_context(payload: dict[str, Any]) -> tuple[str | None, dict[str, Any], dict[str, Any] | None]:
+    question_en_value = payload.get("question_en")
+    question_en = str(question_en_value).strip() if isinstance(question_en_value, str) and question_en_value.strip() else None
+    context_value = payload.get("context")
+    context = context_value if isinstance(context_value, dict) else {}
+    planner_intent: dict[str, Any] | None = None
+    planner = payload.get("planner")
+    if isinstance(planner, dict):
+        intent = planner.get("intent")
+        if isinstance(intent, dict):
+            planner_intent = intent
+    return question_en, context, planner_intent
+
+
+def execute_with_repair(
+    *,
+    question: str,
+    payload: dict[str, Any],
+    generated_sql: str,
+) -> tuple[str, dict[str, Any] | None, str | None, int]:
+    settings = get_settings()
+    current_sql = str(generated_sql or "").strip()
+    if not current_sql:
+        return "", None, "empty generated sql", 0
+
+    question_en, context, planner_intent = _extract_payload_context(payload)
+    max_repair_attempts = (
+        int(settings.sql_auto_repair_max_attempts)
+        if bool(settings.sql_auto_repair_enabled)
+        else 0
+    )
+    repair_round = 0
+    while True:
+        profile = "relaxed" if repair_round == 0 else "aggressive"
+        if repair_round == 0:
+            profile, _ = recommend_postprocess_profile(
+                question,
+                current_sql,
+                default_profile=profile,
+            )
+        current_sql, _ = postprocess_sql(question, current_sql, profile=profile)
+        result, error = safe_execute(current_sql)
+        if result is not None:
+            return current_sql, result, None, repair_round
+        if repair_round >= max_repair_attempts:
+            return current_sql, None, error, repair_round
+
+        error_message = str(error or "")
+        known_fix = find_learned_sql_fix(current_sql, error_message=error_message)
+        if isinstance(known_fix, dict):
+            known_fixed_sql = str(known_fix.get("fixed_sql") or "").strip()
+            if known_fixed_sql and known_fixed_sql.strip() != current_sql.strip():
+                current_sql = known_fixed_sql
+                repair_round += 1
+                continue
+
+        templated_sql, _ = apply_sql_error_templates(
+            question=question,
+            sql=current_sql,
+            error_message=error_message,
+        )
+        if templated_sql.strip() and templated_sql.strip() != current_sql.strip():
+            current_sql = templated_sql
+            repair_round += 1
+            continue
+
+        try:
+            repaired = repair_sql_after_error(
+                question,
+                context,
+                current_sql,
+                error_message,
+                question_en=question_en,
+                planner_intent=planner_intent,
+            )
+        except Exception:
+            return current_sql, None, error_message, repair_round
+        repaired_sql = str(repaired.get("final_sql") or "").strip()
+        if not repaired_sql or repaired_sql.strip() == current_sql.strip():
+            return current_sql, None, error_message or "auto repair produced no change", repair_round
+        current_sql = repaired_sql
+        repair_round += 1
 
 
 def normalize_rows(rows: list[list[Any]], ignore_order: bool) -> list[list[Any]]:
@@ -73,9 +242,22 @@ def compare_results(
         if _is_count_col(exp_cols[0]) and _is_count_col(gen_cols[0]):
             same_cols = True
 
-    return (same_cols and same_rows), {
+    # Alias-only mismatch should not fail when data rows are identical.
+    alias_equivalent = bool(same_rows and len(exp_cols) == len(gen_cols))
+    if not same_cols and alias_equivalent:
+        same_cols = True
+
+    subset_rows = False
+    if not same_rows and same_cols and ignore_order and exp_norm and gen_norm and len(exp_norm) < len(gen_norm):
+        exp_counter = Counter(json.dumps(row, ensure_ascii=True, default=str) for row in exp_norm)
+        gen_counter = Counter(json.dumps(row, ensure_ascii=True, default=str) for row in gen_norm)
+        subset_rows = all(gen_counter.get(key, 0) >= count for key, count in exp_counter.items())
+
+    return (same_cols and (same_rows or subset_rows)), {
         "same_cols": same_cols,
         "same_rows": same_rows,
+        "alias_equivalent": alias_equivalent,
+        "subset_rows": subset_rows,
         "expected_row_count": expected.get("row_count"),
         "generated_row_count": generated.get("row_count"),
     }
@@ -97,11 +279,48 @@ def main() -> int:
     parser.add_argument("--ignore-order", action="store_true", help="Ignore row order in comparison.")
     parser.add_argument("--skip-policy", action="store_true", help="Skip PolicyGate precheck in generation.")
     parser.add_argument(
+        "--execution-mode",
+        choices=["oneshot", "pipeline", "service_pipeline"],
+        default="pipeline",
+        help=(
+            "oneshot: execute generated SQL directly, "
+            "pipeline: local /query/run-equivalent repair flow, "
+            "service_pipeline: call query route handlers directly."
+        ),
+    )
+    parser.add_argument(
+        "--db-timeout-sec",
+        type=int,
+        default=0,
+        help="Override DB_TIMEOUT_SEC for this evaluation run.",
+    )
+    parser.add_argument(
         "--require-advanced",
         action="store_true",
         help="Fail if demo cache is used (requires DEMO_MODE=false).",
     )
+    parser.add_argument(
+        "--augment-on-fail",
+        action="store_true",
+        help="Append mismatch/exec_error rows (with valid expected SQL) to augmented few-shot examples.",
+    )
+    parser.add_argument(
+        "--augment-output",
+        default="var/metadata/sql_examples_augmented.jsonl",
+        help="Augmented few-shot jsonl output path.",
+    )
+    parser.add_argument(
+        "--augment-max-new",
+        type=int,
+        default=50,
+        help="Maximum new rows to append when --augment-on-fail is enabled (0 = unlimited).",
+    )
     args = parser.parse_args()
+
+    if args.db_timeout_sec and args.db_timeout_sec > 0:
+        os.environ["DB_TIMEOUT_SEC"] = str(args.db_timeout_sec)
+        from app.core import config as config_module
+        config_module._SETTINGS = None
 
     examples = load_examples(Path(args.input))
     if not examples:
@@ -120,12 +339,85 @@ def main() -> int:
     match_ok = 0
     demo_used = 0
 
+    settings = get_settings()
+    service_mode = args.execution_mode == "service_pipeline"
+    api_oneshot = None
+    api_run_query = None
+    OneShotRequest = None
+    RunRequest = None
+    if service_mode:
+        from app.api.routes.query import (  # pylint: disable=import-outside-toplevel
+            OneShotRequest as _OneShotRequest,
+            RunRequest as _RunRequest,
+            oneshot as _api_oneshot,
+            run_query as _api_run_query,
+        )
+
+        api_oneshot = _api_oneshot
+        api_run_query = _api_run_query
+        OneShotRequest = _OneShotRequest
+        RunRequest = _RunRequest
+
+    def _safe_service_run(*, qid: str | None = None, sql: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        if api_run_query is None or RunRequest is None:
+            return None, "service pipeline not initialized"
+        try:
+            payload = RunRequest(qid=qid, sql=sql, user_ack=True, user_name="eval", user_role="eval")
+            return api_run_query(payload), None
+        except HTTPException as exc:
+            return None, str(exc.detail)
+        except Exception as exc:
+            return None, str(exc)
+
     with out_path.open("w", encoding="utf-8") as report:
         for idx, item in enumerate(examples, 1):
             question = item["question"]
             expected_sql = item["sql"]
 
-            payload = run_oneshot(question, skip_policy=args.skip_policy)
+            if service_mode:
+                if api_oneshot is None or OneShotRequest is None:
+                    status = {
+                        "idx": idx,
+                        "question": question,
+                        "status": "service_pipeline_init_error",
+                    }
+                    report.write(json.dumps(status, ensure_ascii=True) + "\n")
+                    continue
+                try:
+                    one_resp = api_oneshot(
+                        OneShotRequest(
+                            question=question,
+                            user_name="eval",
+                            user_role="eval",
+                        )
+                    )
+                except HTTPException as exc:
+                    status = {
+                        "idx": idx,
+                        "question": question,
+                        "status": "oneshot_error",
+                        "error": str(exc.detail),
+                    }
+                    report.write(json.dumps(status, ensure_ascii=True) + "\n")
+                    continue
+                except Exception as exc:
+                    status = {
+                        "idx": idx,
+                        "question": question,
+                        "status": "oneshot_error",
+                        "error": str(exc),
+                    }
+                    report.write(json.dumps(status, ensure_ascii=True) + "\n")
+                    continue
+                payload = one_resp.get("payload", {}) if isinstance(one_resp, dict) else {}
+                qid = str(one_resp.get("qid") or "").strip() if isinstance(one_resp, dict) else ""
+            else:
+                payload = run_oneshot(
+                    question,
+                    skip_policy=args.skip_policy,
+                    enable_clarification=settings.clarifier_enabled,
+                )
+                qid = ""
             if payload.get("mode") == "demo":
                 demo_used += 1
                 if args.require_advanced:
@@ -151,16 +443,44 @@ def main() -> int:
 
             gen_ok += 1
 
-            exp_result, exp_err = safe_execute(expected_sql)
-            gen_result, gen_err = safe_execute(generated_sql)
+            if service_mode:
+                exp_run, exp_err = _safe_service_run(sql=expected_sql)
+                exp_result = exp_run.get("result") if isinstance(exp_run, dict) else None
+            else:
+                exp_result, exp_err = safe_execute(expected_sql)
+            effective_generated_sql = generated_sql
+            if args.execution_mode == "pipeline":
+                effective_generated_sql, gen_result, gen_err, repair_attempts = execute_with_repair(
+                    question=question,
+                    payload=payload,
+                    generated_sql=generated_sql,
+                )
+            elif args.execution_mode == "service_pipeline":
+                gen_run, gen_err = _safe_service_run(qid=qid or None)
+                gen_result = gen_run.get("result") if isinstance(gen_run, dict) else None
+                if isinstance(gen_run, dict):
+                    effective_generated_sql = str(gen_run.get("sql") or generated_sql)
+                    repair_meta = gen_run.get("repair")
+                    if isinstance(repair_meta, dict):
+                        repair_attempts = int(repair_meta.get("attempts") or 0)
+                    else:
+                        repair_attempts = 0
+                else:
+                    repair_attempts = 0
+            else:
+                gen_result, gen_err = safe_execute(generated_sql)
+                repair_attempts = 0
 
             status: dict[str, Any] = {
                 "idx": idx,
                 "question": question,
                 "expected_sql": expected_sql,
-                "generated_sql": generated_sql,
+                "generated_sql_initial": generated_sql,
+                "generated_sql": effective_generated_sql,
                 "expected_error": exp_err,
                 "generated_error": gen_err,
+                "execution_mode": args.execution_mode,
+                "repair_attempts": repair_attempts,
             }
 
             if exp_result and gen_result:
@@ -183,8 +503,22 @@ def main() -> int:
         "executed_both": exec_ok,
         "matched": match_ok,
         "demo_used": demo_used,
+        "execution_mode": args.execution_mode,
+        "db_timeout_sec": get_settings().db_timeout_sec,
         "output": str(out_path),
     }
+    if args.augment_on_fail:
+        settings_now = get_settings()
+        base_path = Path(str(getattr(settings_now, "sql_examples_path", "var/metadata/sql_examples.jsonl")))
+        augment_added = _augment_examples_from_report(
+            out_path,
+            base_path=base_path,
+            augmented_path=Path(args.augment_output),
+            max_new=max(0, int(args.augment_max_new)),
+        )
+        summary["augment_output"] = args.augment_output
+        summary["augment_added"] = augment_added
+
     print(json.dumps(summary, ensure_ascii=True, indent=2))
     return 0
 

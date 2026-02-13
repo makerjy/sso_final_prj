@@ -13,6 +13,7 @@ import json
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.paths import project_path
 from app.services.oracle.executor import execute_sql
 from app.services.runtime.diagnosis_map_store import load_diagnosis_icd_map, map_prefixes_for_terms
 from app.services.runtime.state_store import get_state_store
@@ -32,7 +33,7 @@ DEFAULT_PARAMS = {
 _SAVED_COHORTS_KEY = "cohort::saved"
 _FALLBACK_SAVED_COHORTS: list[dict[str, Any]] = []
 _SURVIVAL_TIME_POINTS = [0, 7, 14, 21, 30, 45, 60, 75, 90, 120, 150, 180]
-_COHORT_COMORBIDITY_SPECS_PATH = Path("var/metadata/cohort_comorbidity_specs.json")
+_COHORT_COMORBIDITY_SPECS_PATH = project_path("var/metadata/cohort_comorbidity_specs.json")
 
 
 class CohortParams(BaseModel):

@@ -8,6 +8,8 @@ from app.core.config import get_settings
 _TIMEOUT_MARKERS = ("DPY-4024", "DPI-1067", "ORA-03156", "TIMEOUT")
 _INVALID_IDENTIFIER_MARKERS = ("ORA-00904", "INVALID IDENTIFIER")
 _INVALID_NUMBER_MARKERS = ("ORA-01722", "INVALID NUMBER")
+_TABLE_NOT_EXIST_MARKERS = ("ORA-00942", "TABLE OR VIEW DOES NOT EXIST")
+_MISSING_KEYWORD_MARKERS = ("ORA-00905", "MISSING KEYWORD")
 
 _ERR_IDENT_RE = re.compile(
     r'ORA-00904:\s*"(?:(?P<alias>[A-Za-z0-9_]+)"\.)?"(?P<column>[A-Za-z0-9_]+)"',
@@ -17,6 +19,18 @@ _TABLE_ALIAS_RE = re.compile(
     r"\b(?:FROM|JOIN)\s+(?P<table>[A-Za-z_][A-Za-z0-9_$#]*)"
     r"(?:\s+(?:AS\s+)?(?P<alias>[A-Za-z_][A-Za-z0-9_$#]*))?",
     re.IGNORECASE,
+)
+
+_HEAVY_TIMEOUT_TABLES = (
+    "CHARTEVENTS",
+    "LABEVENTS",
+    "PROCEDUREEVENTS",
+    "MICROBIOLOGYEVENTS",
+    "INPUTEVENTS",
+    "OUTPUTEVENTS",
+    "EMAR",
+    "EMAR_DETAIL",
+    "PRESCRIPTIONS",
 )
 
 
@@ -91,6 +105,54 @@ def _strip_top_level_order_by(sql: str) -> tuple[str, bool]:
     if order_pos < 0:
         return text, False
     return text[:order_pos].rstrip(), True
+
+
+def _sample_heavy_tables_for_timeout(sql: str, cap: int) -> tuple[str, list[str]]:
+    text = str(sql or "").strip()
+    if not text:
+        return text, []
+
+    rules: list[str] = []
+    sampled = text
+    for table in _HEAVY_TIMEOUT_TABLES:
+        pattern = re.compile(
+            rf"\b(?P<kw>FROM|JOIN)\s+{table}\b(?P<alias>\s+(?:AS\s+)?[A-Za-z_][A-Za-z0-9_$#]*)?",
+            re.IGNORECASE,
+        )
+
+        def repl(match: re.Match[str]) -> str:
+            kw = match.group("kw")
+            alias = (match.group("alias") or "").strip()
+            if alias:
+                return f"{kw} (SELECT * FROM {table} WHERE ROWNUM <= {cap}) {alias}"
+            return f"{kw} (SELECT * FROM {table} WHERE ROWNUM <= {cap})"
+
+        rewritten = pattern.sub(repl, sampled)
+        if rewritten != sampled:
+            sampled = rewritten
+            rules.append(f"template_timeout_sample_{table.lower()}:{cap}")
+    return sampled, rules
+
+
+def _append_top_level_rownum_cap(sql: str, cap: int) -> tuple[str, bool]:
+    text = str(sql or "").strip().rstrip(";")
+    if not text:
+        return text, False
+    if re.search(r"\bROWNUM\s*<=\s*\d+", text, re.IGNORECASE):
+        return text, False
+
+    marker = re.search(r"\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b", text, re.IGNORECASE)
+    if marker:
+        head = text[: marker.start()].rstrip()
+        tail = text[marker.start():]
+    else:
+        head = text
+        tail = ""
+    if re.search(r"\bWHERE\b", head, re.IGNORECASE):
+        capped = f"{head} AND ROWNUM <= {cap} {tail}".strip()
+    else:
+        capped = f"{head} WHERE ROWNUM <= {cap} {tail}".strip()
+    return capped, capped != text
 
 
 def _repair_invalid_identifier(sql: str, error_message: str) -> tuple[str, list[str]]:
@@ -217,6 +279,54 @@ def _repair_invalid_number(sql: str, error_message: str) -> tuple[str, list[str]
     return text, rules
 
 
+def _repair_table_not_exists(sql: str, error_message: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+
+    replacements: tuple[tuple[str, str, str], ...] = (
+        (r"\bPROCEDUREEVENTS_ICD\b", "PROCEDURES_ICD", "template_00942_procedureevents_icd_to_procedures_icd"),
+        (r"\bDIAGNOSIS_ICD\b", "DIAGNOSES_ICD", "template_00942_diagnosis_icd_to_diagnoses_icd"),
+        (r"\bPROCEDUREEVENT\b", "PROCEDUREEVENTS", "template_00942_procedureevent_to_procedureevents"),
+        (r"\bDLABITEMS\b", "D_LABITEMS", "template_00942_dlabitems_to_d_labitems"),
+        (r"\bDITEMS\b", "D_ITEMS", "template_00942_ditems_to_d_items"),
+    )
+    for pattern, replacement, rule_name in replacements:
+        rewritten = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        if rewritten != text:
+            text = rewritten
+            rules.append(rule_name)
+
+    # Singular table names hallucination in FROM/JOIN clauses.
+    from_join_rewrites: tuple[tuple[str, str, str], ...] = (
+        (r"(\b(?:FROM|JOIN)\s+)ADMISSION\b", r"\1ADMISSIONS", "template_00942_fromjoin_admission_to_admissions"),
+        (r"(\b(?:FROM|JOIN)\s+)PATIENT\b", r"\1PATIENTS", "template_00942_fromjoin_patient_to_patients"),
+        (r"(\b(?:FROM|JOIN)\s+)TRANSFER\b", r"\1TRANSFERS", "template_00942_fromjoin_transfer_to_transfers"),
+        (r"(\b(?:FROM|JOIN)\s+)LABEVENT\b", r"\1LABEVENTS", "template_00942_fromjoin_labevent_to_labevents"),
+        (r"(\b(?:FROM|JOIN)\s+)CHARTEVENT\b", r"\1CHARTEVENTS", "template_00942_fromjoin_chartevent_to_chartevents"),
+    )
+    for pattern, replacement, rule_name in from_join_rewrites:
+        rewritten = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        if rewritten != text:
+            text = rewritten
+            rules.append(rule_name)
+
+    return text, rules
+
+
+def _repair_missing_keyword(sql: str, error_message: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = sql
+
+    # Common malformed CASE in generated SQL:
+    # COUNT(CASE WHEN ... CNT 1 END) -> COUNT(CASE WHEN ... THEN 1 END)
+    rewritten = re.sub(r"\bCNT\s+1\s+END\b", "THEN 1 END", text, flags=re.IGNORECASE)
+    if rewritten != text:
+        text = rewritten
+        rules.append("template_00905_case_cnt_to_then")
+
+    return text, rules
+
+
 def _repair_timeout(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = str(sql or "").strip().rstrip(";")
@@ -230,14 +340,27 @@ def _repair_timeout(question: str, sql: str) -> tuple[str, list[str]]:
             text = stripped
             rules.append("template_timeout_strip_order_by")
 
+    sample_cap = min(max(2000, int(get_settings().row_cap or 5000)), 10000)
+    sampled, sampled_rules = _sample_heavy_tables_for_timeout(text, sample_cap)
+    if sampled_rules:
+        text = sampled
+        rules.extend(sampled_rules)
+
     has_agg = bool(
         re.search(r"\bGROUP\s+BY\b|\bCOUNT\s*\(|\bAVG\s*\(|\bSUM\s*\(|\bMIN\s*\(|\bMAX\s*\(", text, re.IGNORECASE)
     )
     has_rownum = bool(re.search(r"\bROWNUM\s*<=\s*\d+", text, re.IGNORECASE))
     if not has_agg and not has_rownum:
-        cap = min(max(1000, int(get_settings().row_cap or 5000)), 5000)
+        cap = min(max(1000, int(get_settings().row_cap or 5000)), 10000)
         text = f"SELECT * FROM ({text}) WHERE ROWNUM <= {cap}"
         rules.append(f"template_timeout_apply_rownum_cap:{cap}")
+    elif has_agg and not has_rownum and not sampled_rules:
+        # Last-resort cap for aggregate timeouts when no heavy-table rewrite matched.
+        cap = min(max(1000, int(get_settings().row_cap or 5000)), 5000)
+        capped, changed = _append_top_level_rownum_cap(text, cap)
+        if changed:
+            text = capped
+            rules.append(f"template_timeout_apply_top_level_rownum:{cap}")
 
     return text, rules
 
@@ -263,6 +386,11 @@ def apply_sql_error_templates(
     if _contains_any(err, _INVALID_NUMBER_MARKERS):
         text, number_rules = _repair_invalid_number(text, err)
         rules.extend(number_rules)
+    if _contains_any(err, _TABLE_NOT_EXIST_MARKERS):
+        text, table_rules = _repair_table_not_exists(text, err)
+        rules.extend(table_rules)
+    if _contains_any(err, _MISSING_KEYWORD_MARKERS):
+        text, keyword_rules = _repair_missing_keyword(text, err)
+        rules.extend(keyword_rules)
 
     return text, rules
-

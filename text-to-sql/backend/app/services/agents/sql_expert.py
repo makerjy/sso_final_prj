@@ -44,7 +44,7 @@ def review_sql(
     response = client.chat(
         messages=messages,
         model=settings.expert_model,
-        max_tokens=settings.llm_max_output_tokens,
+        max_tokens=max(200, int(getattr(settings, "llm_max_output_tokens_expert", settings.llm_max_output_tokens))),
     )
     payload = _extract_json(response["content"])
     payload["usage"] = response.get("usage", {})
@@ -82,7 +82,7 @@ def repair_sql_after_error(
     response = client.chat(
         messages=messages,
         model=settings.expert_model,
-        max_tokens=settings.llm_max_output_tokens,
+        max_tokens=max(200, int(getattr(settings, "llm_max_output_tokens_repair", settings.llm_max_output_tokens))),
     )
     payload = _extract_json(response["content"])
     payload["usage"] = response.get("usage", {})

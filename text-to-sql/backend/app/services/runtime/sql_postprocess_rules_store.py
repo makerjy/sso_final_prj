@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import Any
 import json
 
+from app.core.paths import project_path
 
-_RULES_PATH = Path("var/metadata/sql_postprocess_rules.json")
+
+_RULES_PATH = project_path("var/metadata/sql_postprocess_rules.json")
 _RULES_CACHE_MTIME: float = -1.0
 _RULES_CACHE: dict[str, Any] = {}
 
