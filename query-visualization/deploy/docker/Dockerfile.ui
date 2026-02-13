@@ -1,0 +1,14 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY query-visualization/ui/package*.json /app/
+RUN npm install
+
+COPY query-visualization/ui /app
+
+ENV PY_API_URL=http://api:8080/visualize
+
+EXPOSE 3001
+
+CMD ["npm", "start"]

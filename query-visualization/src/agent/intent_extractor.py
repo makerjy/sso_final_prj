@@ -32,6 +32,103 @@ def _find_column_in_query(user_query: str, columns: List[str]) -> str | None:
             return col
     return None
 
+
+def _mentioned_columns_in_query(user_query: str, columns: List[str]) -> List[str]:
+    q = user_query.lower()
+    hits: List[tuple[int, str]] = []
+    for col in columns:
+        idx = q.find(col.lower())
+        if idx >= 0:
+            hits.append((idx, col))
+    hits.sort(key=lambda item: item[0])
+    return [col for _, col in hits]
+
+
+def _numeric_columns_from_schema(
+    dtypes: Dict[str, str],
+    numeric_columns: Optional[List[str]],
+) -> List[str]:
+    if numeric_columns:
+        return list(numeric_columns)
+    inferred: List[str] = []
+    for col, dtype in dtypes.items():
+        if any(token in str(dtype).lower() for token in ("int", "float", "number", "decimal")):
+            inferred.append(col)
+    return inferred
+
+
+def _pick_primary_outcome_fallback(
+    user_query: str,
+    columns: List[str],
+    dtypes: Dict[str, str],
+    numeric_columns: Optional[List[str]],
+    time_columns: Optional[List[str]],
+) -> str | None:
+    mentioned = _mentioned_columns_in_query(user_query, columns)
+    numeric = _numeric_columns_from_schema(dtypes, numeric_columns)
+    numeric_set = {c.lower() for c in numeric}
+    time_set = {c.lower() for c in (time_columns or [])}
+
+    # 1) 질문에서 직접 언급된 수치형 컬럼 우선
+    for col in mentioned:
+        if col.lower() in numeric_set:
+            return col
+
+    # 2) 없으면 스키마 기반 수치형 기본값
+    picked_numeric = _pick_numeric_column(dtypes, numeric_columns)
+    if picked_numeric:
+        return picked_numeric
+
+    # 3) 수치형이 전혀 없으면 시간축 컬럼은 피하고 언급 컬럼 선택
+    for col in mentioned:
+        if col.lower() not in time_set:
+            return col
+
+    # 4) 마지막 fallback
+    return mentioned[0] if mentioned else None
+
+
+def _pick_group_var_fallback(
+    user_query: str,
+    analysis_intent: str,
+    columns: List[str],
+    categorical_columns: Optional[List[str]],
+    time_columns: Optional[List[str]],
+    primary_outcome: Optional[str],
+    time_var: Optional[str],
+) -> str | None:
+    q = user_query.lower()
+    if not any(k in q for k in ("별", "by ")):
+        return None
+
+    time_set = {c.lower() for c in (time_columns or [])}
+    primary_lower = (primary_outcome or "").lower()
+    time_var_lower = (time_var or "").lower()
+
+    mentioned_candidates = _mentioned_columns_in_query(user_query, columns)
+
+    for col in mentioned_candidates:
+        lower = col.lower()
+        if lower == primary_lower:
+            continue
+        # trend의 "by month"는 그룹이 아니라 시간축으로 해석한다.
+        if analysis_intent == "trend" and (lower == time_var_lower or lower in time_set):
+            continue
+        return col
+
+    # trend에서는 질문에 명시되지 않은 그룹을 자동 주입하지 않는다.
+    if analysis_intent == "trend":
+        return None
+
+    for col in (categorical_columns or []):
+        lower = col.lower()
+        if lower == primary_lower:
+            continue
+        if lower in time_set:
+            continue
+        return col
+    return None
+
 # 입력: dtypes, numeric_columns
 # 출력: str | None
 # 1순위: numeric_columns 리스트에서 선택
@@ -226,6 +323,10 @@ def extract_intent(
         )
         time_var = llm_result.x if analysis_intent == "trend" else None
         group_var = llm_result.group_by
+        if group_var and primary_outcome and group_var.lower() == primary_outcome.lower():
+            group_var = None
+        if analysis_intent == "trend" and group_var and time_var and group_var.lower() == time_var.lower():
+            group_var = None
 
         log_event("intent.llm.success",
                   llm_result.model_dump(exclude_none=True))
@@ -243,24 +344,29 @@ def extract_intent(
     except Exception as exc:
         # LLM 실패 시 규칙 기반 fallback
         log_event("intent.llm.error", {"error": str(exc)})
-        print("LLM ERROR:", repr(exc))
 
         analysis_intent = glossary_intent or _infer_intent(user_query)
-        primary_outcome = _find_column_in_query(user_query, columns) or _pick_numeric_column(
-            dtypes,
-            numeric_columns,
+        primary_outcome = _pick_primary_outcome_fallback(
+            user_query=user_query,
+            columns=columns,
+            dtypes=dtypes,
+            numeric_columns=numeric_columns,
+            time_columns=time_columns,
         )
         time_var = (
             _pick_time_column(
                 columns, time_columns) if analysis_intent == "trend" else None
         )
 
-        # "~별" 또는 "by"가 있으면 그룹 변수를 추정
-        group_var = None
-        if any(k in user_query.lower() for k in ("별", "by ")):
-            group_var = _find_column_in_query(user_query, columns)
-            if not group_var:
-                group_var = _pick_categorical_column(categorical_columns)
+        group_var = _pick_group_var_fallback(
+            user_query=user_query,
+            analysis_intent=analysis_intent,
+            columns=columns,
+            categorical_columns=categorical_columns,
+            time_columns=time_columns,
+            primary_outcome=primary_outcome,
+            time_var=time_var,
+        )
 
         return {
             "analysis_intent": analysis_intent,

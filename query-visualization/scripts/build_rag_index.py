@@ -1,6 +1,4 @@
 from __future__ import annotations
-from src.db.vector_store import ensure_collection, get_mongo_collection, upsert_embeddings
-from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE
 
 import json
 import sys
@@ -11,7 +9,11 @@ from uuid import uuid4
 from openai import OpenAI
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-sys.path.append(str(BASE_DIR))
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE
+from src.db.vector_store import ensure_collection, get_mongo_collection, upsert_embeddings
 
 
 def _load_jsonl(path: Path) -> List[dict]:
@@ -37,7 +39,6 @@ def _normalize_doc(doc: dict) -> Tuple[str, dict]:
     if "text" in doc:
         return doc["text"], doc.get("metadata", {})
 
-    # SQL templates (visualization-first)
     if "template_id" in doc and "sql" in doc:
         template_id = doc.get("template_id")
         x_alias = doc.get("x_alias")
@@ -58,7 +59,6 @@ def _normalize_doc(doc: dict) -> Tuple[str, dict]:
         }
         return text, metadata
 
-    # SQL examples (question -> visualization)
     if "question" in doc and "sql" in doc:
         text = (
             f"Question: {doc.get('question')}\n"
@@ -71,7 +71,6 @@ def _normalize_doc(doc: dict) -> Tuple[str, dict]:
         metadata = doc.get("metadata", {}) | {"type": "example"}
         return text, metadata
 
-    # Fallback
     return json.dumps(doc, ensure_ascii=False), doc.get("metadata", {})
 
 
@@ -83,7 +82,7 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
 
 def _batch(iterable: List[str], size: int) -> Iterable[List[str]]:
     for i in range(0, len(iterable), size):
-        yield iterable[i: i + size]
+        yield iterable[i : i + size]
 
 
 def build_index() -> None:
@@ -91,7 +90,7 @@ def build_index() -> None:
     docs = list(_iter_seed_docs(data_dir))
 
     if not docs:
-        raise RuntimeError("RAG 시드 데이터가 없습니다. data/*.jsonl 을 확인하세요.")
+        raise RuntimeError("RAG seed data is missing. Check data/*.jsonl.")
 
     normalized = [_normalize_doc(d) for d in docs]
     texts = [text for text, _ in normalized]
@@ -102,22 +101,22 @@ def build_index() -> None:
 
     collection = get_mongo_collection()
 
-    # 첫 배치로 벡터 크기 확보 후 컬렉션 생성
+    # Bootstrap collection with first embedding vector size.
     first_embeddings = _embed_texts(texts[:1])
     ensure_collection(collection, vector_size=len(first_embeddings[0]))
     upsert_embeddings(collection, first_embeddings, metadatas[:1], ids[:1])
 
-    # 나머지 배치 업서트
+    # Upsert the remaining documents in batches.
     start_idx = 1
     for batch_texts in _batch(texts[start_idx:], RAG_BATCH_SIZE):
         batch_embeddings = _embed_texts(batch_texts)
         batch_size = len(batch_texts)
-        batch_metadatas = metadatas[start_idx: start_idx + batch_size]
-        batch_ids = ids[start_idx: start_idx + batch_size]
-        upsert_embeddings(collection, batch_embeddings,
-                          batch_metadatas, batch_ids)
+        batch_metadatas = metadatas[start_idx : start_idx + batch_size]
+        batch_ids = ids[start_idx : start_idx + batch_size]
+        upsert_embeddings(collection, batch_embeddings, batch_metadatas, batch_ids)
         start_idx += batch_size
 
 
 if __name__ == "__main__":
     build_index()
+

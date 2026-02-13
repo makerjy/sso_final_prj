@@ -168,19 +168,15 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
             999,
         )
     )
-    categorical_cols = [c for c in cols if df[c].dtype == "object"]
+    categorical_cols = [
+        c for c in cols
+        if pdt.is_string_dtype(df[c]) or pdt.is_categorical_dtype(df[c])
+    ]
 
     if time_cols and numeric_cols:
         return {
             "chart_spec": {"chart_type": "line", "x": time_cols[0], "y": numeric_cols[0]},
             "reason": "시간형 컬럼과 수치형 컬럼이 있어 추세 차트가 적합합니다.",
-        }
-
-    # Two numeric columns -> scatter
-    if len(numeric_cols) >= 2:
-        return {
-            "chart_spec": {"chart_type": "scatter", "x": numeric_cols[0], "y": numeric_cols[1]},
-            "reason": "수치형 컬럼이 2개 이상이라 상관관계 산점도가 적합합니다.",
         }
 
     # Categorical + two numeric -> pyramid
@@ -193,6 +189,13 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
                 "group": numeric_cols[1],
             },
             "reason": "범주형 기준 좌우 비교가 가능해 피라미드 막대 차트가 적합합니다.",
+        }
+
+    # Two numeric columns -> scatter
+    if len(numeric_cols) >= 2:
+        return {
+            "chart_spec": {"chart_type": "scatter", "x": numeric_cols[0], "y": numeric_cols[1]},
+            "reason": "수치형 컬럼이 2개 이상이라 상관관계 산점도가 적합합니다.",
         }
 
     # Categorical + numeric -> bar
@@ -252,7 +255,7 @@ def _pick_safe_group(df: pd.DataFrame) -> str | None:
             continue
         if not any(a in lower for a in allow_tokens):
             continue
-        if df[col].dtype not in ("object", "category"):
+        if not (pdt.is_string_dtype(df[col]) or pdt.is_categorical_dtype(df[col])):
             continue
         if _is_low_cardinality(df, col, max_groups):
             return col
@@ -405,6 +408,18 @@ def _dedupe_plans(plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen.add(key)
         unique.append(plan)
     return unique
+
+
+def _record_failure(
+    failure_reasons: Optional[List[str]],
+    reason: str,
+) -> None:
+    if failure_reasons is None:
+        return
+    normalized = (reason or "").strip()
+    if normalized and normalized not in failure_reasons:
+        failure_reasons.append(normalized)
+
 
 # 입력: intent, group_var, time_var, available_columns, context_flags
 # 출력: None | Exception
@@ -559,8 +574,11 @@ def plan_analyses(
     intent_info: Dict[str, Any],
     df: pd.DataFrame,
     retrieved_context: Optional[str] = None,
+    retry_mode: str = "normal",
+    failure_reasons: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """intent_info를 기반으로 분석 플랜 여러 개를 반환."""
+    retry_mode = (retry_mode or "normal").lower()
     intent = intent_info.get("analysis_intent")
     primary = intent_info.get("primary_outcome")
     user_query = intent_info.get("user_query")
@@ -576,6 +594,10 @@ def plan_analyses(
         intent, context_flags, list(df.columns))
     time_var = time_info.get(
         "expr") if time_info else intent_info.get("time_var")
+
+    # 재시도 모드에서는 우선 복구 가능성이 높은 단순 플랜으로 유도한다.
+    if retry_mode == "relaxed" and intent in ("trend", "distribution", "comparison", "proportion"):
+        group_var = None
 
     # low-cardinality 검사 (group_var가 허용 리스트여도 값이 과다하면 제거)
     if group_var and group_var in df.columns and not _is_low_cardinality(df, group_var, 30):
@@ -597,6 +619,7 @@ def plan_analyses(
             "primary": primary,
             "time_var": time_var,
             "group_var": group_var,
+            "retry_mode": retry_mode,
         },
     )
 
@@ -615,15 +638,26 @@ def plan_analyses(
                         context_flags,
                     )
                 except Exception as exc:
+                    _record_failure(
+                        failure_reasons,
+                        f"suggested_plan_blocked: {str(exc)}",
+                    )
                     log_event(
                         "rule_engine.suggested_plan.blocked",
                         {"reason": str(exc), "chart_spec": spec},
                     )
                 else:
                     plans.append(suggested_plan)
+            else:
+                _record_failure(
+                    failure_reasons,
+                    "suggested_plan_mismatch: trend x-axis does not match derived time axis",
+                )
         else:
             plans.append(suggested_plan)
-    elif column_only_plan:
+
+    # suggested_plan이 차단/미스매치된 경우에도 column 기반 플랜으로 복구를 시도한다.
+    if not plans and column_only_plan:
         plans.append(column_only_plan)
 
     if intent == "trend" and time_var and primary:
@@ -631,9 +665,22 @@ def plan_analyses(
             validate_plan(intent, group_var, time_info,
                           list(df.columns), context_flags)
         except Exception as exc:
+            _record_failure(failure_reasons, f"trend_blocked: {str(exc)}")
             # 규칙 위반 시 trend 플랜을 만들지 않는다(의미 보존 우선)
             log_event("rule_engine.trend.blocked",
                       {"reason": str(exc)})
+            if retry_mode == "relaxed":
+                # relaxed 모드에서는 엄격한 trajectory 라인 대신 분포형 대안을 허용한다.
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "box",
+                            "x": time_var,
+                            "y": primary,
+                        },
+                        "reason": "재시도 모드: trend 제약으로 line이 불가해 분포형 대안을 생성했습니다.",
+                    }
+                )
         else:
             patient_group = _pick_patient_group(df)
             line_group = patient_group or group_var
@@ -735,7 +782,7 @@ def plan_analyses(
             for col in df.columns:
                 if col == primary:
                     continue
-                if df[col].dtype == "object":
+                if pdt.is_string_dtype(df[col]) or pdt.is_categorical_dtype(df[col]):
                     continue
                 if _is_identifier_col(col):
                     continue
@@ -778,6 +825,11 @@ def plan_analyses(
             )
 
     plans = _dedupe_plans(plans)
+    if not plans:
+        _record_failure(
+            failure_reasons,
+            f"{retry_mode}_plan_empty",
+        )
     log_event("rule_engine.plans", {"count": len(plans)})
 
     return plans

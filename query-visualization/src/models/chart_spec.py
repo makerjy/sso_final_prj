@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # 입력: chart_type, x, y, group, agg
 # 출력: ChartSpec 모델
@@ -47,3 +47,11 @@ class VisualizationResponse(BaseModel):
     analyses: List[AnalysisCard]
     # 통합 분석 인사이트(LLM 생성)
     insight: Optional[str] = None
+    # fallback 경로가 사용되었는지 여부
+    fallback_used: bool = False
+    # fallback 단계(normal 실패 후 retry_relaxed/minimal_chart 등)
+    fallback_stage: Optional[str] = None
+    # 분석 과정 실패 사유 목록
+    failure_reasons: List[str] = Field(default_factory=list)
+    # 시도 횟수(기본 1, 재시도 시 증가)
+    attempt_count: int = 1

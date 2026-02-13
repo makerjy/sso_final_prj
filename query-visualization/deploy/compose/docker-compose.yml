@@ -1,0 +1,27 @@
+services:
+  api:
+    build:
+      context: ../../..
+      dockerfile: query-visualization/deploy/docker/Dockerfile.api
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      - ORACLE_DRIVER_MODE=${ORACLE_DRIVER_MODE:-thin}
+      - ORACLE_LIB_DIR=/opt/oracle/instantclient
+      - LD_LIBRARY_PATH=/opt/oracle/instantclient
+    volumes:
+      - ../../oracle/instantclient_23_26:/opt/oracle/instantclient:ro
+    ports:
+      - "${VIS_API_HOST_PORT:-8080}:8080"
+
+  ui:
+    build:
+      context: ../../..
+      dockerfile: query-visualization/deploy/docker/Dockerfile.ui
+    depends_on:
+      - api
+    environment:
+      - PY_API_URL=http://api:8080/visualize
+    ports:
+      - "${VIS_UI_HOST_PORT:-3001}:3001"
