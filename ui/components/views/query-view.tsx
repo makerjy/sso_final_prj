@@ -1,13 +1,27 @@
-"use client"
+﻿"use client"
 
 import { useState, useEffect, useMemo, useRef } from "react"
+import dynamic from "next/dynamic"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
-import { Switch } from "@/components/ui/switch"
-import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { 
   Send, 
   Code, 
@@ -32,6 +46,21 @@ import {
 import { cn } from "@/lib/utils"
 import { SurvivalChart } from "@/components/survival-chart"
 import { useAuth } from "@/components/auth-provider"
+import {
+  ResponsiveContainer,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  ComposedChart,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  ScatterChart,
+  Scatter,
+} from "recharts"
 
 interface ChatMessage {
   id: string
@@ -105,6 +134,29 @@ interface RunResponse {
   policy?: PolicyResult | null
 }
 
+interface VisualizationChartSpec {
+  chart_type?: string
+  x?: string
+  y?: string
+  group?: string
+  agg?: string
+}
+
+interface VisualizationAnalysisCard {
+  chart_spec?: VisualizationChartSpec
+  reason?: string
+  summary?: string
+  figure_json?: Record<string, unknown>
+  code?: string
+}
+
+interface VisualizationResponsePayload {
+  sql?: string
+  table_preview?: Array<Record<string, unknown>>
+  analyses?: VisualizationAnalysisCard[]
+  insight?: string
+}
+
 interface PersistedQueryState {
   query: string
   lastQuestion: string
@@ -113,12 +165,68 @@ interface PersistedQueryState {
   runResult: RunResponse | null
   suggestedQuestions: string[]
   showResults: boolean
+  showSqlPanel: boolean
+  showQueryResultPanel: boolean
   editedSql: string
   isEditing: boolean
-  isTechnicalMode: boolean
+}
+
+interface ResultTabState {
+  id: string
+  question: string
+  sql: string
+  resultData: PreviewData | null
+  visualization: VisualizationResponsePayload | null
+  statistics: SimpleStatsRow[]
+  insight: string
+  status: "pending" | "error" | "success"
+  error?: string | null
+  response: OneShotResponse | null
+  runResult: RunResponse | null
+  suggestedQuestions: string[]
+  showSqlPanel: boolean
+  showQueryResultPanel: boolean
+  editedSql: string
+  isEditing: boolean
+}
+
+interface DashboardFolderOption {
+  id: string
+  name: string
 }
 
 const MAX_PERSIST_ROWS = 200
+const VIZ_CACHE_PREFIX = "viz_cache_v3:"
+const VIZ_CACHE_TTL_MS = 1000 * 60 * 60 * 24
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
+
+const hashText = (value: string) => {
+  let hash = 2166136261
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i)
+    hash +=
+      (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24)
+  }
+  return (hash >>> 0).toString(16)
+}
+
+const buildVizCacheKey = (sqlText: string, questionText: string, previewData: PreviewData | null) => {
+  if (!previewData) return null
+  const columns = previewData.columns || []
+  const rows = previewData.rows || []
+  const rowCount = previewData.row_count ?? rows.length
+  const head = rows.slice(0, 10)
+  const tail = rows.slice(Math.max(0, rows.length - 10))
+  const basis = JSON.stringify({
+    q: (questionText || "").trim(),
+    sql: (sqlText || "").trim(),
+    columns,
+    rowCount,
+    head,
+    tail,
+  })
+  return `${VIZ_CACHE_PREFIX}${hashText(basis)}`
+}
 
 const trimPreview = (preview?: PreviewData): PreviewData | undefined => {
   if (!preview) return preview
@@ -231,28 +339,51 @@ export function QueryView() {
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       return await fetch(input, { ...init, signal: controller.signal })
+    } catch (error: any) {
+      const message = String(error?.message || "")
+      const isAbort =
+        error?.name === "AbortError" ||
+        error?.name === "TimeoutError" ||
+        /aborted/i.test(message)
+      if (isAbort) {
+        throw new Error("요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.")
+      }
+      throw error
     } finally {
       clearTimeout(timeout)
     }
   }
-  const [isTechnicalMode, setIsTechnicalMode] = useState(false)
   const [query, setQuery] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [showResults, setShowResults] = useState(false)
+  const [showSqlPanel, setShowSqlPanel] = useState(false)
+  const [showQueryResultPanel, setShowQueryResultPanel] = useState(false)
   const [editedSql, setEditedSql] = useState("")
   const [isEditing, setIsEditing] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [response, setResponse] = useState<OneShotResponse | null>(null)
   const [runResult, setRunResult] = useState<RunResponse | null>(null)
+  const [visualizationResult, setVisualizationResult] = useState<VisualizationResponsePayload | null>(null)
+  const [visualizationLoading, setVisualizationLoading] = useState(false)
+  const [visualizationError, setVisualizationError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [resultTabs, setResultTabs] = useState<ResultTabState[]>([])
+  const [activeTabId, setActiveTabId] = useState<string>("")
   const [boardSaving, setBoardSaving] = useState(false)
   const [boardMessage, setBoardMessage] = useState<string | null>(null)
+  const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false)
+  const [saveTitle, setSaveTitle] = useState("")
+  const [saveFolderMode, setSaveFolderMode] = useState<"existing" | "new">("existing")
+  const [saveFolderId, setSaveFolderId] = useState<string>("")
+  const [saveNewFolderName, setSaveNewFolderName] = useState("")
+  const [saveFolderOptions, setSaveFolderOptions] = useState<DashboardFolderOption[]>([])
+  const [saveFoldersLoading, setSaveFoldersLoading] = useState(false)
   const [lastQuestion, setLastQuestion] = useState<string>("")
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])
   const [quickQuestions, setQuickQuestions] = useState<string[]>([
-    "입원 환자 수를 월별로 보여줘.",
+    "입원 환자 수를 월별 추이로 보여줘",
     "가장 흔한 진단 코드는 무엇인가요?",
-    "ICU 재원일수가 가장 긴 환자는 누구인가요?",
+    "ICU 재원일수가 긴 환자군을 알려줘",
   ])
   const [isHydrated, setIsHydrated] = useState(false)
   const [isSqlDragging, setIsSqlDragging] = useState(false)
@@ -275,6 +406,7 @@ export function QueryView() {
     startRightWidth: 55,
     containerWidth: 0,
   })
+  const requestTokenRef = useRef(0)
 
   const payload = response?.payload
   const mode = payload?.mode
@@ -305,7 +437,184 @@ export function QueryView() {
   })()
   const summary = demoResult?.summary
   const source = demoResult?.source
+  const previewRecords = useMemo(
+    () =>
+      previewRows.map((row) =>
+        Object.fromEntries(previewColumns.map((col, idx) => [col, row?.[idx]]))
+      ),
+    [previewColumns, previewRows]
+  )
+  const statsRows = useMemo(() => buildSimpleStats(previewColumns, previewRows), [previewColumns, previewRows])
+  const boxPlotRows = useMemo(
+    () =>
+      statsRows
+        .filter((row) => row.count > 0 && row.q1 != null && row.q3 != null && row.min != null && row.max != null)
+        .map((row) => {
+          const min = row.min as number
+          const q1 = row.q1 as number
+          const median = row.median as number
+          const q3 = row.q3 as number
+          const max = row.max as number
+          const iqr = Math.max(0, q3 - q1)
+          const whiskerLow = Math.max(min, q1 - 1.5 * iqr)
+          const whiskerHigh = Math.min(max, q3 + 1.5 * iqr)
+          return {
+            column: row.column,
+            min,
+            q1,
+            median,
+            q3,
+            max,
+            whiskerLow,
+            whiskerHigh,
+            outlierLow: min < whiskerLow ? min : null,
+            outlierHigh: max > whiskerHigh ? max : null,
+            iqrBase: q1,
+            iqr,
+          }
+        }),
+    [statsRows]
+  )
+  const boxPlotYDomain = useMemo<[number, number] | undefined>(() => {
+    if (!boxPlotRows.length) return undefined
+    const minValue = Math.min(...boxPlotRows.map((row) => row.whiskerLow))
+    const maxValue = Math.max(...boxPlotRows.map((row) => row.whiskerHigh))
+    const spread = Math.max(1, maxValue - minValue)
+    const pad = Math.max(20, spread * 0.1)
+    const paddedMin = minValue - pad
+    const paddedMax = maxValue + pad
+    if (paddedMin === paddedMax) return [paddedMin - 1, paddedMax + 1]
+    return [paddedMin, paddedMax]
+  }, [boxPlotRows])
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
+  const recommendedAnalysis = useMemo(
+    () => (Array.isArray(visualizationResult?.analyses) ? visualizationResult!.analyses![0] : null),
+    [visualizationResult]
+  )
+  const recommendedFigure = useMemo(() => {
+    const fig = recommendedAnalysis?.figure_json
+    if (fig && typeof fig === "object") return fig as { data?: unknown[]; layout?: Record<string, unknown> }
+    return null
+  }, [recommendedAnalysis])
+  const recommendedChart = useMemo(() => {
+    const spec = recommendedAnalysis?.chart_spec
+    if (!spec || !previewRecords.length) return null
+    const chartType = String(spec.chart_type || "bar").toLowerCase()
+    const xKey = spec.x && previewColumns.includes(spec.x) ? spec.x : previewColumns[0]
+    const candidateY = spec.y && previewColumns.includes(spec.y) ? spec.y : previewColumns.find((col) => {
+      const v = previewRecords[0]?.[col]
+      return Number.isFinite(Number(v))
+    })
+
+    if (!xKey) return null
+
+    if (chartType === "scatter" && candidateY) {
+      const points = previewRecords
+        .map((row) => ({
+          x: Number(row[xKey]),
+          y: Number(row[candidateY]),
+        }))
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+      return { type: "scatter" as const, xKey, yKey: candidateY, data: points }
+    }
+
+    const grouped = new Map<string, { total: number; count: number }>()
+    for (const row of previewRecords) {
+      const key = String(row[xKey] ?? "")
+      if (!grouped.has(key)) grouped.set(key, { total: 0, count: 0 })
+      const bucket = grouped.get(key)!
+      if (candidateY) {
+        const num = Number(row[candidateY])
+        if (Number.isFinite(num)) {
+          bucket.total += num
+          bucket.count += 1
+        }
+      } else {
+        bucket.count += 1
+      }
+    }
+    const agg = String(spec.agg || (candidateY ? "avg" : "count")).toLowerCase()
+    const data = Array.from(grouped.entries()).map(([x, v]) => {
+      const y =
+        !candidateY || agg === "count"
+          ? v.count
+          : agg === "sum"
+            ? v.total
+            : v.count > 0
+              ? v.total / v.count
+              : 0
+      return { x, y: Number(y.toFixed(4)) }
+    })
+    return {
+      type: chartType === "line" ? ("line" as const) : ("bar" as const),
+      xKey,
+      yKey: candidateY || "count",
+      data,
+    }
+  }, [recommendedAnalysis, previewColumns, previewRecords])
+  const resultInterpretation = useMemo(() => {
+    if (summary) return summary
+    if (!previewColumns.length) return "쿼리 결과가 없어 해석을 생성할 수 없습니다."
+    const numericCols = statsRows.filter((row) => row.count > 0)
+    const topNumeric = numericCols
+      .slice()
+      .sort((a, b) => (b.avg ?? Number.NEGATIVE_INFINITY) - (a.avg ?? Number.NEGATIVE_INFINITY))[0]
+    const base = `현재 결과는 ${previewColumns.length}개 컬럼, 미리보기 ${previewRowCount}행입니다.`
+    if (!topNumeric || topNumeric.avg == null) return `${base} 수치형 요약 대상이 제한적입니다.`
+    return `${base} 평균 기준으로 '${topNumeric.column}' 컬럼이 가장 큽니다(평균 ${formatStatNumber(topNumeric.avg)}).`
+  }, [summary, previewColumns, previewRowCount, statsRows])
+  const chartInterpretation = useMemo(() => {
+    if (recommendedAnalysis?.summary) return recommendedAnalysis.summary
+    if (recommendedAnalysis?.reason) return recommendedAnalysis.reason
+    if (recommendedChart) {
+      return `차트 유형은 ${recommendedChart.type.toUpperCase()}이며, X축은 ${recommendedChart.xKey}, Y축은 ${recommendedChart.yKey} 기준입니다.`
+    }
+    if (survivalChartData?.length) {
+      return `생존 곡선을 표시했습니다. 추정 중앙 생존시간은 약 ${medianSurvival.toFixed(2)}입니다.`
+    }
+    return "현재 결과에서는 자동 차트 추천 근거가 충분하지 않습니다."
+  }, [recommendedAnalysis, recommendedChart, survivalChartData, medianSurvival])
+  const statsInterpretation = useMemo(() => {
+    if (!statsRows.length) return "통계표를 생성할 결과가 없습니다."
+    const numeric = statsRows.filter((row) => row.count > 0)
+    const nullTotal = statsRows.reduce((sum, row) => sum + row.nullCount, 0)
+    const missingTotal = statsRows.reduce((sum, row) => sum + row.missingCount, 0)
+    if (!numeric.length) return `수치형 컬럼이 없어 결측/NULL 중심으로 확인됩니다(결측 ${missingTotal}, NULL ${nullTotal}).`
+    const widest = numeric
+      .slice()
+      .sort((a, b) => ((b.max ?? 0) - (b.min ?? 0)) - ((a.max ?? 0) - (a.min ?? 0)))[0]
+    const range = widest.max != null && widest.min != null ? widest.max - widest.min : null
+    return `수치형 컬럼 ${numeric.length}개를 집계했습니다. 결측 ${missingTotal}, NULL ${nullTotal}이며, '${widest.column}'의 분산폭이 가장 큽니다${range != null ? ` (범위 ${formatStatNumber(range)})` : ""}.`
+  }, [statsRows])
+  const normalizeInsightText = (text: string) => {
+    return text
+      .replace(/Detected category \+ numeric for comparison\.?/gi, "범주형-수치형 조합 비교가 적합한 결과입니다.")
+      .replace(/Result aliases indicate a time-series aggregate\.?/gi, "집계 결과가 시계열 추세 분석에 적합합니다.")
+      .replace(/Result aliases indicate a grouped aggregate\.?/gi, "집계 결과가 그룹 비교 분석에 적합합니다.")
+      .replace(/Detected time-like and numeric columns for a trend chart\.?/gi, "시간형-수치형 조합으로 추세 차트가 적합합니다.")
+      .replace(/Detected multiple numeric columns for correlation\.?/gi, "수치형 컬럼 간 상관관계 분석이 적합합니다.")
+      .replace(/Detected a single numeric column for distribution\.?/gi, "단일 수치형 컬럼 분포 분석이 적합합니다.")
+      .replace(/^\s*Detected.*$/gim, "")
+      .replace(/^Rows:\s*(\d+)$/gim, "결과 행 수: $1")
+      .replace(/^source:\s*.+$/gim, "")
+      .replace(/^\s*source:\s*.+$/gim, "")
+      .replace(/^\s*recommended reason:\s*.+$/gim, "")
+      .replace(/\bsource\s*:\s*llm\b/gi, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  }
+
+  const integratedInsight = useMemo(() => {
+    if (visualizationResult?.insight) return normalizeInsightText(visualizationResult.insight)
+    const lines: string[] = []
+    lines.push(resultInterpretation)
+    lines.push(chartInterpretation)
+    lines.push(statsInterpretation)
+    if (riskScore != null) {
+      lines.push(`위험 점수는 ${riskScore}${riskIntent ? ` (${riskIntent})` : ""}로 평가되었습니다.`)
+    }
+    return normalizeInsightText(lines.join("\n\n"))
+  }, [visualizationResult, resultInterpretation, chartInterpretation, statsInterpretation, riskScore, riskIntent])
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
@@ -315,6 +624,95 @@ export function QueryView() {
   const chatPanelStyle = shouldShowResizablePanels ? { width: `${100 - resultsPanelWidth}%` } : undefined
   const resultsPanelStyle = shouldShowResizablePanels ? { width: `${resultsPanelWidth}%` } : undefined
   const appendSuggestions = (base: string, _suggestions?: string[]) => base
+  const createResultTab = (questionText: string): ResultTabState => ({
+    id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    question: questionText,
+    sql: "",
+    resultData: null,
+    visualization: null,
+    statistics: [],
+    insight: "",
+    status: "pending",
+    error: null,
+    response: null,
+    runResult: null,
+    suggestedQuestions: [],
+    showSqlPanel: false,
+    showQueryResultPanel: false,
+    editedSql: "",
+    isEditing: false,
+  })
+
+  const updateTab = (tabId: string, patch: Partial<ResultTabState>) => {
+    setResultTabs((prev) =>
+      prev.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab))
+    )
+  }
+
+  const updateActiveTab = (patch: Partial<ResultTabState>) => {
+    if (!activeTabId) return
+    updateTab(activeTabId, patch)
+  }
+
+  const fetchVisualizationPlan = async (
+    sqlText: string,
+    questionText: string,
+    previewData: PreviewData | null,
+    targetTabId?: string
+  ) => {
+    if (!sqlText?.trim() || !previewData?.columns?.length || !previewData?.rows?.length) {
+      if (!targetTabId || targetTabId === activeTabId) {
+        setVisualizationResult(null)
+        setVisualizationError(null)
+      }
+      if (targetTabId) {
+        updateTab(targetTabId, { visualization: null })
+      }
+      return null
+    }
+    // Always fetch latest visualization/insight from server (disable local cache)
+    setVisualizationLoading(true)
+    setVisualizationError(null)
+    try {
+      const records = previewData.rows.map((row) =>
+        Object.fromEntries(previewData.columns.map((col, idx) => [col, row?.[idx]]))
+      )
+      const res = await fetchWithTimeout(
+        apiUrl("/visualize"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_query: questionText || lastQuestion || "",
+            sql: sqlText,
+            rows: records,
+          }),
+        },
+        90000
+      )
+      if (!res.ok) throw new Error(await readError(res))
+      const data: VisualizationResponsePayload = await res.json()
+      if (!targetTabId || targetTabId === activeTabId) {
+        setVisualizationResult(data)
+      }
+      if (targetTabId) {
+        updateTab(targetTabId, { visualization: data })
+      }
+      return data
+    } catch (err: any) {
+      const message = err?.message || "시각화 추천 플랜 조회에 실패했습니다."
+      if (!targetTabId || targetTabId === activeTabId) {
+        setVisualizationResult(null)
+        setVisualizationError(message)
+      }
+      if (targetTabId) {
+        updateTab(targetTabId, { visualization: null, error: message })
+      }
+      return null
+    } finally {
+      setVisualizationLoading(false)
+    }
+  }
 
   const handlePanelResizeMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !shouldShowResizablePanels) return
@@ -375,6 +773,24 @@ export function QueryView() {
       window.removeEventListener("mouseup", stopDragging)
     }
   }, [])
+
+  useEffect(() => {
+    if (!activeTabId) return
+    const tab = resultTabs.find((item) => item.id === activeTabId)
+    if (!tab) return
+    setResponse(tab.response)
+    setRunResult(tab.runResult)
+    setVisualizationResult(tab.visualization)
+    setVisualizationError(tab.error || null)
+    setError(tab.error || null)
+    setEditedSql(tab.editedSql || tab.sql || "")
+    setIsEditing(tab.isEditing)
+    setSuggestedQuestions(tab.suggestedQuestions || [])
+    setLastQuestion(tab.question || "")
+    setShowSqlPanel(tab.showSqlPanel)
+    setShowQueryResultPanel(tab.showQueryResultPanel)
+    setShowResults(true)
+  }, [activeTabId, resultTabs])
 
   useEffect(() => {
     const syncDesktopLayout = () => {
@@ -468,113 +884,41 @@ export function QueryView() {
   const buildSuggestions = (questionText: string, columns?: string[]) => {
     const suggestions: string[] = []
     const normalized = questionText.toLowerCase()
-    const cols = (columns || []).map((col) => col.toLowerCase().trim()).filter(Boolean)
-    if (!cols.length) return suggestions
+    const cols = (columns || []).map((col) => col.toLowerCase())
 
-    const hasQuestionToken = (...tokens: string[]) => tokens.some((token) => normalized.includes(token))
-    const hasColLike = (tokens: string[]) => cols.some((col) => tokens.some((token) => col.includes(token)))
-
-    const hasComparisonIntent = hasQuestionToken(
-      "비교",
-      "대비",
-      "차이",
-      "vs",
-      "versus",
-      "comparison",
-      "compared"
-    )
-    const hasTimeIntent = hasQuestionToken(
-      "기간별",
-      "월별",
-      "연도별",
-      "주별",
-      "일별",
-      "추이",
-      "trend",
-      "time series",
-      "over time"
-    )
-    const hasAgeIntent = hasQuestionToken("연령별", "연령대별", "나이별", "age")
-    const hasGenderIntent = hasQuestionToken("성별", "남성", "여성", "gender", "male", "female")
-    const hasRankingIntent = hasQuestionToken("상위", "top", "가장", "highest", "largest", "많은", "내림차순")
-    const hasMetricIntent = hasQuestionToken(
-      "사망률",
-      "사망",
-      "생존율",
-      "재입원율",
-      "비율",
-      "건수",
-      "count",
-      "rate",
-      "ratio",
-      "평균",
-      "중앙",
-      "중위"
-    )
-
-    const hasTimeColumn = hasColLike([
-      "time",
-      "date",
-      "year",
-      "month",
-      "week",
-      "day",
-      "admittime",
-      "dischtime",
-      "intime",
-      "outtime",
-      "charttime",
-      "starttime",
-      "stoptime",
-    ])
-    const hasGenderColumn = hasColLike(["gender", "sex"])
-    const hasAgeColumn = hasColLike(["age"])
-    const hasDiagnosisColumn = hasColLike(["icd", "diagnos", "diag", "long_title"])
-    const hasGroupColumn = hasColLike([
-      "gender",
-      "sex",
-      "age",
-      "year",
-      "month",
-      "week",
-      "day",
-      "icd",
-      "diagnos",
-      "diag",
-      "service",
-      "careunit",
-      "admission_type",
-      "race",
-      "insurance",
-    ])
-    const hasCountColumn = hasColLike(["cnt", "count", "_cnt", "_count", "n_", "num", "admission_cnt"])
-    const hasRateColumn = hasColLike(["rate", "ratio", "pct", "percent", "mortality", "readmission"])
-
-    const pushSuggestion = (text: string) => {
+    const pushUnique = (text: string) => {
       if (!text || suggestions.includes(text)) return
       suggestions.push(text)
     }
 
-    if (hasTimeColumn && !hasTimeIntent) {
-      pushSuggestion("결과를 연도/월 단위 추이로 보여줘.")
+    if (normalized.includes("diagnos") || normalized.includes("진단") || cols.some((c) => c.includes("icd"))) {
+      pushUnique("상위 10개 진단 보기")
+      pushUnique("성별/연령별 진단 분포")
+      pushUnique("진단 추세 보기")
+    } else if (normalized.includes("icu") || normalized.includes("재원") || cols.some((c) => c.includes("stay"))) {
+      pushUnique("ICU 평균 재원일수")
+      pushUnique("ICU 재원일수 분포")
+      pushUnique("ICU 재원 상위 10명")
+    } else if (normalized.includes("입원") || normalized.includes("admission")) {
+      pushUnique("입원 추이 보기")
+      pushUnique("진단별 입원 건수")
+      pushUnique("평균 입원기간")
     }
-    if (hasGenderColumn && !hasGenderIntent && !hasComparisonIntent) {
-      pushSuggestion("결과를 성별로 비교해줘.")
+
+    if (cols.some((c) => c.includes("date") || c.includes("time"))) {
+      pushUnique("기간별 추이")
     }
-    if (hasAgeColumn && !hasAgeIntent && !hasComparisonIntent) {
-      pushSuggestion("결과를 연령대별로 비교해줘.")
+    if (cols.some((c) => c.includes("gender"))) {
+      pushUnique("성별 통계 보기")
     }
-    if (hasDiagnosisColumn && !hasQuestionToken("진단", "diagnos", "icd")) {
-      pushSuggestion("진단 코드 기준으로 상위 항목을 보여줘.")
+    if (cols.some((c) => c.includes("age"))) {
+      pushUnique("연령대별 보기")
     }
-    if (hasGroupColumn && (hasCountColumn || hasRateColumn) && !hasRankingIntent) {
-      pushSuggestion("값이 큰 순서로 상위 10개를 보여줘.")
-    }
-    if (hasGroupColumn && hasCountColumn && !hasRateColumn && !hasMetricIntent) {
-      pushSuggestion("건수뿐 아니라 비율도 함께 보여줘.")
-    }
-    if (hasGroupColumn && hasRateColumn && !hasCountColumn && !hasMetricIntent) {
-      pushSuggestion("비율뿐 아니라 건수도 함께 보여줘.")
+
+    if (suggestions.length === 0) {
+      pushUnique("상위 10개 보기")
+      pushUnique("최근 6개월")
+      pushUnique("성별 통계 보기")
     }
 
     return suggestions.slice(0, 3)
@@ -601,51 +945,22 @@ export function QueryView() {
     return text || `${res.status} ${res.statusText}`
   }
 
-  const isClarificationAssistantMessage = (message: ChatMessage) => {
-    if (message.role !== "assistant") return false
-    const content = message.content.toLowerCase()
-    return (
-      content.includes("추가로 아래 항목") ||
-      content.includes("답변 예시") ||
-      content.includes("질문 범위를 조금 더 좁혀") ||
-      content.includes("clarification") ||
-      content.includes("clarify")
-    )
-  }
-
-  const buildClarificationConversation = (history: ChatMessage[], latestUser: ChatMessage) => {
-    const seed = [...history, latestUser]
-    let clarifyIdx = -1
-    for (let i = seed.length - 1; i >= 0; i -= 1) {
-      if (isClarificationAssistantMessage(seed[i])) {
-        clarifyIdx = i
-        break
-      }
-    }
-    if (clarifyIdx < 0) return seed
-
-    let baseUserIdx = -1
-    for (let i = clarifyIdx - 1; i >= 0; i -= 1) {
-      if (seed[i].role === "user") {
-        baseUserIdx = i
-        break
-      }
-    }
-    const startIdx = baseUserIdx >= 0 ? baseUserIdx : Math.max(clarifyIdx - 1, 0)
-    return seed.slice(startIdx)
-  }
-
   const buildAssistantMessage = (data: OneShotResponse) => {
     if (data.payload.mode === "clarify") {
       const clarify = data.payload.clarification
       const prompt = clarify?.question?.trim() || "질문 범위를 조금 더 좁혀주세요."
       const options = Array.isArray(clarify?.options) ? clarify.options.filter(Boolean) : []
       const examples = Array.isArray(clarify?.example_inputs) ? clarify.example_inputs.filter(Boolean) : []
+      const reason = clarify?.reason?.trim()
       const lines = [prompt]
-      const exampleValues =
-        examples.length > 0 ? examples.slice(0, 3) : options.slice(0, 3)
-      if (exampleValues.length) {
-        lines.push(`답변 예시: ${exampleValues.join(" / ")}`)
+      if (reason) {
+        lines.push(`이유: ${reason}`)
+      }
+      if (options.length) {
+        lines.push(`선택 예시: ${options.slice(0, 4).join(", ")}`)
+      }
+      if (examples.length) {
+        lines.push(`입력 예: ${examples.slice(0, 2).join(" / ")}`)
       }
       return lines.join("\n")
     }
@@ -675,7 +990,7 @@ export function QueryView() {
     const localRiskIntent = payload?.risk?.intent
     const riskLabel =
       localRiskScore != null ? `위험도 ${localRiskScore}${localRiskIntent ? ` (${localRiskIntent})` : ""}로 평가됐어요.` : ""
-    return [assumptionMessage, base, riskLabel].filter(Boolean).join(" ")
+    return [base, riskLabel].filter(Boolean).join(" ")
   }
 
   useEffect(() => {
@@ -686,6 +1001,8 @@ export function QueryView() {
       setResponse(null)
       setRunResult(null)
       setShowResults(false)
+      setShowSqlPanel(false)
+      setShowQueryResultPanel(false)
       setEditedSql("")
       setIsEditing(false)
       setLastQuestion("")
@@ -707,9 +1024,10 @@ export function QueryView() {
         if (typeof state.lastQuestion === "string") setLastQuestion(state.lastQuestion)
         if (Array.isArray(state.suggestedQuestions)) setSuggestedQuestions(state.suggestedQuestions)
         if (typeof state.showResults === "boolean") setShowResults(state.showResults)
+        if (typeof state.showSqlPanel === "boolean") setShowSqlPanel(state.showSqlPanel)
+        if (typeof state.showQueryResultPanel === "boolean") setShowQueryResultPanel(state.showQueryResultPanel)
         if (typeof state.editedSql === "string") setEditedSql(state.editedSql)
         if (typeof state.isEditing === "boolean") setIsEditing(state.isEditing)
-        if (typeof state.isTechnicalMode === "boolean") setIsTechnicalMode(state.isTechnicalMode)
       } catch {
         // ignore hydration errors
       } finally {
@@ -732,9 +1050,10 @@ export function QueryView() {
       runResult: sanitizeRunResult(runResult),
       suggestedQuestions,
       showResults,
+      showSqlPanel,
+      showQueryResultPanel,
       editedSql,
       isEditing,
-      isTechnicalMode,
     }
     saveTimerRef.current = window.setTimeout(() => {
       fetch(apiUrl("/chat/history"), {
@@ -757,9 +1076,10 @@ export function QueryView() {
     runResult,
     suggestedQuestions,
     showResults,
+    showSqlPanel,
+    showQueryResultPanel,
     editedSql,
     isEditing,
-    isTechnicalMode,
     apiBaseUrl,
     chatHistoryUser,
   ])
@@ -782,13 +1102,24 @@ export function QueryView() {
     const trimmed = questionText.trim()
     if (!trimmed) return
 
+    const tab = createResultTab(trimmed)
+    setResultTabs((prev) => [tab, ...prev])
+    setActiveTabId(tab.id)
+    setShowResults(true)
+    const requestToken = ++requestTokenRef.current
+
     setIsLoading(true)
     setError(null)
     setBoardMessage(null)
     setResponse(null)
     setRunResult(null)
+    setVisualizationResult(null)
+    setVisualizationError(null)
     setEditedSql("")
-    setShowResults(false)
+    // Keep split layout while running next question to avoid chat panel jumping to full width.
+    // Results content is refreshed below when response arrives.
+    setShowSqlPanel(false)
+    setShowQueryResultPanel(false)
     setLastQuestion(trimmed)
     setSuggestedQuestions([])
     const newMessage: ChatMessage = {
@@ -798,9 +1129,7 @@ export function QueryView() {
       timestamp: new Date()
     }
     const shouldUseClarificationContext = response?.payload?.mode === "clarify"
-    const conversationSeed = shouldUseClarificationContext
-      ? buildClarificationConversation(messages, newMessage)
-      : [newMessage]
+    const conversationSeed = shouldUseClarificationContext ? [...messages, newMessage] : [newMessage]
     const conversation = conversationSeed
       .slice(-10)
       .map((item) => ({ role: item.role, content: item.content }))
@@ -821,14 +1150,25 @@ export function QueryView() {
       if (!res.ok) {
         throw new Error(await readError(res))
       }
+      if (requestToken !== requestTokenRef.current) return
       const data: OneShotResponse = await res.json()
       setResponse(data)
+      updateTab(tab.id, {
+        response: data,
+        status: "success",
+      })
       if (data.payload.mode === "clarify") {
-        setShowResults(false)
+        setShowSqlPanel(false)
+        setShowQueryResultPanel(false)
         setEditedSql("")
         setIsEditing(false)
         const clarificationSuggestions = buildClarificationSuggestions(data.payload)
         setSuggestedQuestions(clarificationSuggestions)
+        updateTab(tab.id, {
+          suggestedQuestions: clarificationSuggestions,
+          response: data,
+          status: "success",
+        })
         const responseMessage: ChatMessage = {
           id: (Date.now() + 1).toString(),
           role: "assistant",
@@ -840,9 +1180,8 @@ export function QueryView() {
       }
 
       setShowResults(true)
-      const effectiveQuestionForSuggestions =
-        (typeof data.payload.question === "string" && data.payload.question.trim()) || trimmed
-      setLastQuestion(effectiveQuestionForSuggestions)
+      setShowSqlPanel(false)
+      setShowQueryResultPanel(false)
       const generatedSql =
         (data.payload.mode === "demo"
           ? data.payload.result?.sql
@@ -853,9 +1192,17 @@ export function QueryView() {
       setIsEditing(false)
       const suggestions =
         data.payload.mode === "demo"
-          ? buildSuggestions(effectiveQuestionForSuggestions, data.payload.result?.preview?.columns)
+          ? buildSuggestions(trimmed, data.payload.result?.preview?.columns)
           : []
       setSuggestedQuestions(suggestions)
+      updateTab(tab.id, {
+        question: trimmed,
+        sql: generatedSql,
+        response: data,
+        suggestedQuestions: suggestions,
+        editedSql: generatedSql,
+        status: "success",
+      })
       const responseMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
@@ -870,15 +1217,19 @@ export function QueryView() {
           qid: data.qid,
           sql: generatedSql,
           questionForSuggestions: effectiveQuestionForSuggestions,
-          addAssistantMessage: false,
+          addAssistantMessage: true,
         })
       }
     } catch (err: any) {
       const message =
         err?.name === "AbortError"
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-          : err?.message || "요청에 실패했습니다."
+          : err?.message || "요청이 실패했습니다."
       setError(message)
+      updateTab(tab.id, {
+        status: "error",
+        error: message,
+      })
       setMessages(prev => [
         ...prev,
         {
@@ -897,93 +1248,8 @@ export function QueryView() {
     await runQuery(query)
   }
 
-  const classifyClarificationSlot = (text: string) => {
-    const normalized = text.toLowerCase()
-    if (
-      normalized.includes("기간") ||
-      normalized.includes("최근") ||
-      normalized.includes("지난") ||
-      normalized.includes("작년") ||
-      normalized.includes("올해") ||
-      normalized.includes("연도") ||
-      normalized.includes("월") ||
-      normalized.includes("주") ||
-      normalized.includes("일") ||
-      normalized.includes("입원 후") ||
-      normalized.includes("year") ||
-      normalized.includes("month") ||
-      normalized.includes("week") ||
-      normalized.includes("day")
-    ) {
-      return "period" as const
-    }
-    if (
-      normalized.includes("비교") ||
-      normalized.includes("대비") ||
-      normalized.includes("vs") ||
-      normalized.includes("versus") ||
-      normalized.includes("comparison")
-    ) {
-      return "comparison" as const
-    }
-    if (
-      normalized.includes("지표") ||
-      normalized.includes("사망") ||
-      normalized.includes("생존") ||
-      normalized.includes("재입원") ||
-      normalized.includes("비율") ||
-      normalized.includes("건수") ||
-      normalized.includes("평균") ||
-      normalized.includes("중앙") ||
-      normalized.includes("중위")
-    ) {
-      return "metric" as const
-    }
-    if (
-      normalized.includes("환자") ||
-      normalized.includes("대상") ||
-      normalized.includes("코호트") ||
-      normalized.includes("연령") ||
-      normalized.includes("세")
-    ) {
-      return "cohort" as const
-    }
-    return null
-  }
-
-  const toSuggestionSentence = (text: string) => {
-    const trimmed = text.trim()
-    if (!trimmed) return trimmed
-    if (mode !== "clarify") return trimmed
-
-    let value = trimmed
-    value = value.replace(/^답변\s*예시\s*:\s*/i, "").trim()
-    value = value.replace(/^선택\s*예시\s*:\s*/i, "").trim()
-    if (value.includes(" / ")) {
-      value = value.split(" / ")[0].trim()
-    }
-
-    const labelMatch = value.match(/^(기간|대상\s*환자|비교\s*기준|지표)\s*[:：]\s*(.+)$/)
-    if (labelMatch) {
-      const label = labelMatch[1].replace(/\s+/g, "")
-      const content = labelMatch[2].trim()
-      if (!content) return trimmed
-      if (label === "기간") return `기간은 ${content}로 해줘.`
-      if (label === "대상환자") return `대상 환자는 ${content}로 해줘.`
-      if (label === "비교기준") return `비교 기준은 ${content}로 해줘.`
-      return `지표는 ${content}로 해줘.`
-    }
-
-    const slot = classifyClarificationSlot(value)
-    if (slot === "period") return `기간은 ${value}로 해줘.`
-    if (slot === "cohort") return `대상 환자는 ${value}로 해줘.`
-    if (slot === "comparison") return `비교 기준은 ${value}로 해줘.`
-    if (slot === "metric") return `지표는 ${value}로 해줘.`
-    return trimmed
-  }
-
   const handleQuickQuestion = async (text: string) => {
-    await runQuery(toSuggestionSentence(text))
+    await runQuery(text)
   }
 
   const deriveDashboardCategory = (text: string) => {
@@ -996,13 +1262,101 @@ export function QueryView() {
     return "전체"
   }
 
-  const handleSaveToDashboard = async () => {
+  const loadDashboardFolders = async () => {
+    setSaveFoldersLoading(true)
+    try {
+      const res = await fetchWithTimeout(apiUrl("/dashboard/queries"), {}, 12000)
+      if (!res.ok) throw new Error("failed to load folders")
+      const data = await res.json()
+      const folders = Array.isArray(data?.folders) ? data.folders : []
+      const queries = Array.isArray(data?.queries) ? data.queries : []
+
+      const folderMap = new Map<string, DashboardFolderOption>()
+      const nameKeyMap = new Map<string, DashboardFolderOption>()
+
+      const pushFolder = (idRaw: unknown, nameRaw: unknown) => {
+        const id = String(idRaw || "").trim()
+        const name = String(nameRaw || "").trim()
+        if (!id || !name) return
+        if (!folderMap.has(id)) {
+          const item = { id, name }
+          folderMap.set(id, item)
+          nameKeyMap.set(name.toLowerCase(), item)
+        }
+      }
+
+      folders.forEach((item: any) => {
+        pushFolder(item?.id, item?.name)
+      })
+
+      queries.forEach((item: any) => {
+        const folderId = String(item?.folderId || "").trim()
+        const category = String(item?.category || "").trim()
+        if (!category) return
+        if (folderId) {
+          pushFolder(folderId, category)
+          return
+        }
+        const key = category.toLowerCase()
+        const existed = nameKeyMap.get(key)
+        if (existed) return
+        const syntheticId = `category:${encodeURIComponent(category)}`
+        pushFolder(syntheticId, category)
+      })
+
+      const mapped = Array.from(folderMap.values()).sort((a, b) => a.name.localeCompare(b.name, "ko"))
+      setSaveFolderOptions(mapped)
+      if (!mapped.length) {
+        setSaveFolderId("")
+      } else if (!mapped.some((item) => item.id === saveFolderId)) {
+        setSaveFolderId(mapped[0].id)
+      }
+    } catch {
+      setSaveFolderOptions([])
+      setSaveFolderId("")
+    } finally {
+      setSaveFoldersLoading(false)
+    }
+  }
+
+  const openSaveDialog = async () => {
     if (!displaySql && !currentSql) {
       setBoardMessage("저장할 SQL이 없습니다.")
       return
     }
     const title = (lastQuestion || query || "저장된 쿼리").trim() || "저장된 쿼리"
-    const category = deriveDashboardCategory(title)
+    setSaveTitle(title)
+    setSaveFolderMode("existing")
+    setSaveNewFolderName("")
+    setBoardMessage(null)
+    setIsSaveDialogOpen(true)
+    await loadDashboardFolders()
+  }
+
+  const handleSaveToDashboard = async () => {
+    const finalTitle = (saveTitle || lastQuestion || query || "저장된 쿼리").trim()
+    if (!finalTitle) {
+      setBoardMessage("저장 이름을 입력해주세요.")
+      return
+    }
+
+    const newFolderName = saveNewFolderName.trim()
+    if (saveFolderMode === "new" && !newFolderName) {
+      setBoardMessage("새 폴더 이름을 입력해주세요.")
+      return
+    }
+
+    const selectedFolder = saveFolderOptions.find((item) => item.id === saveFolderId) || null
+    const folderId =
+      saveFolderMode === "new"
+        ? `folder-${Date.now()}`
+        : selectedFolder?.id || ""
+    const folderName =
+      saveFolderMode === "new"
+        ? newFolderName
+        : selectedFolder?.name || deriveDashboardCategory(finalTitle)
+
+    const category = folderName || deriveDashboardCategory(finalTitle)
     const metrics = [
       { label: "행 수", value: String(previewRowCount ?? 0) },
       { label: "컬럼 수", value: String(previewColumns.length) },
@@ -1019,12 +1373,13 @@ export function QueryView() {
         : undefined
     const newEntry = {
       id: `dashboard-${Date.now()}`,
-      title,
-      description: summary || "쿼리 결과 저장",
+      title: finalTitle,
+      description: summary || "쿼리 결과 요약",
       query: displaySql || currentSql,
-      lastRun: "방금 저장",
+      lastRun: "방금 전",
       isPinned: true,
       category,
+      folderId: folderId || undefined,
       preview: previewPayload,
       metrics,
       chartType: "bar",
@@ -1032,19 +1387,37 @@ export function QueryView() {
     setBoardSaving(true)
     setBoardMessage(null)
     try {
-      const res = await fetchWithTimeout(apiUrl("/dashboard/queries"), {}, 15000)
-      const payload = res.ok ? await res.json() : null
-      const existing = Array.isArray(payload?.queries) ? payload.queries : []
-      const next = [newEntry, ...existing]
-      const saveRes = await fetchWithTimeout(apiUrl("/dashboard/queries"), {
+      const saveRes = await fetchWithTimeout(apiUrl("/dashboard/saveQuery"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queries: next }),
+        body: JSON.stringify({
+          question: finalTitle,
+          sql: displaySql || currentSql,
+          metadata: {
+            row_count: previewRowCount ?? 0,
+            column_count: previewColumns.length,
+            row_cap: previewRowCap ?? null,
+            summary: summary || "",
+            mode: mode || "",
+            entry: newEntry,
+            new_folder:
+              saveFolderMode === "new"
+                ? {
+                    id: folderId,
+                    name: folderName,
+                    createdAt: new Date().toISOString(),
+                  }
+                : null,
+          },
+        }),
       }, 15000)
       if (!saveRes.ok) {
         throw new Error("save failed")
       }
+      updateActiveTab({ question: finalTitle })
+      setLastQuestion(finalTitle)
       setBoardMessage("결과 보드에 저장했습니다.")
+      setIsSaveDialogOpen(false)
     } catch (err) {
       setBoardMessage("결과 보드 저장에 실패했습니다.")
     } finally {
@@ -1057,11 +1430,13 @@ export function QueryView() {
     sql,
     questionForSuggestions,
     addAssistantMessage = true,
+    tabId,
   }: {
     qid?: string
     sql?: string
     questionForSuggestions?: string
     addAssistantMessage?: boolean
+    tabId?: string
   }) => {
     const body: Record<string, any> = {
       user_ack: true,
@@ -1088,9 +1463,28 @@ export function QueryView() {
     setRunResult(data)
     setShowResults(true)
     setIsEditing(false)
+    const targetTabId = tabId || activeTabId
+    const viz = await fetchVisualizationPlan(
+      (data.sql || sql || "").trim(),
+      questionForSuggestions || lastQuestion || "",
+      data.result || null,
+      targetTabId
+    )
 
     const suggestions = buildSuggestions(questionForSuggestions || lastQuestion, data.result?.columns)
     setSuggestedQuestions(suggestions)
+    if (targetTabId) {
+      updateTab(targetTabId, {
+        sql: data.sql || sql || "",
+        runResult: data,
+        resultData: data.result || null,
+        visualization: viz,
+        suggestedQuestions: suggestions,
+        insight: normalizeInsightText(viz?.insight || ""),
+        status: "success",
+        error: null,
+      })
+    }
 
     if (addAssistantMessage) {
       setMessages(prev => [
@@ -1113,6 +1507,7 @@ export function QueryView() {
     setIsLoading(true)
     setError(null)
     setBoardMessage(null)
+    updateActiveTab({ status: "pending", error: null })
     try {
       const sqlToRun = (overrideSql || editedSql || currentSql).trim()
       await executeAdvancedSql({
@@ -1120,13 +1515,15 @@ export function QueryView() {
         sql: sqlToRun,
         questionForSuggestions: lastQuestion,
         addAssistantMessage: true,
+        tabId: activeTabId,
       })
     } catch (err: any) {
       const message =
         err?.name === "AbortError"
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-          : err?.message || "실행에 실패했습니다."
+          : err?.message || "실행이 실패했습니다."
       setError(message)
+      updateActiveTab({ status: "error", error: message })
       setMessages(prev => [
         ...prev,
         {
@@ -1140,6 +1537,65 @@ export function QueryView() {
       setIsLoading(false)
     }
   }
+
+  useEffect(() => {
+    const runPendingDashboardQuery = async () => {
+      if (typeof window === "undefined") return
+      const raw = localStorage.getItem("ql_pending_dashboard_query")
+      if (!raw) return
+      localStorage.removeItem("ql_pending_dashboard_query")
+
+      let parsed: { question?: string; sql?: string } | null = null
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        return
+      }
+      const sqlText = String(parsed?.sql || "").trim()
+      if (!sqlText) return
+
+      const questionText = String(parsed?.question || "").trim() || "대시보드 저장 쿼리"
+      const tab = createResultTab(questionText)
+      tab.sql = sqlText
+      tab.editedSql = sqlText
+      tab.showSqlPanel = true
+      setResultTabs((prev) => [tab, ...prev])
+      setActiveTabId(tab.id)
+      setShowResults(true)
+      setIsLoading(true)
+      setError(null)
+      setBoardMessage(null)
+      setLastQuestion(questionText)
+      setSuggestedQuestions([])
+
+      try {
+        await executeAdvancedSql({
+          sql: sqlText,
+          questionForSuggestions: questionText,
+          addAssistantMessage: true,
+          tabId: tab.id,
+        })
+      } catch (err: any) {
+        const message =
+          err?.name === "AbortError"
+            ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+            : err?.message || "실행이 실패했습니다."
+        setError(message)
+        updateTab(tab.id, { status: "error", error: message })
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    runPendingDashboardQuery()
+    const onOpenQueryView = () => {
+      void runPendingDashboardQuery()
+    }
+    window.addEventListener("ql-open-query-view", onOpenQueryView)
+    return () => {
+      window.removeEventListener("ql-open-query-view", onOpenQueryView)
+    }
+  }, [])
 
   const handleCopySql = async () => {
     if (!displaySql) return
@@ -1178,18 +1634,38 @@ export function QueryView() {
     setMessages([])
     setResponse(null)
     setRunResult(null)
+    setVisualizationResult(null)
+    setVisualizationError(null)
     setShowResults(false)
+    setShowSqlPanel(false)
+    setShowQueryResultPanel(false)
     setQuery("")
     setEditedSql("")
     setIsEditing(false)
     setLastQuestion("")
     setSuggestedQuestions([])
     setError(null)
+    setResultTabs([])
+    setActiveTabId("")
     fetch(apiUrl("/chat/history"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user: chatHistoryUser, state: null })
     }).catch(() => {})
+  }
+
+  const handleCloseTab = (tabId: string) => {
+    setResultTabs((prev) => {
+      const next = prev.filter((tab) => tab.id !== tabId)
+      if (activeTabId === tabId) {
+        const fallback = next[0]
+        setActiveTabId(fallback?.id || "")
+        if (!fallback) {
+          setShowResults(false)
+        }
+      }
+      return next
+    })
   }
 
   const validation = (() => {
@@ -1269,38 +1745,6 @@ export function QueryView() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-56px)] sm:h-[calc(100vh-64px)]">
-      {/* Header */}
-      <div className="p-3 sm:p-4 border-b border-border bg-card/50">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <h2 className="text-base sm:text-lg font-semibold text-foreground truncate">쿼리 & 분석</h2>
-            <p className="text-[10px] sm:text-xs text-muted-foreground hidden sm:block">자연어로 질문하고 SQL 결과를 확인하세요</p>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-4 shrink-0">
-            <div className="flex items-center gap-1 sm:gap-2">
-              <Label htmlFor="mode-switch" className="text-[10px] sm:text-xs text-muted-foreground whitespace-nowrap">
-                {isTechnicalMode ? "기술" : "비기술"}
-              </Label>
-              <Switch 
-                id="mode-switch"
-                checked={isTechnicalMode}
-                onCheckedChange={setIsTechnicalMode}
-              />
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1"
-              onClick={handleResetConversation}
-              disabled={isLoading || !hasConversation}
-            >
-              <Trash2 className="w-3 h-3" />
-              대화 초기화
-            </Button>
-          </div>
-        </div>
-      </div>
-
       {/* Main Content */}
       <div ref={mainContentRef} className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
         {/* Chat Panel */}
@@ -1320,7 +1764,7 @@ export function QueryView() {
                 </div>
                 <h3 className="font-medium text-foreground mb-2">질문을 입력하세요</h3>
                 <p className="text-sm text-muted-foreground max-w-sm">
-                  예: "65세 이상 심부전 환자 코호트 만들어줘, 생존 곡선 그려줘"
+                  예: "65세 이상 환자 코호트를 만들고 생존 곡선을 보여줘"
                 </p>
                 {visibleQuickQuestions.length > 0 && (
                   <div className="mt-4 flex flex-col gap-2 w-full max-w-sm">
@@ -1449,318 +1893,713 @@ export function QueryView() {
             )}
             style={resultsPanelStyle}
           >
-            <Tabs defaultValue={isTechnicalMode ? "sql" : "results"} className="flex-1 min-h-0 flex flex-col">
-              <div className="px-4 pt-2 border-b border-border">
-                <TabsList className="h-9">
-                  {isTechnicalMode && (
-                    <TabsTrigger value="sql" className="gap-1.5 text-xs">
-                      <Code className="w-3.5 h-3.5" />
-                      SQL
-                    </TabsTrigger>
-                  )}
-                  <TabsTrigger value="results" className="gap-1.5 text-xs">
-                    <Table2 className="w-3.5 h-3.5" />
-                    결과
-                  </TabsTrigger>
-                  <TabsTrigger value="chart" className="gap-1.5 text-xs">
-                    <BarChart3 className="w-3.5 h-3.5" />
-                    차트
-                  </TabsTrigger>
-                  <TabsTrigger value="interpretation" className="gap-1.5 text-xs">
-                    <FileText className="w-3.5 h-3.5" />
-                    해석
-                  </TabsTrigger>
-                </TabsList>
+            <div className="flex-1 overflow-y-auto p-4 pb-6 space-y-4">
+              {resultTabs.length > 0 && (
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {resultTabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTabId(tab.id)}
+                      className={cn(
+                        "inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs whitespace-nowrap",
+                        activeTabId === tab.id ? "bg-secondary border-primary/30" : "bg-background"
+                      )}
+                    >
+                      <span className="max-w-[180px] truncate">{tab.question || "새 질문"}</span>
+                      <span
+                        className={cn(
+                          "inline-block h-2 w-2 rounded-full",
+                          tab.status === "pending" && "bg-yellow-500",
+                          tab.status === "success" && "bg-primary",
+                          tab.status === "error" && "bg-destructive"
+                        )}
+                      />
+                      <span
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleCloseTab(tab.id)
+                        }}
+                        className="text-muted-foreground hover:text-foreground"
+                        role="button"
+                        aria-label="탭 닫기"
+                      >
+                        ×
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant={showSqlPanel ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-7"
+                  onClick={() => {
+                    const next = !showSqlPanel
+                    setShowSqlPanel(next)
+                    updateActiveTab({ showSqlPanel: next })
+                  }}
+                >
+                  {showSqlPanel ? "SQL 숨기기" : "SQL 보기"}
+                </Button>
+                <Button
+                  variant={showQueryResultPanel ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-7"
+                  onClick={() => {
+                    const next = !showQueryResultPanel
+                    setShowQueryResultPanel(next)
+                    updateActiveTab({ showQueryResultPanel: next })
+                  }}
+                >
+                  {showQueryResultPanel ? "쿼리 결과 숨기기" : "쿼리 결과 보기"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1"
+                  onClick={openSaveDialog}
+                  disabled={boardSaving || (!displaySql && !currentSql)}
+                >
+                  <BookmarkPlus className="w-3 h-3" />
+                  저장하기
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1 ml-auto"
+                  onClick={handleResetConversation}
+                  disabled={isLoading || !hasConversation}
+                >
+                  <Trash2 className="w-3 h-3" />
+                  대화 초기화
+                </Button>
               </div>
 
-              {/* SQL Tab */}
-              {isTechnicalMode && (
-                <TabsContent value="sql" className="flex-1 min-h-0 overflow-y-auto p-4 pb-6 space-y-4 mt-0">
-                  {/* Validation Panel */}
-                  <Card className={cn(
-                    "border-l-4",
-                    validationStatus === "safe" && "border-l-primary",
-                    validationStatus === "warning" && "border-l-yellow-500",
-                    validationStatus === "danger" && "border-l-destructive"
-                  )}>
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm flex items-center gap-2">
-                        <Shield className="w-4 h-4" />
-                        안전 검증 결과
-                        {getValidationIcon(validationStatus)}
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      {validationChecks.length ? (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                          {validationChecks.map((check, idx) => (
-                            <div key={idx} className="flex items-start gap-2 text-xs">
-                              {check.passed ? (
-                                <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
-                              ) : (
-                                <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
-                              )}
-                              <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
-                              <span className="text-foreground break-words">{check.message}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="text-xs text-muted-foreground">검증 정보가 아직 없습니다.</div>
-                      )}
-                    </CardContent>
-                  </Card>
-
-                  {/* SQL Editor */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-sm">생성된 SQL</CardTitle>
-                        <div className="flex items-center gap-2">
-                          {mode === "advanced" && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 gap-1"
-                              onClick={() => handleExecuteEdited()}
-                              disabled={isLoading || !displaySql}
-                            >
-                              {isLoading ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Play className="w-3 h-3" />
-                              )}
-                              실행
-                            </Button>
-                          )}
-                          <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={handleCopySql}>
-                            <Copy className="w-3 h-3" />
-                            복사
-                          </Button>
-                          <Button 
-                            variant="ghost" 
-                            size="sm" 
-                            className="h-7 gap-1"
-                            onClick={() => setIsEditing(!isEditing)}
-                          >
-                            {isEditing ? <Eye className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
-                            {isEditing ? "미리보기" : "편집"}
-                          </Button>
-                        </div>
-                      </div>
-                    </CardHeader>
-                    <CardContent>
-                      {isEditing ? (
-                        <div className="space-y-3">
-                          <Textarea
-                            value={editedSql}
-                            onChange={(e) => setEditedSql(e.target.value)}
-                            className="font-mono text-xs min-h-[200px] bg-secondary/50"
-                          />
-                          <div className="flex items-center gap-2">
-                            <Button 
-                              size="sm" 
-                              onClick={() => handleExecuteEdited(editedSql)}
-                              disabled={isLoading || !editedSql.trim()}
-                              className="gap-1"
-                            >
-                              {isLoading ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Play className="w-3 h-3" />
-                              )}
-                              재검증 후 실행
-                            </Button>
-                            <Button variant="ghost" size="sm" onClick={() => setEditedSql(currentSql)}>
-                              <RefreshCw className="w-3 h-3 mr-1" />
-                              초기화
-                            </Button>
-                          </div>
-                          <p className="text-[10px] text-muted-foreground flex items-center gap-1">
-                            <AlertTriangle className="w-3 h-3" />
-                            수정된 SQL은 재검증을 통과해야 실행됩니다
-                          </p>
-                        </div>
-                      ) : (
-                        <div
-                          ref={sqlScrollRef}
-                          onMouseDown={handleSqlMouseDown}
-                          className={cn(
-                            "p-4 pb-6 pr-6 rounded-xl bg-secondary/50 border border-border/60 text-[13px] font-mono leading-7 text-foreground overflow-x-auto overflow-y-visible [scrollbar-gutter:stable]",
-                            "cursor-grab select-none",
-                            isSqlDragging && "cursor-grabbing"
-                          )}
-                        >
-                          {formattedDisplaySql ? (
-                            <pre className="w-max min-w-full whitespace-pre pb-1">
-                              <code dangerouslySetInnerHTML={{ __html: highlightedDisplaySql }} />
-                            </pre>
+              <Card
+                className={cn(
+                  "border-l-4",
+                  validationStatus === "safe" && "border-l-primary",
+                  validationStatus === "warning" && "border-l-yellow-500",
+                  validationStatus === "danger" && "border-l-destructive"
+                )}
+              >
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Shield className="w-4 h-4" />
+                    안전 검증 결과
+                    {getValidationIcon(validationStatus)}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {validationChecks.length ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {validationChecks.map((check, idx) => (
+                        <div key={idx} className="flex items-start gap-2 text-xs">
+                          {check.passed ? (
+                            <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
                           ) : (
-                            "SQL이 아직 생성되지 않았습니다."
+                            <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
                           )}
+                          <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
+                          <span className="text-foreground break-words">{check.message}</span>
                         </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                </TabsContent>
-              )}
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted-foreground">검증 정보가 아직 없습니다.</div>
+                  )}
+                </CardContent>
+              </Card>
 
-              {/* Results Tab */}
-              <TabsContent value="results" className="flex-1 overflow-y-auto p-4 mt-0">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <CardTitle className="text-sm">쿼리 결과</CardTitle>
-                        {mode && (
-                          <Badge variant="outline" className="text-[10px] uppercase">
-                            {mode}
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="secondary" className="text-xs">
-                          {previewColumns.length ? `${previewRowCount} rows` : "no results"}
-                        </Badge>
-                        {previewRowCap != null && (
-                          <Badge variant="outline" className="text-[10px]">
-                            cap {previewRowCap}
-                          </Badge>
-                        )}
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 gap-1"
-                          onClick={handleSaveToDashboard}
-                          disabled={boardSaving || (!displaySql && !currentSql)}
-                        >
-                          <BookmarkPlus className="w-3 h-3" />
-                          결과 보드에 저장
-                        </Button>
+              {showSqlPanel && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-sm">생성된 SQL</CardTitle>
+                    <div className="flex items-center gap-2">
+                      {mode === "advanced" && (
                         <Button
                           variant="ghost"
                           size="sm"
                           className="h-7 gap-1"
-                          onClick={handleDownloadCsv}
-                          disabled={!previewColumns.length}
+                          onClick={() => handleExecuteEdited()}
+                          disabled={isLoading || !displaySql}
                         >
-                          <Download className="w-3 h-3" />
-                          CSV
+                          {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                          실행
+                        </Button>
+                      )}
+                      <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={handleCopySql}>
+                        <Copy className="w-3 h-3" />
+                        복사
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1"
+                        onClick={() => {
+                          const next = !isEditing
+                          setIsEditing(next)
+                          updateActiveTab({ isEditing: next })
+                        }}
+                      >
+                        {isEditing ? <Eye className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
+                        {isEditing ? "미리보기" : "편집"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {isEditing ? (
+                    <div className="space-y-3">
+                      <Textarea
+                        value={editedSql}
+                        onChange={(e) => {
+                          setEditedSql(e.target.value)
+                          updateActiveTab({ editedSql: e.target.value })
+                        }}
+                        className="font-mono text-xs min-h-[200px] bg-secondary/50"
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" onClick={() => handleExecuteEdited(editedSql)} disabled={isLoading || !editedSql.trim()} className="gap-1">
+                          {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                          검증 후 실행
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setEditedSql(currentSql)
+                            updateActiveTab({ editedSql: currentSql })
+                          }}
+                        >
+                          <RefreshCw className="w-3 h-3 mr-1" />
+                          초기화
                         </Button>
                       </div>
+                      <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3" />
+                        수정한 SQL은 검증을 통과해야 실행됩니다.
+                      </p>
                     </div>
-                  </CardHeader>
-                  <CardContent>
-                    {boardMessage && (
-                      <div className="mb-3 rounded-lg border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
-                        {boardMessage}
+                  ) : (
+                    <div
+                      ref={sqlScrollRef}
+                      onMouseDown={handleSqlMouseDown}
+                      className={cn(
+                        "p-4 pb-6 pr-6 rounded-xl bg-secondary/50 border border-border/60 text-[13px] font-mono leading-7 text-foreground overflow-x-auto overflow-y-visible [scrollbar-gutter:stable]",
+                        "cursor-grab select-none",
+                        isSqlDragging && "cursor-grabbing"
+                      )}
+                    >
+                      {formattedDisplaySql ? (
+                        <pre className="w-max min-w-full whitespace-pre pb-1">
+                          <code dangerouslySetInnerHTML={{ __html: highlightedDisplaySql }} />
+                        </pre>
+                      ) : (
+                        "SQL이 아직 생성되지 않았습니다."
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+              )}
+
+              {showQueryResultPanel && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <CardTitle className="text-sm">쿼리 결과</CardTitle>
+                      {mode && (
+                        <Badge variant="outline" className="text-[10px] uppercase">
+                          {mode}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-xs">
+                        {previewColumns.length ? `${previewRowCount} rows` : "no results"}
+                      </Badge>
+                      {previewRowCap != null && (
+                        <Badge variant="outline" className="text-[10px]">
+                          cap {previewRowCap}
+                        </Badge>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 gap-1"
+                        onClick={openSaveDialog}
+                        disabled={boardSaving || (!displaySql && !currentSql)}
+                      >
+                        <BookmarkPlus className="w-3 h-3" />
+                        결과 보드 저장
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1"
+                        onClick={handleDownloadCsv}
+                        disabled={!previewColumns.length}
+                      >
+                        <Download className="w-3 h-3" />
+                        CSV
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {boardMessage && (
+                    <div className="mb-3 rounded-lg border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
+                      {boardMessage}
+                    </div>
+                  )}
+                  {error && (
+                    <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      {error}
+                    </div>
+                  )}
+                  {previewColumns.length ? (
+                    <div className="rounded-lg border border-border overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead className="bg-secondary/50">
+                          <tr>
+                            {previewColumns.map((col) => (
+                              <th key={col} className="text-left p-2 font-medium">
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {previewRows.slice(0, 10).map((row, idx) => (
+                            <tr key={idx} className="border-t border-border hover:bg-secondary/30">
+                              {previewColumns.map((_, colIdx) => {
+                                const cell = row[colIdx]
+                                const text = cell == null ? "" : String(cell)
+                                return (
+                                  <td key={`${idx}-${colIdx}`} className="p-2 font-mono">
+                                    {text}
+                                  </td>
+                                )
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      <div>결과가 없습니다.</div>
+                      {mode === "advanced" && displaySql && (
+                        <Button size="sm" onClick={() => handleExecuteEdited()} disabled={isLoading}>
+                          {isLoading ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
+                          실행
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+              )}
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">시각화 차트</CardTitle>
+                  <CardDescription className="text-xs">결과 테이블 기반 시각화</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {visualizationLoading ? (
+                    <div className="rounded-lg border border-border p-6 text-xs text-muted-foreground">
+                      시각화 추천 플랜을 생성 중입니다...
+                    </div>
+                  ) : visualizationError ? (
+                    <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-6 text-xs text-destructive">
+                      {visualizationError}
+                    </div>
+                  ) : previewColumns.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      결과 테이블이 없어 차트를 표시할 수 없습니다.
+                    </div>
+                  ) : recommendedFigure ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">
+                          {String(recommendedAnalysis?.chart_spec?.chart_type || "plotly").toUpperCase()}
+                        </Badge>
+                        {recommendedAnalysis?.chart_spec?.x && (
+                          <Badge variant="secondary">X: {recommendedAnalysis.chart_spec.x}</Badge>
+                        )}
+                        {recommendedAnalysis?.chart_spec?.y && (
+                          <Badge variant="secondary">Y: {recommendedAnalysis.chart_spec.y}</Badge>
+                        )}
                       </div>
-                    )}
-                    {error && (
-                      <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                        {error}
+                      <div className="h-[380px] w-full rounded-lg border border-border p-2">
+                        <Plot
+                          data={Array.isArray(recommendedFigure.data) ? recommendedFigure.data : []}
+                          layout={{
+                            autosize: true,
+                            margin: { l: 48, r: 16, t: 16, b: 48 },
+                            paper_bgcolor: "transparent",
+                            plot_bgcolor: "transparent",
+                            ...(recommendedFigure.layout || {}),
+                          }}
+                          config={{ responsive: true, displaylogo: false }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
                       </div>
-                    )}
-                    {previewColumns.length ? (
-                      <div className="rounded-lg border border-border overflow-hidden">
+                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
+                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
+                          {recommendedAnalysis?.reason && <p>추천 이유: {normalizeInsightText(recommendedAnalysis.reason)}</p>}
+                          {recommendedAnalysis?.summary && <p>요약: {normalizeInsightText(recommendedAnalysis.summary)}</p>}
+                        </div>
+                      )}
+                    </div>
+                  ) : recommendedChart?.type === "scatter" ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">SCATTER</Badge>
+                        <Badge variant="secondary">X: {recommendedChart.xKey}</Badge>
+                        <Badge variant="secondary">Y: {recommendedChart.yKey}</Badge>
+                      </div>
+                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ScatterChart>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis type="number" dataKey="x" tick={{ fontSize: 12 }} />
+                            <YAxis type="number" dataKey="y" tick={{ fontSize: 12 }} />
+                            <Tooltip />
+                            <Legend />
+                            <Scatter data={recommendedChart.data} fill="#3b82f6" name={recommendedChart.yKey} />
+                          </ScatterChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  ) : recommendedChart ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">{recommendedChart.type.toUpperCase()}</Badge>
+                        <Badge variant="secondary">X: {recommendedChart.xKey}</Badge>
+                        <Badge variant="secondary">Y: {recommendedChart.yKey}</Badge>
+                      </div>
+                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
+                        <ResponsiveContainer width="100%" height="100%">
+                          {recommendedChart.type === "line" ? (
+                            <LineChart data={recommendedChart.data}>
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="x" tick={{ fontSize: 12 }} />
+                              <YAxis tick={{ fontSize: 12 }} />
+                              <Tooltip />
+                              <Legend />
+                              <Line type="monotone" dataKey="y" stroke="#10b981" strokeWidth={2} dot={false} />
+                            </LineChart>
+                          ) : (
+                            <BarChart data={recommendedChart.data}>
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="x" tick={{ fontSize: 12 }} />
+                              <YAxis tick={{ fontSize: 12 }} />
+                              <Tooltip />
+                              <Legend />
+                              <Bar dataKey="y" fill="#3b82f6" />
+                            </BarChart>
+                          )}
+                        </ResponsiveContainer>
+                      </div>
+                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
+                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
+                          {recommendedAnalysis?.reason && <p>추천 이유: {recommendedAnalysis.reason}</p>}
+                          {recommendedAnalysis?.summary && <p>요약: {recommendedAnalysis.summary}</p>}
+                        </div>
+                      )}
+                    </div>
+                  ) : survivalChartData?.length ? (
+                    <SurvivalChart
+                      data={survivalChartData}
+                      medianSurvival={medianSurvival}
+                      totalPatients={totalPatients}
+                      totalEvents={totalEvents}
+                    />
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      현재 결과로 생성 가능한 차트가 없습니다. 시간/이벤트 컬럼이 포함되면 생존 차트를 표시합니다.
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">통계 자료</CardTitle>
+                  <CardDescription className="text-xs">컬럼별 MIN, Q1, 중앙값, Q3, MAX, 평균, 결측치, NULL 개수</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {previewColumns.length ? (
+                    <div className="space-y-4">
+                      <div className="rounded-lg border border-border overflow-x-auto">
                         <table className="w-full text-xs">
                           <thead className="bg-secondary/50">
                             <tr>
-                              {previewColumns.map((col) => (
-                                <th key={col} className="text-left p-2 font-medium">
-                                  {col}
-                                </th>
-                              ))}
+                              <th className="text-left p-2 font-medium">컬럼</th>
+                              <th className="text-right p-2 font-medium">N</th>
+                              <th className="text-right p-2 font-medium">결측치</th>
+                              <th className="text-right p-2 font-medium">NULL</th>
+                              <th className="text-right p-2 font-medium">MIN</th>
+                              <th className="text-right p-2 font-medium">Q1</th>
+                              <th className="text-right p-2 font-medium">중앙값</th>
+                              <th className="text-right p-2 font-medium">Q3</th>
+                              <th className="text-right p-2 font-medium">MAX</th>
+                              <th className="text-right p-2 font-medium">평균</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {previewRows.map((row, idx) => (
-                              <tr key={idx} className="border-t border-border hover:bg-secondary/30">
-                                {previewColumns.map((_, colIdx) => {
-                                  const cell = row[colIdx]
-                                  const text = cell == null ? "" : String(cell)
-                                  return (
-                                    <td key={`${idx}-${colIdx}`} className="p-2 font-mono">
-                                      {text}
-                                    </td>
-                                  )
-                                })}
+                            {statsRows.map((row) => (
+                              <tr key={row.column} className="border-t border-border">
+                                <td className="p-2 font-medium">{row.column}</td>
+                                <td className="p-2 text-right">{row.count}</td>
+                                <td className="p-2 text-right">{row.missingCount}</td>
+                                <td className="p-2 text-right">{row.nullCount}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.min)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.q1)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.median)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.q3)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.max)}</td>
+                                <td className="p-2 text-right">{formatStatNumber(row.avg)}</td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
                       </div>
-                    ) : (
-                      <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                        <div>결과가 없습니다.</div>
-                        {mode === "advanced" && displaySql && (
-                          <Button size="sm" onClick={() => handleExecuteEdited()} disabled={isLoading}>
-                            {isLoading ? (
-                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                            ) : (
-                              <Play className="w-3 h-3 mr-1" />
-                            )}
-                            실행
-                          </Button>
-                        )}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </TabsContent>
 
-              {/* Chart Tab */}
-              <TabsContent value="chart" className="flex-1 overflow-y-auto p-4 mt-0">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">결과 시각화</CardTitle>
-                    <CardDescription className="text-xs">실행 결과를 기반으로 시각화를 제공합니다.</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                      {previewColumns.length
-                        ? "현재는 자동 시각화가 연결되어 있지 않습니다. 결과 데이터를 기반으로 차트를 추가할 수 있습니다."
-                        : "쿼리를 실행하면 여기에 시각화가 표시됩니다."}
-                    </div>
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              {/* Interpretation Tab */}
-              <TabsContent value="interpretation" className="flex-1 overflow-y-auto p-4 mt-0">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">분석 해석</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
-                      <h4 className="font-medium text-foreground mb-2">요약</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {summary || "요약 정보를 아직 받지 못했습니다. 결과 실행 후 요약을 표시할 수 있습니다."}
-                      </p>
-                      {source && (
-                        <p className="text-xs text-muted-foreground mt-2">source: {source}</p>
+                      {boxPlotRows.length ? (
+                        <div className="rounded-lg border border-border p-3">
+                          <div className="mb-2 text-xs text-muted-foreground">박스플롯 (컬럼별 분포)</div>
+                          <div className="h-[320px] w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <ComposedChart data={boxPlotRows}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="column" tick={{ fontSize: 12 }} />
+                                <YAxis tick={{ fontSize: 12 }} domain={boxPlotYDomain} allowDataOverflow />
+                                <Tooltip />
+                                <Legend />
+                                <Bar dataKey="iqrBase" stackId="box" fill="transparent" legendType="none" />
+                                <Bar dataKey="iqr" stackId="box" name="IQR (Q1~Q3)" fill="#60a5fa" stroke="#3b82f6" />
+                                <Line type="linear" dataKey="whiskerLow" name="MIN (whisker)" stroke="#64748b" dot={false} />
+                                <Line type="linear" dataKey="whiskerHigh" name="MAX (whisker)" stroke="#64748b" dot={false} />
+                                <Scatter dataKey="median" name="중앙값" fill="#ef4444" />
+                                <Scatter dataKey="outlierLow" name="하위 이상치" fill="#f59e0b" />
+                                <Scatter dataKey="outlierHigh" name="상위 이상치" fill="#f59e0b" />
+                              </ComposedChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
+                          수치형 컬럼이 없어 박스플롯을 생성할 수 없습니다.
+                        </div>
                       )}
                     </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      결과가 없어 통계 자료를 표시할 수 없습니다.
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
 
-                    {riskScore != null && (
-                      <div className="p-4 rounded-lg bg-secondary/50 border border-border">
-                        <h4 className="font-medium text-foreground mb-2">위험도</h4>
-                        <div className="text-sm text-muted-foreground">
-                          위험 점수: <span className="text-foreground">{riskScore}</span>
-                          {riskIntent ? ` (${riskIntent})` : ""}
-                        </div>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-            </Tabs>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">해석</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
+                    <h4 className="font-medium text-foreground mb-2">데이터 분석 인사이트</h4>
+                    <p className="text-sm text-muted-foreground whitespace-pre-line">{integratedInsight}</p>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           </div>
         )}
       </div>
+
+      <Dialog open={isSaveDialogOpen} onOpenChange={setIsSaveDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>결과 보드에 저장</DialogTitle>
+            <DialogDescription>저장 이름과 폴더를 선택하세요.</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">저장 이름</label>
+              <Input
+                value={saveTitle}
+                onChange={(e) => setSaveTitle(e.target.value)}
+                placeholder="예: 성별 입원 건수 비교"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">저장 폴더</label>
+              <Select
+                value={saveFolderMode}
+                onValueChange={(value) => setSaveFolderMode(value as "existing" | "new")}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="폴더 방식 선택" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="existing">기존 폴더 선택</SelectItem>
+                  <SelectItem value="new">새 폴더 만들기</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {saveFolderMode === "existing" ? (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">기존 폴더</label>
+                <Select value={saveFolderId || undefined} onValueChange={setSaveFolderId} disabled={saveFoldersLoading}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={saveFoldersLoading ? "폴더 불러오는 중..." : "폴더 선택"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {saveFolderOptions.length ? (
+                      saveFolderOptions.map((folder) => (
+                        <SelectItem key={folder.id} value={folder.id}>
+                          {folder.name}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="__none__" disabled>
+                        폴더가 없습니다
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">새 폴더 이름</label>
+                <Input
+                  value={saveNewFolderName}
+                  onChange={(e) => setSaveNewFolderName(e.target.value)}
+                  placeholder="예: 응급실 분석"
+                />
+              </div>
+            )}
+
+            {boardMessage && (
+              <div className="text-xs text-muted-foreground">{boardMessage}</div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setIsSaveDialogOpen(false)} disabled={boardSaving}>
+              취소
+            </Button>
+            <Button onClick={handleSaveToDashboard} disabled={boardSaving}>
+              {boardSaving ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+              저장
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
+}
+
+interface SimpleStatsRow {
+  column: string
+  count: number
+  nullCount: number
+  missingCount: number
+  min: number | null
+  q1: number | null
+  median: number | null
+  q3: number | null
+  max: number | null
+  avg: number | null
+}
+
+function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
+  return columns.map((column, colIdx) => {
+    const numbers: number[] = []
+    let nullCount = 0
+    let missingCount = 0
+
+    for (const row of rows) {
+      const value = row?.[colIdx]
+      const isNull = value == null
+      const isBlank = typeof value === "string" && value.trim() === ""
+      if (isNull) {
+        nullCount += 1
+        missingCount += 1
+        continue
+      }
+      if (isBlank) {
+        missingCount += 1
+        continue
+      }
+      const num = Number(value)
+      if (Number.isFinite(num)) {
+        numbers.push(num)
+      }
+    }
+
+    if (!numbers.length) {
+      return {
+        column,
+        count: 0,
+        nullCount,
+        missingCount,
+        min: null,
+        q1: null,
+        median: null,
+        q3: null,
+        max: null,
+        avg: null,
+      }
+    }
+
+    const sorted = [...numbers].sort((a, b) => a - b)
+    const q1 = quantile(sorted, 0.25)
+    const median = quantile(sorted, 0.5)
+    const q3 = quantile(sorted, 0.75)
+    const min = Math.min(...numbers)
+    const max = Math.max(...numbers)
+    const avg = numbers.reduce((sum, value) => sum + value, 0) / numbers.length
+
+    return {
+      column,
+      count: numbers.length,
+      nullCount,
+      missingCount,
+      min: Number(min.toFixed(4)),
+      q1: Number(q1.toFixed(4)),
+      median: Number(median.toFixed(4)),
+      q3: Number(q3.toFixed(4)),
+      max: Number(max.toFixed(4)),
+      avg: Number(avg.toFixed(4)),
+    }
+  })
+}
+
+function quantile(sorted: number[], q: number) {
+  if (!sorted.length) return 0
+  const pos = (sorted.length - 1) * q
+  const base = Math.floor(pos)
+  const rest = pos - base
+  const next = sorted[base + 1]
+  if (next === undefined) return sorted[base]
+  return sorted[base] + rest * (next - sorted[base])
+}
+
+function formatStatNumber(value: number | null) {
+  if (value == null || !Number.isFinite(value)) return "-"
+  return Number(value.toFixed(4)).toLocaleString()
 }
 
 function formatSqlForDisplay(sql: string) {

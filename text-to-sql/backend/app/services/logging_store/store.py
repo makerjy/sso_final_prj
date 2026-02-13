@@ -29,3 +29,13 @@ def read_events(path: str, limit: int | None = None) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return items
+
+
+def write_events(path: str, events: list[dict[str, Any]]) -> None:
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with file_path.open("w", encoding="utf-8") as f:
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            f.write(json.dumps(item, ensure_ascii=True) + "\n")

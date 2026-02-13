@@ -12,6 +12,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from pandas.api import types as pdt
 
 from src.utils.logging import log_event
 
@@ -24,6 +25,13 @@ _FORBIDDEN_GROUP_COLS = (
     "subject_id",
     "hadm_id",
     "stay_id",
+    "seq_num",
+    "transfer_id",
+    "orderid",
+    "linkorderid",
+    "order_provider_id",
+    "caregiver_id",
+    "pharmacy_id",
     "icd_code",
     "itemid",
     "emar_id",
@@ -62,6 +70,33 @@ _CLINICAL_HINTS = [
     "lab",
     "vital",
 ]
+_TIME_CANDIDATES = (
+    "charttime",
+    "admittime",
+    "dischtime",
+    "intime",
+    "outtime",
+    "starttime",
+    "endtime",
+    "storetime",
+    "storedate",
+    "edregtime",
+    "edouttime",
+    "ordertime",
+    "transfertime",
+    "chartdate",
+)
+_PREFERRED_NUMERIC_Y = (
+    "valuenum",
+    "value",
+    "amount",
+    "rate",
+    "los",
+    "diagnosis_count",
+    "count",
+    "anchor_age",
+    "doses_per_24_hrs",
+)
 
 
 def _extract_chart_spec_from_context(
@@ -105,44 +140,76 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     if "x_time" in lower and "y_value" in lower:
         return {
             "chart_spec": {"chart_type": "line", "x": lower["x_time"], "y": lower["y_value"]},
-            "reason": "Result aliases indicate a time-series aggregate.",
+            "reason": "결과 별칭 기준으로 시계열 집계 차트가 적합합니다.",
         }
     if "x_group" in lower and "y_value" in lower:
         return {
             "chart_spec": {"chart_type": "bar", "x": lower["x_group"], "y": lower["y_value"]},
-            "reason": "Result aliases indicate a grouped aggregate.",
+            "reason": "결과 별칭 기준으로 그룹 집계 차트가 적합합니다.",
         }
 
     # Time-series heuristics
     time_cols = [c for c in cols if any(t in c.lower() for t in ("time", "date", "day", "month", "year"))]
-    numeric_cols = [c for c in cols if df[c].dtype != "object"]
-    categorical_cols = [c for c in cols if df[c].dtype == "object"]
+    # numeric은 식별자/코드 컬럼을 제외한 실제 측정치 우선
+    numeric_cols = [
+        c
+        for c in cols
+        if pdt.is_numeric_dtype(df[c]) and not _is_identifier_col(c) and "code" not in c.lower()
+    ]
+    numeric_cols.sort(
+        key=lambda c: next(
+            (idx for idx, token in enumerate(_PREFERRED_NUMERIC_Y) if token in c.lower()),
+            999,
+        )
+    )
+    time_cols.sort(
+        key=lambda c: next(
+            (idx for idx, token in enumerate(_TIME_CANDIDATES) if token == c.lower()),
+            999,
+        )
+    )
+    categorical_cols = [
+        c for c in cols
+        if pdt.is_string_dtype(df[c]) or pdt.is_categorical_dtype(df[c])
+    ]
 
     if time_cols and numeric_cols:
         return {
             "chart_spec": {"chart_type": "line", "x": time_cols[0], "y": numeric_cols[0]},
-            "reason": "Detected time-like and numeric columns for a trend chart.",
+            "reason": "시간형 컬럼과 수치형 컬럼이 있어 추세 차트가 적합합니다.",
+        }
+
+    # Categorical + two numeric -> pyramid
+    if categorical_cols and len(numeric_cols) >= 2:
+        return {
+            "chart_spec": {
+                "chart_type": "pyramid",
+                "x": categorical_cols[0],
+                "y": numeric_cols[0],
+                "group": numeric_cols[1],
+            },
+            "reason": "범주형 기준 좌우 비교가 가능해 피라미드 막대 차트가 적합합니다.",
         }
 
     # Two numeric columns -> scatter
     if len(numeric_cols) >= 2:
         return {
             "chart_spec": {"chart_type": "scatter", "x": numeric_cols[0], "y": numeric_cols[1]},
-            "reason": "Detected multiple numeric columns for correlation.",
+            "reason": "수치형 컬럼이 2개 이상이라 상관관계 산점도가 적합합니다.",
         }
 
     # Categorical + numeric -> bar
     if categorical_cols and numeric_cols:
         return {
             "chart_spec": {"chart_type": "bar", "x": categorical_cols[0], "y": numeric_cols[0]},
-            "reason": "Detected category + numeric for comparison.",
+            "reason": "범주형-수치형 조합으로 비교 막대 차트가 적합합니다.",
         }
 
     # Single numeric -> histogram
     if len(numeric_cols) == 1:
         return {
             "chart_spec": {"chart_type": "hist", "x": numeric_cols[0]},
-            "reason": "Detected a single numeric column for distribution.",
+            "reason": "단일 수치형 컬럼 분포 확인을 위해 히스토그램이 적합합니다.",
         }
 
     return None
@@ -188,7 +255,7 @@ def _pick_safe_group(df: pd.DataFrame) -> str | None:
             continue
         if not any(a in lower for a in allow_tokens):
             continue
-        if df[col].dtype not in ("object", "category"):
+        if not (pdt.is_string_dtype(df[col]) or pdt.is_categorical_dtype(df[col])):
             continue
         if _is_low_cardinality(df, col, max_groups):
             return col
@@ -282,6 +349,10 @@ def _first_matching_col(cols: List[str], candidates: List[str]) -> Optional[str]
             return lower_map[cand]
     return None
 
+
+def _first_time_col(cols: List[str]) -> Optional[str]:
+    return _first_matching_col(cols, list(_TIME_CANDIDATES))
+
 # 입력: cols
 # 출력: str | None
 # 경과시간 파생 컬럼 후보를 찾는다
@@ -338,6 +409,18 @@ def _dedupe_plans(plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         unique.append(plan)
     return unique
 
+
+def _record_failure(
+    failure_reasons: Optional[List[str]],
+    reason: str,
+) -> None:
+    if failure_reasons is None:
+        return
+    normalized = (reason or "").strip()
+    if normalized and normalized not in failure_reasons:
+        failure_reasons.append(normalized)
+
+
 # 입력: intent, group_var, time_var, available_columns, context_flags
 # 출력: None | Exception
 # 임상 규칙 위반 시 예외 발생 (잘못된 차트 생성 방지)
@@ -360,8 +443,8 @@ def validate_plan(
             raise ValueError("ICU/입실 후 trend는 stay_id 없이 생성할 수 없습니다.")
         if "intime" not in cols_lower:
             raise ValueError("ICU/입실 후 trend는 ICUSTAYS.INTIME 조인이 필요합니다.")
-        if "charttime" not in cols_lower:
-            raise ValueError("ICU/입실 후 trend는 이벤트 시간(charttime)이 필요합니다.")
+        if not any(t in cols_lower for t in _TIME_CANDIDATES):
+            raise ValueError("ICU/입실 후 trend는 시간 컬럼(chart/start/end/out/store time)이 필요합니다.")
         if group_lower in _FORBIDDEN_TRAJECTORY:
             raise ValueError(
                 "ICU/입실 후 trend에서 subject_id/patient_id trajectory는 금지입니다.")
@@ -403,8 +486,8 @@ def validate_plan(
     if intent == "trend" and context_flags.get("admit_context"):
         if "admittime" not in cols_lower:
             raise ValueError("입원 기준 trend는 ADMISSIONS.ADMITTIME 조인이 필요합니다.")
-        if "charttime" not in cols_lower:
-            raise ValueError("입원 기준 trend는 이벤트 시간(charttime)이 필요합니다.")
+        if not any(t in cols_lower for t in _TIME_CANDIDATES):
+            raise ValueError("입원 기준 trend는 시간 컬럼(chart/start/end/out/store time)이 필요합니다.")
 
     # 7) INPUT/OUTPUT 계열 rate/amount는 시간 binning 없이 의미 없음
     # 이유: rate/amount는 시간 집계 없으면 임상적으로 해석 불가.
@@ -474,13 +557,12 @@ def derive_time_var(
             return {"type": "elapsed", "expr": None, "source": "charttime - admittime", "unit": "day"}
         return {"type": "elapsed", "expr": elapsed_col, "source": "charttime - admittime", "unit": "day"}
 
-    # 단순 시간 추세: calendar time (TRUNC(CHARTTIME))
-    if "charttime" in cols_lower or "chart_time" in cols_lower or "charttimestamp" in cols_lower:
-        chart_col = _first_matching_col(
-            available_columns, ["charttime", "chart_time", "charttimestamp"]
-        )
-        if chart_col:
-            return {"type": "calendar", "expr": chart_col, "unit": "day"}
+    # 단순 시간 추세: 이용 가능한 시간 컬럼 우선 선택
+    chart_col = _first_matching_col(available_columns, ["charttime", "chart_time", "charttimestamp"])
+    if not chart_col:
+        chart_col = _first_time_col(available_columns)
+    if chart_col:
+        return {"type": "calendar", "expr": chart_col, "unit": "day"}
     return None
 
 # 입력: intent_info, df
@@ -492,8 +574,11 @@ def plan_analyses(
     intent_info: Dict[str, Any],
     df: pd.DataFrame,
     retrieved_context: Optional[str] = None,
+    retry_mode: str = "normal",
+    failure_reasons: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """intent_info를 기반으로 분석 플랜 여러 개를 반환."""
+    retry_mode = (retry_mode or "normal").lower()
     intent = intent_info.get("analysis_intent")
     primary = intent_info.get("primary_outcome")
     user_query = intent_info.get("user_query")
@@ -509,6 +594,10 @@ def plan_analyses(
         intent, context_flags, list(df.columns))
     time_var = time_info.get(
         "expr") if time_info else intent_info.get("time_var")
+
+    # 재시도 모드에서는 우선 복구 가능성이 높은 단순 플랜으로 유도한다.
+    if retry_mode == "relaxed" and intent in ("trend", "distribution", "comparison", "proportion"):
+        group_var = None
 
     # low-cardinality 검사 (group_var가 허용 리스트여도 값이 과다하면 제거)
     if group_var and group_var in df.columns and not _is_low_cardinality(df, group_var, 30):
@@ -530,6 +619,7 @@ def plan_analyses(
             "primary": primary,
             "time_var": time_var,
             "group_var": group_var,
+            "retry_mode": retry_mode,
         },
     )
 
@@ -548,15 +638,26 @@ def plan_analyses(
                         context_flags,
                     )
                 except Exception as exc:
+                    _record_failure(
+                        failure_reasons,
+                        f"suggested_plan_blocked: {str(exc)}",
+                    )
                     log_event(
                         "rule_engine.suggested_plan.blocked",
                         {"reason": str(exc), "chart_spec": spec},
                     )
                 else:
                     plans.append(suggested_plan)
+            else:
+                _record_failure(
+                    failure_reasons,
+                    "suggested_plan_mismatch: trend x-axis does not match derived time axis",
+                )
         else:
             plans.append(suggested_plan)
-    elif column_only_plan:
+
+    # suggested_plan이 차단/미스매치된 경우에도 column 기반 플랜으로 복구를 시도한다.
+    if not plans and column_only_plan:
         plans.append(column_only_plan)
 
     if intent == "trend" and time_var and primary:
@@ -564,9 +665,22 @@ def plan_analyses(
             validate_plan(intent, group_var, time_info,
                           list(df.columns), context_flags)
         except Exception as exc:
+            _record_failure(failure_reasons, f"trend_blocked: {str(exc)}")
             # 규칙 위반 시 trend 플랜을 만들지 않는다(의미 보존 우선)
             log_event("rule_engine.trend.blocked",
                       {"reason": str(exc)})
+            if retry_mode == "relaxed":
+                # relaxed 모드에서는 엄격한 trajectory 라인 대신 분포형 대안을 허용한다.
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "box",
+                            "x": time_var,
+                            "y": primary,
+                        },
+                        "reason": "재시도 모드: trend 제약으로 line이 불가해 분포형 대안을 생성했습니다.",
+                    }
+                )
         else:
             patient_group = _pick_patient_group(df)
             line_group = patient_group or group_var
@@ -668,7 +782,7 @@ def plan_analyses(
             for col in df.columns:
                 if col == primary:
                     continue
-                if df[col].dtype == "object":
+                if pdt.is_string_dtype(df[col]) or pdt.is_categorical_dtype(df[col]):
                     continue
                 if _is_identifier_col(col):
                     continue
@@ -711,6 +825,11 @@ def plan_analyses(
             )
 
     plans = _dedupe_plans(plans)
+    if not plans:
+        _record_failure(
+            failure_reasons,
+            f"{retry_mode}_plan_empty",
+        )
     log_event("rule_engine.plans", {"count": len(plans)})
 
     return plans

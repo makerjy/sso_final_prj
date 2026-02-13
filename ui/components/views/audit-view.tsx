@@ -5,12 +5,21 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { 
   FileText, 
   Clock, 
   User,
   Search,
   Download,
+  Trash2,
   ChevronDown,
   ChevronRight,
   Eye,
@@ -94,6 +103,9 @@ export function AuditView() {
   const [expandedLogs, setExpandedLogs] = useState<string[]>([])
   const [dateFilter, setDateFilter] = useState("all")
   const [userFilter, setUserFilter] = useState("all")
+  const [deletingLogId, setDeletingLogId] = useState<string | null>(null)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [pendingDeleteLogId, setPendingDeleteLogId] = useState<string | null>(null)
 
   const readError = async (res: Response) => {
     const text = await res.text()
@@ -281,6 +293,30 @@ export function AuditView() {
     URL.revokeObjectURL(url)
   }
 
+  const executeDeleteLog = async (logId: string) => {
+    if (!logId || deletingLogId) return
+    setDeletingLogId(logId)
+    try {
+      const res = await fetchWithTimeout(apiUrl(`/audit/logs/${encodeURIComponent(logId)}`), {
+        method: "DELETE",
+      })
+      if (!res.ok) {
+        throw new Error(await readError(res))
+      }
+      await fetchLogs()
+    } catch (err: any) {
+      setLoadError(err?.message || "감사 로그 삭제에 실패했습니다.")
+    } finally {
+      setDeletingLogId(null)
+    }
+  }
+
+  const handleDeleteLog = (logId: string) => {
+    if (!logId || deletingLogId) return
+    setPendingDeleteLogId(logId)
+    setDeleteConfirmOpen(true)
+  }
+
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -431,6 +467,24 @@ export function AuditView() {
                         <span>{log.execution.duration}</span>
                       </div>
                     </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleDeleteLog(log.id)
+                      }}
+                      disabled={deletingLogId === log.id}
+                      aria-label="로그 삭제"
+                    >
+                      {deletingLogId === log.id ? (
+                        <span className="text-[10px] text-muted-foreground">...</span>
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                    </Button>
                   </div>
                 </CollapsibleTrigger>
 
@@ -512,6 +566,40 @@ export function AuditView() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>감사 로그 삭제</DialogTitle>
+            <DialogDescription>
+              이 감사 로그 1건을 삭제할까요?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteConfirmOpen(false)
+                setPendingDeleteLogId(null)
+              }}
+            >
+              취소
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!pendingDeleteLogId || !!deletingLogId}
+              onClick={async () => {
+                if (!pendingDeleteLogId) return
+                await executeDeleteLog(pendingDeleteLogId)
+                setDeleteConfirmOpen(false)
+                setPendingDeleteLogId(null)
+              }}
+            >
+              삭제
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
