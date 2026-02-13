@@ -1,4 +1,4 @@
-"""DataFrame/Oracle 메타데이터로 스키마 요약(df_schema)을 만드는 유틸."""
+"""Schema summarization helpers for DataFrame and Oracle metadata."""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -9,55 +9,29 @@ from pandas.api import types as pdt
 from src.db.oracle_client import get_connection
 
 
-# 입력: value
-# 출력: JSON 직렬화가 가능한 값
-# JSON 직렬화가 어려운 값은 문자열로 변환
 def _safe_value(value: Any) -> Any:
-    # JSON 직렬화가 어려운 값은 문자열로 변환
     if isinstance(value, (int, float, str, bool)) or value is None:
         return value
     return str(value)
 
-# 입력: name
-# 출력: 시간 컬럼 여부 추정(bool)
-# 컬럼이 시간축(x축)이 될 수 있는지를 자동으로 판단하기 위함
-# 하나의 힌트로 이름 기반 추정을 수행
-
 
 def _infer_time_by_name(name: str) -> bool:
-    # 컬럼명 기반으로 시간 컬럼 여부를 추정
     hints = ("date", "time", "day", "month", "year", "dt", "timestamp")
     return any(h in name.lower() for h in hints)
 
-# _infer_time_by_name 함수로 컬럼 이름 검사 후 2차 검사
-# 입력: series, sample_size
-# 출력: 시간 컬럼 여부 추정(bool)
-# 샘플 중 하나라도 any() datetime으로 파싱되면 시간 컬럼으로 추정
-
 
 def _infer_time_by_sample(series: pd.Series, sample_size: int = 20) -> bool:
-    # dropna 후 20개만 샘플링
     sample = series.dropna().head(sample_size)
     if sample.empty:
         return False
     parsed = pd.to_datetime(sample, errors="coerce")
     return parsed.notna().any()
 
-# 입력: row_count
-# 출력: 범주형 판단 기준 유니크 수(int)
-# 범주형 판단 기준: 행 수의 20% 이내이되 10~50 범위
-
 
 def _categorical_threshold(row_count: int) -> int:
     if row_count <= 0:
         return 0
     return max(10, min(50, int(row_count * 0.2)))
-
-# 입력: name, series, unique_count, row_count
-# 출력: 컬럼 역할 분류 문자열(time/numeric/categorical/...)
-# dtype/이름/유니크 수를 조합해 역할 분류(time/numeric/categorical/...)
-# 흐름 - datetime dtype -> 이름/샘플 기반 시간 컬럼 추정 -> bool dtype -> numeric dtype
-#     -> object/string dtype + 유니크 수 기반 범주형/텍스트/
 
 
 def _infer_column_role(
@@ -66,7 +40,6 @@ def _infer_column_role(
     unique_count: int,
     row_count: int,
 ) -> str:
-    # dtype/이름/유니크 수를 조합해 역할 분류(time/numeric/categorical/...)
     if pdt.is_datetime64_any_dtype(series):
         return "time"
     if _infer_time_by_name(name) and _infer_time_by_sample(series):
@@ -75,25 +48,13 @@ def _infer_column_role(
         return "boolean"
     if pdt.is_numeric_dtype(series):
         return "numeric"
-
-    # categorical vs text 판단
-    # categorical: 유니크 수가 행 수의 20% 이내이되 10~50 범위
-    # text: 그 외 (시각화 대상 아님)
     if pdt.is_object_dtype(series) or pdt.is_string_dtype(series):
         threshold = _categorical_threshold(row_count)
-        if unique_count <= threshold:
-            return "categorical"
-        return "text"
-
+        return "categorical" if unique_count <= threshold else "text"
     return "other"
-
-# 입력: 없음
-# 출력: 역할별 컬럼 리스트 딕셔너리
-# 역할별 컬럼 리스트 초기화
 
 
 def _init_roles_dict() -> Dict[str, List[str]]:
-    # 역할별 컬럼 리스트 초기화
     return {
         "time": [],
         "numeric": [],
@@ -103,13 +64,8 @@ def _init_roles_dict() -> Dict[str, List[str]]:
         "other": [],
     }
 
-# 입력: df, sample_size
-# 출력: df_schema 요약 딕셔너리
-# DataFrame에서 df_schema 요약을 생성
-
 
 def summarize_dataframe_schema(df: pd.DataFrame, sample_size: int = 3) -> Dict[str, Any]:
-    """DataFrame에서 df_schema 요약을 생성한다."""
     rows = int(len(df))
     columns = list(df.columns)
     dtypes = {col: str(dtype) for col, dtype in df.dtypes.items()}
@@ -133,19 +89,16 @@ def summarize_dataframe_schema(df: pd.DataFrame, sample_size: int = 3) -> Dict[s
         roles[role].append(col)
 
     return {
-        "source": "dataframe",  # 요약 정보 출처
-        "columns": columns,  # 컬럼 리스트
-        "dtypes": dtypes,  # 컬럼별 데이터 타입
-        "rows": rows,  # 총 행 수
-        "unique_counts": unique_counts,  # 컬럼별 유니크 값 수
-        "null_counts": null_counts,  # 컬럼별 널 값 수
-        "examples": examples,  # 컬럼별 예시 값
-        "inferred_types": inferred_types,  # 컬럼별 추정 타입
-        "column_roles": roles,  # 역할별 컬럼 리스트
+        "source": "dataframe",
+        "columns": columns,
+        "dtypes": dtypes,
+        "rows": rows,
+        "unique_counts": unique_counts,
+        "null_counts": null_counts,
+        "examples": examples,
+        "inferred_types": inferred_types,
+        "column_roles": roles,
     }
-
-# 입력 : data_type, length, precision, scale
-# 출력 : 사람이 읽기 쉬운 Oracle 타입 문자열
 
 
 def _format_oracle_type(
@@ -154,7 +107,6 @@ def _format_oracle_type(
     precision: Optional[int],
     scale: Optional[int],
 ) -> str:
-    # Oracle 타입을 사람이 읽기 쉬운 문자열로 정규화
     if data_type in ("VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR") and length:
         return f"{data_type}({length})"
     if data_type == "NUMBER" and precision is not None:
@@ -163,12 +115,8 @@ def _format_oracle_type(
         return f"{data_type}({precision})"
     return data_type
 
-# 입력: name, data_type
-# 출력: 컬럼 역할 분류 문자열(time/numeric/categorical/...)
-
 
 def _infer_oracle_role(name: str, data_type: str) -> str:
-    # Oracle 데이터 타입 기반 역할 분류
     upper = data_type.upper()
     if upper in ("DATE", "TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE"):
         return "time"
@@ -181,13 +129,10 @@ def _infer_oracle_role(name: str, data_type: str) -> str:
     return "other"
 
 
-# 입력: table_name, owner
-# 출력: df_schema 요약 딕셔너리
 def summarize_oracle_schema(
     table_name: str,
     owner: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Oracle 메타데이터에서 df_schema 요약을 생성한다."""
     table = table_name.upper()
     owner_upper = owner.upper() if owner else None
 
@@ -214,11 +159,9 @@ def summarize_oracle_schema(
     rows = None
     with get_connection() as conn:
         cur = conn.cursor()
-        # 컬럼 메타정보 + 통계(유니크/널) 조회
         cur.execute(sql, {"table_name": table, "owner": owner_upper})
         results = cur.fetchall()
 
-        # 테이블 전체 row 수 통계 조회
         cur.execute(
             """
             SELECT num_rows
@@ -280,3 +223,4 @@ def summarize_oracle_schema(
         "inferred_types": inferred_types,
         "column_roles": roles,
     }
+

@@ -1,73 +1,82 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, List
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 from src.db.oracle_client import fetch_all
 from src.models.chart_spec import VisualizationResponse
-from src.utils.logging import log_event
+from src.utils.logging import log_event, new_request_id
 
-# .env 자동 로딩
 load_dotenv()
 
 app = FastAPI(title="Query Visualization API")
+MAX_ROWS = 10000
+MAX_TEXT_LENGTH = 2000
 
-# 입력: user_query, sql, rows
-# 출력: VisualizeRequest 모델
-# 역할: 클라이언트가 보낸 질문 + SQL + SQL 실행 결과(ROW 리스트)를 담는 모델
+
 class VisualizeRequest(BaseModel):
-    # 자연어 질문
-    user_query: str
-    # text-to-sql 모듈이 만든 SQL
-    sql: str
-    # SQL 실행 결과
+    user_query: str = Field(..., min_length=1, max_length=MAX_TEXT_LENGTH)
+    sql: str = Field(..., min_length=1, max_length=MAX_TEXT_LENGTH)
     rows: List[Dict[str, Any]]
 
 
-# 입력 없음
-# 출력: 상태 딕셔너리
-# 간단한 체크 엔드포인트
+def _validate_payload(req: VisualizeRequest) -> None:
+    if len(req.rows) > MAX_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "ROWS_LIMIT_EXCEEDED", "message": f"rows size must be <= {MAX_ROWS}"},
+        )
+    if req.rows and not isinstance(req.rows[0], dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_ROWS", "message": "rows must be a list of objects"},
+        )
+
+
 @app.get("/health")
 def health_check() -> dict:
     return {"status": "ok"}
 
 
-# 입력 없음
-# 출력: DB connection 테스트 결과
-# 간단한 DB 연결 테스트 엔드포인트
 @app.get("/db-test")
 def db_test() -> dict:
-    """DB 연결 테스트: DUAL 테이블로 간단 조회."""
     try:
         rows = fetch_all("SELECT * from sso.patients where rownum = 1")
         return {"ok": True, "rows": rows}
-    except Exception as exc:  # pragma: no cover - 환경 의존
-        log_event("db.test.error", {"error": str(exc)})
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        log_event("db.test.error", {"error": str(exc)}, level="error")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "DB_TEST_FAILED", "message": str(exc)},
+        ) from exc
 
 
-# 입력: VisualizeRequert
-# 출력: VisualizationResponse
-# 역할 : 클라이언트가 보낸 질문 + SQL + SQL 실행 결과(ROW 리스트)를 받아 시각화 추천을 반환
 @app.post("/visualize", response_model=VisualizationResponse)
 def visualize(req: VisualizeRequest) -> VisualizationResponse:
-    """쿼리 결과를 받아 시각화 추천을 반환."""
+    _validate_payload(req)
+    request_id = new_request_id()
     df = pd.DataFrame(req.rows)
-
-    log_event("request.visualize", {
-              "user_query": req.user_query, "sql": req.sql})
+    log_event(
+        "request.visualize",
+        {
+            "request_id": request_id,
+            "row_count": len(req.rows),
+            "column_count": len(df.columns),
+        },
+    )
 
     try:
         from src.agent.analysis_agent import analyze_and_visualize
-    except Exception as exc:  # pragma: no cover - 아직 미구현일 수 있음
-        log_event("analysis.import.error", {"error": str(exc)})
+    except Exception as exc:  # pragma: no cover
+        log_event("analysis.import.error", {"request_id": request_id, "error": str(exc)}, level="error")
         raise HTTPException(
             status_code=501,
-            detail="analysis_agent가 아직 구현되지 않았습니다.",
+            detail={"code": "ANALYSIS_IMPORT_ERROR", "message": "analysis agent import failed"},
         ) from exc
 
-    return analyze_and_visualize(req.user_query, req.sql, df)
+    return analyze_and_visualize(req.user_query, req.sql, df, request_id=request_id)
+

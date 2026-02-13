@@ -64,3 +64,9 @@ class VisualizationResponse(BaseModel):
     failure_reasons: List[str] = Field(default_factory=list)
     # 시도 횟수(기본 1, 재시도 시 증가)
     attempt_count: int = 1
+    # 요청 추적 ID
+    request_id: Optional[str] = None
+    # 전체 처리 지연시간(ms)
+    total_latency_ms: Optional[float] = None
+    # 단계별 처리 지연시간(ms)
+    stage_latency_ms: Dict[str, float] = Field(default_factory=dict)

@@ -67,3 +67,22 @@ def test_infer_context_flags_requires_numeric_post_days_pattern() -> None:
 
     flags_with_days = _infer_context_flags("퇴원 후 30일 재입원율 추세", ["admittime", "dischtime"])
     assert flags_with_days["post_days"] is True
+
+
+def test_plan_analyses_blocks_identifier_group_for_distribution() -> None:
+    df = pd.DataFrame(
+        {
+            "subject_id": [1, 2, 3, 4],
+            "age": [65, 72, 58, 60],
+        }
+    )
+    intent_info = {
+        "analysis_intent": "distribution",
+        "primary_outcome": "age",
+        "time_var": None,
+        "group_var": "subject_id",
+    }
+    plans = plan_analyses(intent_info, df)
+    for plan in plans:
+        spec = plan.get("chart_spec", {})
+        assert spec.get("group") != "subject_id"

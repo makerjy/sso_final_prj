@@ -1,17 +1,18 @@
-﻿"""에이전트 파이프라인용 로깅 유틸."""
+"""Structured logging helpers for query visualization."""
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict
+from uuid import uuid4
 
 
 _LOGGER_NAME = "query_visualization"
 
-# 입력 없음
-# 출력: 로거 객체
-# 모듈 공통 로거 반환
+
 def get_logger() -> logging.Logger:
-    """모듈 공통 로거 반환."""
+    """Return a shared logger instance."""
     logger = logging.getLogger(_LOGGER_NAME)
     if logger.handlers:
         return logger
@@ -19,22 +20,32 @@ def get_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    )
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
 
-# 입력: event, payload
-# 출력: 없음
-# 이벤트 로그 기록
-def log_event(event: str, payload: Dict[str, Any] | None = None) -> None:
-    """이벤트 로그 기록."""
-    logger = get_logger()
-    if payload is None:
-        logger.info("%s", event)
-        return
 
-    # 너무 길어지지 않도록 키만 간단히 출력
-    keys = ", ".join(payload.keys())
-    logger.info("%s | keys=%s", event, keys)
+def new_request_id() -> str:
+    """Generate a request id to trace a single pipeline execution."""
+    return f"qv-{uuid4().hex[:12]}"
+
+
+def log_event(
+    event: str,
+    payload: Dict[str, Any] | None = None,
+    *,
+    level: str = "info",
+) -> None:
+    """Write one structured log event in JSON format."""
+    logger = get_logger()
+    data: Dict[str, Any] = {
+        "event": event,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    if payload:
+        data.update(payload)
+
+    message = json.dumps(data, ensure_ascii=False, default=str)
+    writer = getattr(logger, level.lower(), logger.info)
+    writer("%s", message)

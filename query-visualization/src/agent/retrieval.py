@@ -4,7 +4,13 @@ from typing import Any, Dict, List
 
 from openai import OpenAI
 
-from src.config.rag_config import EMBEDDING_MODEL, RAG_TOP_K
+from src.config.rag_config import (
+    EMBEDDING_MODEL,
+    RAG_CONTEXT_MAX_CHARS,
+    RAG_DOC_VERSION,
+    RAG_MIN_SCORE,
+    RAG_TOP_K,
+)
 from src.db.vector_store import get_mongo_collection, search_embeddings
 from src.utils.logging import log_event
 
@@ -37,17 +43,37 @@ def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, An
         hits = search_embeddings(collection, query_embedding, limit=RAG_TOP_K)
 
         snippets = []
+        kept_scores: List[float] = []
         for hit in hits:
+            score = float(hit.get("score", 0.0))
+            metadata = hit.get("metadata") or {}
+            if score < RAG_MIN_SCORE:
+                continue
+            if metadata.get("doc_version") and metadata.get("doc_version") != RAG_DOC_VERSION:
+                continue
             payload = (hit.get("metadata") or {}) | {"text": hit.get("text")}
             text = payload.get("text")
             if text:
                 snippets.append(text)
+                kept_scores.append(score)
 
         context_text = "\n\n".join(snippets)
-        log_event("rag.search", {"count": len(snippets)})
+        if len(context_text) > RAG_CONTEXT_MAX_CHARS:
+            context_text = context_text[:RAG_CONTEXT_MAX_CHARS]
+        log_event(
+            "rag.search",
+            {
+                "count": len(snippets),
+                "top_k": RAG_TOP_K,
+                "min_score": RAG_MIN_SCORE,
+                "score_max": max(kept_scores) if kept_scores else None,
+                "score_min": min(kept_scores) if kept_scores else None,
+            },
+        )
         return {
             "snippets": snippets,
             "context_text": context_text,
+            "scores": kept_scores,
         }
     except Exception as exc:  # pragma: no cover - environment dependent
         log_event("rag.search.error", {"error": str(exc)})

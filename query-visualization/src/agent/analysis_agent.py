@@ -1,12 +1,9 @@
-﻿"""쿼리 시각화 에이전트 
-
-역할:
-- 질문 + df -> 시각화 결과 생성 흐름을 한 곳에서 관리
-"""
+"""Query visualization orchestration pipeline."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -22,18 +19,12 @@ from src.utils.logging import log_event
 _DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_DOTENV_PATH)
 
-# 입력: df
-# 출력: 데이터프레임 스키마 요약 딕셔너리
-# 데이터프레임 스키마를 간단히 요약
+
 def summarize_schema(df: pd.DataFrame) -> Dict[str, Any]:
-    """데이터프레임 스키마를 간단히 요약."""
     return summarize_dataframe_schema(df)
 
-# 입력: df
-# 출력: df
-# 경과시간 파생 컬럼을 조건부로 생성
+
 def _add_elapsed_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # 대소문자/스네이크케이스/카멜케이스 대응
     cols = {c.lower(): c for c in df.columns}
 
     def _col(*names: str) -> str | None:
@@ -57,7 +48,6 @@ def _add_elapsed_columns(df: pd.DataFrame) -> pd.DataFrame:
     intime_col = _col("intime", "in_time", "icu_intime")
     admittime_col = _col("admittime", "admit_time")
 
-    # ICU 경과시간: charttime - intime
     if chart_col and intime_col:
         try:
             ct = pd.to_datetime(df[chart_col], errors="coerce")
@@ -66,7 +56,6 @@ def _add_elapsed_columns(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             pass
 
-    # 입원 경과시간: charttime - admittime
     if chart_col and admittime_col:
         try:
             ct = pd.to_datetime(df[chart_col], errors="coerce")
@@ -126,10 +115,7 @@ def _fallback_insight(user_query: str, df: pd.DataFrame, analyses: List[Analysis
     )
 
 
-def _record_failure(
-    failure_reasons: List[str],
-    reason: str,
-) -> None:
+def _record_failure(failure_reasons: List[str], reason: str) -> None:
     normalized = (reason or "").strip()
     if normalized and normalized not in failure_reasons:
         failure_reasons.append(normalized)
@@ -144,6 +130,7 @@ def _build_analyses_from_plans(
     df: pd.DataFrame,
     failure_reasons: List[str],
     pass_label: str,
+    request_id: Optional[str],
 ) -> List[AnalysisCard]:
     analyses: List[AnalysisCard] = []
     if not plans:
@@ -158,27 +145,25 @@ def _build_analyses_from_plans(
         try:
             chart_spec = ChartSpec(**chart_spec_dict)
         except Exception as exc:
-            _record_failure(
-                failure_reasons,
-                f"{pass_label}: invalid_chart_spec({chart_type}) - {str(exc)}",
-            )
+            _record_failure(failure_reasons, f"{pass_label}: invalid_chart_spec({chart_type}) - {str(exc)}")
             chart_spec = ChartSpec(chart_type="unknown")
 
         try:
             chart_result = code_generator.generate_chart(chart_spec_dict, df)
             if chart_result.get("figure_json") is None:
-                _record_failure(
-                    failure_reasons,
-                    f"{pass_label}: empty_figure({chart_type})",
-                )
+                _record_failure(failure_reasons, f"{pass_label}: empty_figure({chart_type})")
             else:
-                log_event("analysis.chart.success", {"pass": pass_label, "chart_type": chart_type})
+                log_event(
+                    "analysis.chart.success",
+                    {"request_id": request_id, "pass": pass_label, "chart_type": chart_type},
+                )
         except Exception as exc:
-            _record_failure(
-                failure_reasons,
-                f"{pass_label}: chart_error({chart_type}) - {str(exc)}",
+            _record_failure(failure_reasons, f"{pass_label}: chart_error({chart_type}) - {str(exc)}")
+            log_event(
+                "analysis.chart.error",
+                {"request_id": request_id, "pass": pass_label, "error": str(exc)},
+                level="error",
             )
-            log_event("analysis.chart.error", {"pass": pass_label, "error": str(exc)})
             chart_result = {"figure_json": None, "code": None}
 
         analyses.append(
@@ -256,35 +241,44 @@ def _llm_generate_insight(
 
     raise RuntimeError(f"LLM insight 생성 실패: {str(last_error) if last_error else 'unknown'}")
 
-# 입력: user_query, sql, df
-# 출력: VisualizationResponse
-# 질문과 데이터프레임을 받아 시각화 추천 결과를 생성
-# 흐름 - 스키마 요약 -> 의도 추출 -> 분석 플랜 생성 -> 차트 코드 생성/실행 -> 결과 묶기
-def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> VisualizationResponse:
-    """질문과 데이터프레임을 받아 시각화 추천 결과를 생성."""
-    log_event("analysis.start", {"user_query": user_query, "sql": sql})
+
+def analyze_and_visualize(
+    user_query: str,
+    sql: str,
+    df: pd.DataFrame,
+    *,
+    request_id: Optional[str] = None,
+) -> VisualizationResponse:
+    stage_latency_ms: Dict[str, float] = {}
+    t0 = perf_counter()
     failure_reasons: List[str] = []
     fallback_used = False
     fallback_stage: Optional[str] = None
     attempt_count = 1
 
-    # 0) 경과시간 파생 컬럼 추가 (가능한 경우에만)
+    def _tick(stage: str, start: float) -> None:
+        stage_latency_ms[stage] = round((perf_counter() - start) * 1000.0, 2)
+
+    log_event("analysis.start", {"request_id": request_id, "row_count": len(df), "sql_len": len(sql)})
+
+    s = perf_counter()
     df = _add_elapsed_columns(df)
+    _tick("add_elapsed_columns", s)
 
-    # 1) 스키마 요약
+    s = perf_counter()
     df_schema = summarize_schema(df)
-    log_event("analysis.schema", {"columns": df_schema.get("columns", [])})
+    _tick("schema_summary", s)
 
-    # 2) RAG 컨텍스트 검색
+    s = perf_counter()
     rag = retrieval.retrieve_context(user_query, df_schema)
     rag_context = rag.get("context_text", "")
-    log_event("analysis.rag", {"context_size": len(rag_context)})
+    _tick("rag_retrieve", s)
 
-    # 3) 의도 추출
+    s = perf_counter()
     intent_info = intent_extractor.extract_intent(user_query, df_schema, rag_context)
-    log_event("analysis.intent", intent_info)
+    _tick("intent_extract", s)
 
-    # 4) 1차: normal 플랜 생성 및 차트 생성
+    s = perf_counter()
     plans = chart_rule_engine.plan_analyses(
         intent_info,
         df,
@@ -292,20 +286,18 @@ def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> Visual
         retry_mode="normal",
         failure_reasons=failure_reasons,
     )
-    log_event("analysis.plans", {"mode": "normal", "count": len(plans)})
-    analyses = _build_analyses_from_plans(plans, df, failure_reasons, "normal")
+    analyses = _build_analyses_from_plans(plans, df, failure_reasons, "normal", request_id)
+    _tick("plan_codegen_normal", s)
 
-    # 5) 2차: normal 실패 시 relaxed 모드 재시도
     if not _has_renderable_chart(analyses):
         fallback_used = True
         fallback_stage = "retry_relaxed"
         attempt_count = 2
         _record_failure(failure_reasons, "normal: no_renderable_chart")
 
+        s = perf_counter()
         relaxed_intent_info = dict(intent_info)
         relaxed_intent_info["group_var"] = None
-
-        log_event("analysis.retry.start", {"mode": "relaxed"})
         relaxed_plans = chart_rule_engine.plan_analyses(
             relaxed_intent_info,
             df,
@@ -313,28 +305,41 @@ def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> Visual
             retry_mode="relaxed",
             failure_reasons=failure_reasons,
         )
-        log_event("analysis.plans", {"mode": "relaxed", "count": len(relaxed_plans)})
         relaxed_analyses = _build_analyses_from_plans(
             relaxed_plans,
             df,
             failure_reasons,
             "relaxed",
+            request_id,
         )
         if relaxed_analyses:
             analyses = relaxed_analyses
-
         if not _has_renderable_chart(analyses):
             _record_failure(failure_reasons, "relaxed: no_renderable_chart")
-        log_event("analysis.retry.done", {"mode": "relaxed", "renderable": _has_renderable_chart(analyses)})
+        _tick("plan_codegen_relaxed", s)
 
+    s = perf_counter()
     try:
         insight = _llm_generate_insight(user_query, sql, df, analyses, df_schema)
     except Exception as exc:
-        log_event("analysis.insight.error", {"error": str(exc)})
+        log_event("analysis.insight.error", {"request_id": request_id, "error": str(exc)}, level="error")
         _record_failure(failure_reasons, f"insight_error: {str(exc)}")
         insight = _fallback_insight(user_query, df, analyses)
+    _tick("insight", s)
 
-    # 6) 결과 묶기
+    total_latency_ms = round((perf_counter() - t0) * 1000.0, 2)
+    log_event(
+        "analysis.done",
+        {
+            "request_id": request_id,
+            "fallback_used": fallback_used,
+            "attempt_count": attempt_count,
+            "failure_count": len(failure_reasons),
+            "total_latency_ms": total_latency_ms,
+            "stage_latency_ms": stage_latency_ms,
+        },
+    )
+
     return VisualizationResponse(
         sql=sql,
         table_preview=df.head(20).to_dict(orient="records"),
@@ -344,4 +349,8 @@ def analyze_and_visualize(user_query: str, sql: str, df: pd.DataFrame) -> Visual
         fallback_stage=fallback_stage,
         failure_reasons=failure_reasons,
         attempt_count=attempt_count,
+        request_id=request_id,
+        total_latency_ms=total_latency_ms,
+        stage_latency_ms=stage_latency_ms,
     )
+

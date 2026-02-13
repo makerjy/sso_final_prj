@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -85,6 +85,12 @@
         color: #b00020;
         white-space: pre-wrap;
       }
+      .metric {
+        display: inline-block;
+        margin-right: 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
     </style>
   </head>
   <body>
@@ -99,64 +105,9 @@
       const { useEffect, useState } = React;
 
       const sampleRows = [
-        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-18", HEART_RATE: 103.0 },
-        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-18", HEART_RATE: 105.0 },
-        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-19", HEART_RATE: 95.0 },
-        { SUBJECT_ID: 10002013, STAY_ID: 39060235, CHART_DAY: "2160-05-19", HEART_RATE: 99.0 }
-      ];
-
-      const ruleCards = [
-        {
-          title: "0. 전제",
-          items: [
-            "중심 테이블: ADMISSIONS / ICUSTAYS",
-            "이벤트는 HADM_ID / STAY_ID에 종속",
-            "PATIENTS는 속성 테이블(기준 아님)"
-          ]
-        },
-        {
-          title: "1. Grain 규칙",
-          items: [
-            "trend(ICU/입실 후): STAY_ID만 허용",
-            "trend(입원 후): HADM_ID만 허용",
-            "distribution: SUBJECT_ID/HADM_ID (group 금지)",
-            "comparison: low-cardinality만",
-            "correlation: 식별자 제외"
-          ]
-        },
-        {
-          title: "2. 시간 축 규칙",
-          items: [
-            "ICU: charttime - intime (경과시간)",
-            "입원: charttime - admittime (경과시간)",
-            "‘후 N일’이면 경과시간 파생 필수",
-            "단순 추세만 calendar time 허용"
-          ]
-        },
-        {
-          title: "3. 그룹 규칙",
-          items: [
-            "금지: SUBJECT_ID/HADM_ID/STAY_ID/ICD/ITEMID/EMAR_ID/POE_ID",
-            "허용: GENDER, ADMISSION_TYPE, INSURANCE, RACE, CAREUNIT 등",
-            "low-cardinality 조건 충족 필수"
-          ]
-        },
-        {
-          title: "4. Trend 플랜",
-          items: [
-            "ICU: line(x=elapsed, group=STAY_ID), box(분포)",
-            "입원: line(x=elapsed, group=HADM_ID)",
-            "calendar time line 금지(ICU)"
-          ]
-        },
-        {
-          title: "5. 기타 플랜",
-          items: [
-            "distribution: hist, (group 있으면 box)",
-            "comparison: box (low-card group)",
-            "correlation: scatter (식별자 제외)"
-          ]
-        }
+        { ICU_ADMIT_MONTH: "2024-01", MORTALITY_RATE: 0.12, GENDER: "M" },
+        { ICU_ADMIT_MONTH: "2024-02", MORTALITY_RATE: 0.10, GENDER: "F" },
+        { ICU_ADMIT_MONTH: "2024-03", MORTALITY_RATE: 0.15, GENDER: "M" },
       ];
 
       function PlotCard({ analysis, idx }) {
@@ -178,8 +129,8 @@
       }
 
       function App() {
-        const [userQuery, setUserQuery] = useState("수술 환자의 ICU 입실 후 7일간 심박수 변화가 어떻게 되나요?");
-        const [sql, setSql] = useState("SELECT ...");
+        const [userQuery, setUserQuery] = useState("ICU 월별 mortality_rate 추세 보여줘");
+        const [sql, setSql] = useState("SELECT ICU_ADMIT_MONTH, MORTALITY_RATE, GENDER FROM sample");
         const [rows, setRows] = useState(JSON.stringify(sampleRows, null, 2));
         const [resp, setResp] = useState(null);
         const [loading, setLoading] = useState(false);
@@ -190,15 +141,11 @@
           setError("");
           setResp(null);
           try {
-            const payload = {
-              user_query: userQuery,
-              sql,
-              rows: JSON.parse(rows)
-            };
+            const payload = { user_query: userQuery, sql, rows: JSON.parse(rows) };
             const r = await fetch("/visualize", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
+              body: JSON.stringify(payload),
             });
             const data = await r.json();
             if (!r.ok) {
@@ -215,7 +162,7 @@
         return (
           <div className="wrap">
             <h1>Visualization Response Viewer</h1>
-            <div className="sub">추천 플랜 결과를 바로 UI에서 확인합니다.</div>
+            <div className="sub">SQL 결과를 입력해 추천 차트와 인사이트를 확인합니다.</div>
 
             <div className="grid">
               <div className="card">
@@ -236,25 +183,18 @@
 
               <div className="card">
                 <h3>Response (raw)</h3>
+                {resp && (
+                  <div style={{ marginBottom: 8 }}>
+                    <span className="metric">request_id: {resp.request_id || "-"}</span>
+                    <span className="metric">latency_ms: {resp.total_latency_ms || "-"}</span>
+                    <span className="metric">fallback: {String(resp.fallback_used)}</span>
+                  </div>
+                )}
                 <pre style={{ whiteSpace: "pre-wrap" }}>
                   {resp ? JSON.stringify(resp, null, 2) : "No response yet"}
                 </pre>
                 {error && <div className="error">{error}</div>}
               </div>
-            </div>
-
-            <h2 style={{ marginTop: 28 }}>Rule Summary</h2>
-            <div className="grid">
-              {ruleCards.map((c, i) => (
-                <div className="card" key={i}>
-                  <h3>{c.title}</h3>
-                  <ul>
-                    {c.items.map((it, j) => (
-                      <li key={j} style={{ marginBottom: 6 }}>{it}</li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
             </div>
 
             {resp && resp.analyses && (
@@ -275,3 +215,4 @@
     </script>
   </body>
 </html>
+

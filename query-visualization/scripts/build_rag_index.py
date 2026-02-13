@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE
+from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE, RAG_DOC_VERSION
 from src.db.vector_store import ensure_collection, get_mongo_collection, upsert_embeddings
 
 
@@ -94,10 +94,10 @@ def build_index() -> None:
 
     normalized = [_normalize_doc(d) for d in docs]
     texts = [text for text, _ in normalized]
-    metadatas = [meta | {"text": text} for text, meta in normalized]
+    metadatas = [meta | {"text": text, "doc_version": RAG_DOC_VERSION} for text, meta in normalized]
     ids = [str(uuid4()) for _ in docs]
-    for doc, doc_id in zip(docs, ids):
-        doc["metadata"] = doc.get("metadata", {}) | {"doc_id": doc.get("id")}
+    for metadata, doc_id in zip(metadatas, ids):
+        metadata["doc_id"] = doc_id
 
     collection = get_mongo_collection()
 
