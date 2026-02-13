@@ -30,6 +30,14 @@ export default function Home() {
     }
   }, [isHydrated, user, router])
 
+  useEffect(() => {
+    const openQueryView = () => setCurrentView("query")
+    window.addEventListener("ql-open-query-view", openQueryView)
+    return () => {
+      window.removeEventListener("ql-open-query-view", openQueryView)
+    }
+  }, [])
+
   const userInitial = useMemo(() => {
     const base = (user?.name || "").trim()
     return base ? base.charAt(0) : "?"

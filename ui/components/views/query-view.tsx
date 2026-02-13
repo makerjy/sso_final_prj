@@ -6,6 +6,22 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
+import { Input } from "@/components/ui/input"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { 
   Send, 
   Code, 
@@ -147,6 +163,30 @@ interface PersistedQueryState {
   showQueryResultPanel: boolean
   editedSql: string
   isEditing: boolean
+}
+
+interface ResultTabState {
+  id: string
+  question: string
+  sql: string
+  resultData: PreviewData | null
+  visualization: VisualizationResponsePayload | null
+  statistics: SimpleStatsRow[]
+  insight: string
+  status: "pending" | "error" | "success"
+  error?: string | null
+  response: OneShotResponse | null
+  runResult: RunResponse | null
+  suggestedQuestions: string[]
+  showSqlPanel: boolean
+  showQueryResultPanel: boolean
+  editedSql: string
+  isEditing: boolean
+}
+
+interface DashboardFolderOption {
+  id: string
+  name: string
 }
 
 const MAX_PERSIST_ROWS = 200
@@ -312,8 +352,17 @@ export function QueryView() {
   const [visualizationLoading, setVisualizationLoading] = useState(false)
   const [visualizationError, setVisualizationError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [resultTabs, setResultTabs] = useState<ResultTabState[]>([])
+  const [activeTabId, setActiveTabId] = useState<string>("")
   const [boardSaving, setBoardSaving] = useState(false)
   const [boardMessage, setBoardMessage] = useState<string | null>(null)
+  const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false)
+  const [saveTitle, setSaveTitle] = useState("")
+  const [saveFolderMode, setSaveFolderMode] = useState<"existing" | "new">("existing")
+  const [saveFolderId, setSaveFolderId] = useState<string>("")
+  const [saveNewFolderName, setSaveNewFolderName] = useState("")
+  const [saveFolderOptions, setSaveFolderOptions] = useState<DashboardFolderOption[]>([])
+  const [saveFoldersLoading, setSaveFoldersLoading] = useState(false)
   const [lastQuestion, setLastQuestion] = useState<string>("")
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])
   const [quickQuestions, setQuickQuestions] = useState<string[]>([
@@ -342,6 +391,7 @@ export function QueryView() {
     startRightWidth: 55,
     containerWidth: 0,
   })
+  const requestTokenRef = useRef(0)
 
   const payload = response?.payload
   const mode = payload?.mode
@@ -559,12 +609,51 @@ export function QueryView() {
   const chatPanelStyle = shouldShowResizablePanels ? { width: `${100 - resultsPanelWidth}%` } : undefined
   const resultsPanelStyle = shouldShowResizablePanels ? { width: `${resultsPanelWidth}%` } : undefined
   const appendSuggestions = (base: string, _suggestions?: string[]) => base
+  const createResultTab = (questionText: string): ResultTabState => ({
+    id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    question: questionText,
+    sql: "",
+    resultData: null,
+    visualization: null,
+    statistics: [],
+    insight: "",
+    status: "pending",
+    error: null,
+    response: null,
+    runResult: null,
+    suggestedQuestions: [],
+    showSqlPanel: false,
+    showQueryResultPanel: false,
+    editedSql: "",
+    isEditing: false,
+  })
 
-  const fetchVisualizationPlan = async (sqlText: string, questionText: string, previewData: PreviewData | null) => {
+  const updateTab = (tabId: string, patch: Partial<ResultTabState>) => {
+    setResultTabs((prev) =>
+      prev.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab))
+    )
+  }
+
+  const updateActiveTab = (patch: Partial<ResultTabState>) => {
+    if (!activeTabId) return
+    updateTab(activeTabId, patch)
+  }
+
+  const fetchVisualizationPlan = async (
+    sqlText: string,
+    questionText: string,
+    previewData: PreviewData | null,
+    targetTabId?: string
+  ) => {
     if (!sqlText?.trim() || !previewData?.columns?.length || !previewData?.rows?.length) {
-      setVisualizationResult(null)
-      setVisualizationError(null)
-      return
+      if (!targetTabId || targetTabId === activeTabId) {
+        setVisualizationResult(null)
+        setVisualizationError(null)
+      }
+      if (targetTabId) {
+        updateTab(targetTabId, { visualization: null })
+      }
+      return null
     }
     // Always fetch latest visualization/insight from server (disable local cache)
     setVisualizationLoading(true)
@@ -588,10 +677,23 @@ export function QueryView() {
       )
       if (!res.ok) throw new Error(await readError(res))
       const data: VisualizationResponsePayload = await res.json()
-      setVisualizationResult(data)
+      if (!targetTabId || targetTabId === activeTabId) {
+        setVisualizationResult(data)
+      }
+      if (targetTabId) {
+        updateTab(targetTabId, { visualization: data })
+      }
+      return data
     } catch (err: any) {
-      setVisualizationResult(null)
-      setVisualizationError(err?.message || "시각화 추천 플랜 조회에 실패했습니다.")
+      const message = err?.message || "시각화 추천 플랜 조회에 실패했습니다."
+      if (!targetTabId || targetTabId === activeTabId) {
+        setVisualizationResult(null)
+        setVisualizationError(message)
+      }
+      if (targetTabId) {
+        updateTab(targetTabId, { visualization: null, error: message })
+      }
+      return null
     } finally {
       setVisualizationLoading(false)
     }
@@ -656,6 +758,24 @@ export function QueryView() {
       window.removeEventListener("mouseup", stopDragging)
     }
   }, [])
+
+  useEffect(() => {
+    if (!activeTabId) return
+    const tab = resultTabs.find((item) => item.id === activeTabId)
+    if (!tab) return
+    setResponse(tab.response)
+    setRunResult(tab.runResult)
+    setVisualizationResult(tab.visualization)
+    setVisualizationError(tab.error || null)
+    setError(tab.error || null)
+    setEditedSql(tab.editedSql || tab.sql || "")
+    setIsEditing(tab.isEditing)
+    setSuggestedQuestions(tab.suggestedQuestions || [])
+    setLastQuestion(tab.question || "")
+    setShowSqlPanel(tab.showSqlPanel)
+    setShowQueryResultPanel(tab.showQueryResultPanel)
+    setShowResults(true)
+  }, [activeTabId, resultTabs])
 
   useEffect(() => {
     const syncDesktopLayout = () => {
@@ -960,6 +1080,12 @@ export function QueryView() {
     const trimmed = questionText.trim()
     if (!trimmed) return
 
+    const tab = createResultTab(trimmed)
+    setResultTabs((prev) => [tab, ...prev])
+    setActiveTabId(tab.id)
+    setShowResults(true)
+    const requestToken = ++requestTokenRef.current
+
     setIsLoading(true)
     setError(null)
     setBoardMessage(null)
@@ -1002,8 +1128,13 @@ export function QueryView() {
       if (!res.ok) {
         throw new Error(await readError(res))
       }
+      if (requestToken !== requestTokenRef.current) return
       const data: OneShotResponse = await res.json()
       setResponse(data)
+      updateTab(tab.id, {
+        response: data,
+        status: "success",
+      })
       if (data.payload.mode === "clarify") {
         setShowSqlPanel(false)
         setShowQueryResultPanel(false)
@@ -1011,6 +1142,11 @@ export function QueryView() {
         setIsEditing(false)
         const clarificationSuggestions = buildClarificationSuggestions(data.payload)
         setSuggestedQuestions(clarificationSuggestions)
+        updateTab(tab.id, {
+          suggestedQuestions: clarificationSuggestions,
+          response: data,
+          status: "success",
+        })
         const responseMessage: ChatMessage = {
           id: (Date.now() + 1).toString(),
           role: "assistant",
@@ -1037,6 +1173,14 @@ export function QueryView() {
           ? buildSuggestions(trimmed, data.payload.result?.preview?.columns)
           : []
       setSuggestedQuestions(suggestions)
+      updateTab(tab.id, {
+        question: trimmed,
+        sql: generatedSql,
+        response: data,
+        suggestedQuestions: suggestions,
+        editedSql: generatedSql,
+        status: "success",
+      })
       const responseMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
@@ -1052,13 +1196,20 @@ export function QueryView() {
           sql: generatedSql,
           questionForSuggestions: trimmed,
           addAssistantMessage: true,
+          tabId: tab.id,
         })
       } else if (data.payload.mode === "demo" && generatedSql.trim()) {
-        await fetchVisualizationPlan(
+        const viz = await fetchVisualizationPlan(
           generatedSql.trim(),
           trimmed,
-          data.payload.result?.preview || null
+          data.payload.result?.preview || null,
+          tab.id
         )
+        updateTab(tab.id, {
+          resultData: data.payload.result?.preview || null,
+          visualization: viz,
+          insight: normalizeInsightText(viz?.insight || ""),
+        })
       }
     } catch (err: any) {
       const message =
@@ -1066,6 +1217,10 @@ export function QueryView() {
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
           : err?.message || "요청이 실패했습니다."
       setError(message)
+      updateTab(tab.id, {
+        status: "error",
+        error: message,
+      })
       setMessages(prev => [
         ...prev,
         {
@@ -1098,13 +1253,101 @@ export function QueryView() {
     return "전체"
   }
 
-  const handleSaveToDashboard = async () => {
+  const loadDashboardFolders = async () => {
+    setSaveFoldersLoading(true)
+    try {
+      const res = await fetchWithTimeout(apiUrl("/dashboard/queries"), {}, 12000)
+      if (!res.ok) throw new Error("failed to load folders")
+      const data = await res.json()
+      const folders = Array.isArray(data?.folders) ? data.folders : []
+      const queries = Array.isArray(data?.queries) ? data.queries : []
+
+      const folderMap = new Map<string, DashboardFolderOption>()
+      const nameKeyMap = new Map<string, DashboardFolderOption>()
+
+      const pushFolder = (idRaw: unknown, nameRaw: unknown) => {
+        const id = String(idRaw || "").trim()
+        const name = String(nameRaw || "").trim()
+        if (!id || !name) return
+        if (!folderMap.has(id)) {
+          const item = { id, name }
+          folderMap.set(id, item)
+          nameKeyMap.set(name.toLowerCase(), item)
+        }
+      }
+
+      folders.forEach((item: any) => {
+        pushFolder(item?.id, item?.name)
+      })
+
+      queries.forEach((item: any) => {
+        const folderId = String(item?.folderId || "").trim()
+        const category = String(item?.category || "").trim()
+        if (!category) return
+        if (folderId) {
+          pushFolder(folderId, category)
+          return
+        }
+        const key = category.toLowerCase()
+        const existed = nameKeyMap.get(key)
+        if (existed) return
+        const syntheticId = `category:${encodeURIComponent(category)}`
+        pushFolder(syntheticId, category)
+      })
+
+      const mapped = Array.from(folderMap.values()).sort((a, b) => a.name.localeCompare(b.name, "ko"))
+      setSaveFolderOptions(mapped)
+      if (!mapped.length) {
+        setSaveFolderId("")
+      } else if (!mapped.some((item) => item.id === saveFolderId)) {
+        setSaveFolderId(mapped[0].id)
+      }
+    } catch {
+      setSaveFolderOptions([])
+      setSaveFolderId("")
+    } finally {
+      setSaveFoldersLoading(false)
+    }
+  }
+
+  const openSaveDialog = async () => {
     if (!displaySql && !currentSql) {
       setBoardMessage("저장할 SQL이 없습니다.")
       return
     }
     const title = (lastQuestion || query || "저장된 쿼리").trim() || "저장된 쿼리"
-    const category = deriveDashboardCategory(title)
+    setSaveTitle(title)
+    setSaveFolderMode("existing")
+    setSaveNewFolderName("")
+    setBoardMessage(null)
+    setIsSaveDialogOpen(true)
+    await loadDashboardFolders()
+  }
+
+  const handleSaveToDashboard = async () => {
+    const finalTitle = (saveTitle || lastQuestion || query || "저장된 쿼리").trim()
+    if (!finalTitle) {
+      setBoardMessage("저장 이름을 입력해주세요.")
+      return
+    }
+
+    const newFolderName = saveNewFolderName.trim()
+    if (saveFolderMode === "new" && !newFolderName) {
+      setBoardMessage("새 폴더 이름을 입력해주세요.")
+      return
+    }
+
+    const selectedFolder = saveFolderOptions.find((item) => item.id === saveFolderId) || null
+    const folderId =
+      saveFolderMode === "new"
+        ? `folder-${Date.now()}`
+        : selectedFolder?.id || ""
+    const folderName =
+      saveFolderMode === "new"
+        ? newFolderName
+        : selectedFolder?.name || deriveDashboardCategory(finalTitle)
+
+    const category = folderName || deriveDashboardCategory(finalTitle)
     const metrics = [
       { label: "행 수", value: String(previewRowCount ?? 0) },
       { label: "컬럼 수", value: String(previewColumns.length) },
@@ -1121,12 +1364,13 @@ export function QueryView() {
         : undefined
     const newEntry = {
       id: `dashboard-${Date.now()}`,
-      title,
+      title: finalTitle,
       description: summary || "쿼리 결과 요약",
       query: displaySql || currentSql,
       lastRun: "방금 전",
       isPinned: true,
       category,
+      folderId: folderId || undefined,
       preview: previewPayload,
       metrics,
       chartType: "bar",
@@ -1134,19 +1378,37 @@ export function QueryView() {
     setBoardSaving(true)
     setBoardMessage(null)
     try {
-      const res = await fetchWithTimeout(apiUrl("/dashboard/queries"), {}, 15000)
-      const payload = res.ok ? await res.json() : null
-      const existing = Array.isArray(payload?.queries) ? payload.queries : []
-      const next = [newEntry, ...existing]
-      const saveRes = await fetchWithTimeout(apiUrl("/dashboard/queries"), {
+      const saveRes = await fetchWithTimeout(apiUrl("/dashboard/saveQuery"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queries: next }),
+        body: JSON.stringify({
+          question: finalTitle,
+          sql: displaySql || currentSql,
+          metadata: {
+            row_count: previewRowCount ?? 0,
+            column_count: previewColumns.length,
+            row_cap: previewRowCap ?? null,
+            summary: summary || "",
+            mode: mode || "",
+            entry: newEntry,
+            new_folder:
+              saveFolderMode === "new"
+                ? {
+                    id: folderId,
+                    name: folderName,
+                    createdAt: new Date().toISOString(),
+                  }
+                : null,
+          },
+        }),
       }, 15000)
       if (!saveRes.ok) {
         throw new Error("save failed")
       }
+      updateActiveTab({ question: finalTitle })
+      setLastQuestion(finalTitle)
       setBoardMessage("결과 보드에 저장했습니다.")
+      setIsSaveDialogOpen(false)
     } catch (err) {
       setBoardMessage("결과 보드 저장에 실패했습니다.")
     } finally {
@@ -1159,11 +1421,13 @@ export function QueryView() {
     sql,
     questionForSuggestions,
     addAssistantMessage = true,
+    tabId,
   }: {
     qid?: string
     sql?: string
     questionForSuggestions?: string
     addAssistantMessage?: boolean
+    tabId?: string
   }) => {
     const body: Record<string, any> = {
       user_ack: true,
@@ -1190,14 +1454,28 @@ export function QueryView() {
     setRunResult(data)
     setShowResults(true)
     setIsEditing(false)
-    await fetchVisualizationPlan(
+    const targetTabId = tabId || activeTabId
+    const viz = await fetchVisualizationPlan(
       (data.sql || sql || "").trim(),
       questionForSuggestions || lastQuestion || "",
-      data.result || null
+      data.result || null,
+      targetTabId
     )
 
     const suggestions = buildSuggestions(questionForSuggestions || lastQuestion, data.result?.columns)
     setSuggestedQuestions(suggestions)
+    if (targetTabId) {
+      updateTab(targetTabId, {
+        sql: data.sql || sql || "",
+        runResult: data,
+        resultData: data.result || null,
+        visualization: viz,
+        suggestedQuestions: suggestions,
+        insight: normalizeInsightText(viz?.insight || ""),
+        status: "success",
+        error: null,
+      })
+    }
 
     if (addAssistantMessage) {
       setMessages(prev => [
@@ -1220,6 +1498,7 @@ export function QueryView() {
     setIsLoading(true)
     setError(null)
     setBoardMessage(null)
+    updateActiveTab({ status: "pending", error: null })
     try {
       const sqlToRun = (overrideSql || editedSql || currentSql).trim()
       await executeAdvancedSql({
@@ -1227,6 +1506,7 @@ export function QueryView() {
         sql: sqlToRun,
         questionForSuggestions: lastQuestion,
         addAssistantMessage: true,
+        tabId: activeTabId,
       })
     } catch (err: any) {
       const message =
@@ -1234,6 +1514,7 @@ export function QueryView() {
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
           : err?.message || "실행이 실패했습니다."
       setError(message)
+      updateActiveTab({ status: "error", error: message })
       setMessages(prev => [
         ...prev,
         {
@@ -1247,6 +1528,65 @@ export function QueryView() {
       setIsLoading(false)
     }
   }
+
+  useEffect(() => {
+    const runPendingDashboardQuery = async () => {
+      if (typeof window === "undefined") return
+      const raw = localStorage.getItem("ql_pending_dashboard_query")
+      if (!raw) return
+      localStorage.removeItem("ql_pending_dashboard_query")
+
+      let parsed: { question?: string; sql?: string } | null = null
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        return
+      }
+      const sqlText = String(parsed?.sql || "").trim()
+      if (!sqlText) return
+
+      const questionText = String(parsed?.question || "").trim() || "대시보드 저장 쿼리"
+      const tab = createResultTab(questionText)
+      tab.sql = sqlText
+      tab.editedSql = sqlText
+      tab.showSqlPanel = true
+      setResultTabs((prev) => [tab, ...prev])
+      setActiveTabId(tab.id)
+      setShowResults(true)
+      setIsLoading(true)
+      setError(null)
+      setBoardMessage(null)
+      setLastQuestion(questionText)
+      setSuggestedQuestions([])
+
+      try {
+        await executeAdvancedSql({
+          sql: sqlText,
+          questionForSuggestions: questionText,
+          addAssistantMessage: true,
+          tabId: tab.id,
+        })
+      } catch (err: any) {
+        const message =
+          err?.name === "AbortError"
+            ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+            : err?.message || "실행이 실패했습니다."
+        setError(message)
+        updateTab(tab.id, { status: "error", error: message })
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    runPendingDashboardQuery()
+    const onOpenQueryView = () => {
+      void runPendingDashboardQuery()
+    }
+    window.addEventListener("ql-open-query-view", onOpenQueryView)
+    return () => {
+      window.removeEventListener("ql-open-query-view", onOpenQueryView)
+    }
+  }, [])
 
   const handleCopySql = async () => {
     if (!displaySql) return
@@ -1296,11 +1636,27 @@ export function QueryView() {
     setLastQuestion("")
     setSuggestedQuestions([])
     setError(null)
+    setResultTabs([])
+    setActiveTabId("")
     fetch(apiUrl("/chat/history"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user: chatHistoryUser, state: null })
     }).catch(() => {})
+  }
+
+  const handleCloseTab = (tabId: string) => {
+    setResultTabs((prev) => {
+      const next = prev.filter((tab) => tab.id !== tabId)
+      if (activeTabId === tabId) {
+        const fallback = next[0]
+        setActiveTabId(fallback?.id || "")
+        if (!fallback) {
+          setShowResults(false)
+        }
+      }
+      return next
+    })
   }
 
   const validation = (() => {
@@ -1477,18 +1833,6 @@ export function QueryView() {
 
           {/* Input */}
           <div className="p-4 border-t border-border">
-            <div className="mb-2 flex justify-end">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 gap-1"
-                onClick={handleResetConversation}
-                disabled={isLoading || !hasConversation}
-              >
-                <Trash2 className="w-3 h-3" />
-                대화 초기화
-              </Button>
-            </div>
             <div className="flex gap-2">
               <Textarea
                 placeholder="자연어로 질문하세요..."
@@ -1541,12 +1885,52 @@ export function QueryView() {
             style={resultsPanelStyle}
           >
             <div className="flex-1 overflow-y-auto p-4 pb-6 space-y-4">
+              {resultTabs.length > 0 && (
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {resultTabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTabId(tab.id)}
+                      className={cn(
+                        "inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs whitespace-nowrap",
+                        activeTabId === tab.id ? "bg-secondary border-primary/30" : "bg-background"
+                      )}
+                    >
+                      <span className="max-w-[180px] truncate">{tab.question || "새 질문"}</span>
+                      <span
+                        className={cn(
+                          "inline-block h-2 w-2 rounded-full",
+                          tab.status === "pending" && "bg-yellow-500",
+                          tab.status === "success" && "bg-primary",
+                          tab.status === "error" && "bg-destructive"
+                        )}
+                      />
+                      <span
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleCloseTab(tab.id)
+                        }}
+                        className="text-muted-foreground hover:text-foreground"
+                        role="button"
+                        aria-label="탭 닫기"
+                      >
+                        ×
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   variant={showSqlPanel ? "secondary" : "outline"}
                   size="sm"
                   className="h-7"
-                  onClick={() => setShowSqlPanel((prev) => !prev)}
+                  onClick={() => {
+                    const next = !showSqlPanel
+                    setShowSqlPanel(next)
+                    updateActiveTab({ showSqlPanel: next })
+                  }}
                 >
                   {showSqlPanel ? "SQL 숨기기" : "SQL 보기"}
                 </Button>
@@ -1554,9 +1938,23 @@ export function QueryView() {
                   variant={showQueryResultPanel ? "secondary" : "outline"}
                   size="sm"
                   className="h-7"
-                  onClick={() => setShowQueryResultPanel((prev) => !prev)}
+                  onClick={() => {
+                    const next = !showQueryResultPanel
+                    setShowQueryResultPanel(next)
+                    updateActiveTab({ showQueryResultPanel: next })
+                  }}
                 >
                   {showQueryResultPanel ? "쿼리 결과 숨기기" : "쿼리 결과 보기"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1"
+                  onClick={openSaveDialog}
+                  disabled={boardSaving || (!displaySql && !currentSql)}
+                >
+                  <BookmarkPlus className="w-3 h-3" />
+                  저장하기
                 </Button>
                 <Button
                   variant="ghost"
@@ -1628,7 +2026,16 @@ export function QueryView() {
                         <Copy className="w-3 h-3" />
                         복사
                       </Button>
-                      <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={() => setIsEditing(!isEditing)}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1"
+                        onClick={() => {
+                          const next = !isEditing
+                          setIsEditing(next)
+                          updateActiveTab({ isEditing: next })
+                        }}
+                      >
                         {isEditing ? <Eye className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
                         {isEditing ? "미리보기" : "편집"}
                       </Button>
@@ -1640,7 +2047,10 @@ export function QueryView() {
                     <div className="space-y-3">
                       <Textarea
                         value={editedSql}
-                        onChange={(e) => setEditedSql(e.target.value)}
+                        onChange={(e) => {
+                          setEditedSql(e.target.value)
+                          updateActiveTab({ editedSql: e.target.value })
+                        }}
                         className="font-mono text-xs min-h-[200px] bg-secondary/50"
                       />
                       <div className="flex items-center gap-2">
@@ -1648,7 +2058,14 @@ export function QueryView() {
                           {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
                           검증 후 실행
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => setEditedSql(currentSql)}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setEditedSql(currentSql)
+                            updateActiveTab({ editedSql: currentSql })
+                          }}
+                        >
                           <RefreshCw className="w-3 h-3 mr-1" />
                           초기화
                         </Button>
@@ -1706,7 +2123,7 @@ export function QueryView() {
                         variant="outline"
                         size="sm"
                         className="h-7 gap-1"
-                        onClick={handleSaveToDashboard}
+                        onClick={openSaveDialog}
                         disabled={boardSaving || (!displaySql && !currentSql)}
                       >
                         <BookmarkPlus className="w-3 h-3" />
@@ -1998,6 +2415,89 @@ export function QueryView() {
           </div>
         )}
       </div>
+
+      <Dialog open={isSaveDialogOpen} onOpenChange={setIsSaveDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>결과 보드에 저장</DialogTitle>
+            <DialogDescription>저장 이름과 폴더를 선택하세요.</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">저장 이름</label>
+              <Input
+                value={saveTitle}
+                onChange={(e) => setSaveTitle(e.target.value)}
+                placeholder="예: 성별 입원 건수 비교"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">저장 폴더</label>
+              <Select
+                value={saveFolderMode}
+                onValueChange={(value) => setSaveFolderMode(value as "existing" | "new")}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="폴더 방식 선택" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="existing">기존 폴더 선택</SelectItem>
+                  <SelectItem value="new">새 폴더 만들기</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {saveFolderMode === "existing" ? (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">기존 폴더</label>
+                <Select value={saveFolderId || undefined} onValueChange={setSaveFolderId} disabled={saveFoldersLoading}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={saveFoldersLoading ? "폴더 불러오는 중..." : "폴더 선택"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {saveFolderOptions.length ? (
+                      saveFolderOptions.map((folder) => (
+                        <SelectItem key={folder.id} value={folder.id}>
+                          {folder.name}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="__none__" disabled>
+                        폴더가 없습니다
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">새 폴더 이름</label>
+                <Input
+                  value={saveNewFolderName}
+                  onChange={(e) => setSaveNewFolderName(e.target.value)}
+                  placeholder="예: 응급실 분석"
+                />
+              </div>
+            )}
+
+            {boardMessage && (
+              <div className="text-xs text-muted-foreground">{boardMessage}</div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setIsSaveDialogOpen(false)} disabled={boardSaving}>
+              취소
+            </Button>
+            <Button onClick={handleSaveToDashboard} disabled={boardSaving}>
+              {boardSaving ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+              저장
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

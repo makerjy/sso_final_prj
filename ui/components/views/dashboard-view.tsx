@@ -643,6 +643,18 @@ export function DashboardView() {
     setIsFolderDialogOpen(true)
   }
 
+  const handleRunQuery = (query: SavedQuery) => {
+    if (typeof window === "undefined") return
+    const payload = {
+      question: (query.title || "").trim(),
+      sql: (query.query || "").trim(),
+      description: (query.description || "").trim(),
+      ts: Date.now(),
+    }
+    localStorage.setItem("ql_pending_dashboard_query", JSON.stringify(payload))
+    window.dispatchEvent(new Event("ql-open-query-view"))
+  }
+
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 w-full max-w-none">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -722,6 +734,7 @@ export function DashboardView() {
                     folderName={folderMap.get(query.folderId || "")?.name || query.category || "기타"}
                     folders={folders}
                     onMoveToFolder={moveQueryToFolder}
+                    onRun={handleRunQuery}
                     onTogglePin={togglePin}
                     onDelete={handleDelete}
                     onDuplicate={handleDuplicate}
@@ -1020,6 +1033,7 @@ interface DashboardQueryRowProps {
   folderName: string
   folders: SavedFolder[]
   onMoveToFolder: (queryId: string, folderId: string) => void
+  onRun: (query: SavedQuery) => void
   onTogglePin: (id: string) => void
   onDelete: (id: string) => void
   onDuplicate: (id: string) => void
@@ -1032,6 +1046,7 @@ function DashboardQueryRow({
   folderName,
   folders,
   onMoveToFolder,
+  onRun,
   onTogglePin,
   onDelete,
   onDuplicate,
@@ -1098,7 +1113,7 @@ function DashboardQueryRow({
       </div>
 
       <div className="flex items-center justify-end gap-1">
-        <Button size="sm" variant="ghost" className="h-8 px-2 text-xs">
+        <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => onRun(query)}>
           <Play className="w-3 h-3 mr-1" />
           실행
         </Button>

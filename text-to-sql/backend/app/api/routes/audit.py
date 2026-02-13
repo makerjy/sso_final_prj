@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import get_settings
-from app.services.logging_store.store import read_events
+from app.services.logging_store.store import read_events, write_events
 
 
 router = APIRouter()
@@ -67,6 +67,12 @@ def _normalize_metrics(items: Any) -> list[dict[str, str]]:
     return normalized
 
 
+def _build_log_uid(event: dict[str, Any], line_no: int, fallback_id: int) -> str:
+    ts = _safe_int(event.get("ts") or 0)
+    base_id = str(event.get("id") or event.get("qid") or f"audit-{fallback_id}")
+    return f"{ts}:{line_no}:{base_id}"
+
+
 def _event_to_log(event: dict[str, Any], fallback_id: int) -> dict[str, Any]:
     ts = _safe_int(event.get("ts") or 0)
     user = event.get("user") if isinstance(event.get("user"), dict) else {}
@@ -78,8 +84,14 @@ def _event_to_log(event: dict[str, Any], fallback_id: int) -> dict[str, Any]:
     duration_ms = event.get("duration_ms")
     rows_returned = _safe_int(event.get("rows_returned") or 0)
 
+    audit_no = _safe_int(event.get("_audit_no"), fallback_id)
+    base_id = str(event.get("id") or event.get("qid") or f"audit-{audit_no}")
+    line_no = _safe_int(event.get("_line_no"), fallback_id)
+    log_uid = _build_log_uid(event, line_no, audit_no)
+
     log = {
-        "id": str(event.get("id") or event.get("qid") or f"audit-{fallback_id}"),
+        "id": log_uid,
+        "baseId": base_id,
         "timestamp": _format_ts(ts),
         "ts": ts,
         "user": {"name": user_name, "role": user_role},
@@ -108,7 +120,15 @@ def _event_to_log(event: dict[str, Any], fallback_id: int) -> dict[str, Any]:
 def audit_logs(limit: int = Query(200, ge=1, le=2000)):
     settings = get_settings()
     events = read_events(settings.events_log_path)
-    audit_events = [event for event in events if event.get("type") == "audit"]
+    audit_events: list[dict[str, Any]] = []
+    audit_no = 1
+    for idx, event in enumerate(events):
+        if event.get("type") == "audit":
+            item = dict(event)
+            item["_line_no"] = idx
+            item["_audit_no"] = audit_no
+            audit_events.append(item)
+            audit_no += 1
 
     audit_events.sort(key=lambda item: _safe_int(item.get("ts") or 0), reverse=True)
 
@@ -145,3 +165,26 @@ def audit_logs(limit: int = Query(200, ge=1, le=2000)):
             "success_rate": success_rate,
         },
     }
+
+
+@router.delete("/logs/{log_id}")
+def delete_audit_log(log_id: str):
+    settings = get_settings()
+    events = read_events(settings.events_log_path)
+    target_line: int | None = None
+    fallback_id = 1
+    for line_no, event in enumerate(events):
+        if event.get("type") != "audit":
+            continue
+        candidate_uid = _build_log_uid(event, line_no, fallback_id)
+        if candidate_uid == log_id:
+            target_line = line_no
+            break
+        fallback_id += 1
+
+    if target_line is None or target_line < 0 or target_line >= len(events):
+        raise HTTPException(status_code=404, detail="Audit log not found")
+
+    next_events = [event for i, event in enumerate(events) if i != target_line]
+    write_events(settings.events_log_path, next_events)
+    return {"ok": True}

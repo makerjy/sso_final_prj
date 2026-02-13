@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
 from typing import Any
+
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.services.runtime.state_store import get_state_store
@@ -49,6 +50,12 @@ class DashboardPayload(BaseModel):
     folders: list[DashboardFolder] | None = None
 
 
+class SaveQueryPayload(BaseModel):
+    question: str
+    sql: str
+    metadata: dict[str, Any] | None = None
+
+
 @router.get("/queries")
 def get_queries():
     store = get_state_store()
@@ -85,5 +92,55 @@ def save_queries(payload: DashboardPayload):
 
     next_queries = queries if payload.queries is not None else existing_queries
     next_folders = folders if payload.folders is not None else existing_folders
+    store.set("dashboard::queries", {"queries": next_queries, "folders": next_folders})
+    return {"ok": True, "count": len(next_queries), "folders": len(next_folders)}
+
+
+@router.post("/saveQuery")
+def save_query(payload: SaveQueryPayload):
+    store = get_state_store()
+    if not store.enabled:
+        return {"ok": False, "detail": "MongoDB is not configured"}
+
+    existing = store.get("dashboard::queries") or {}
+    existing_queries = existing.get("queries", []) if isinstance(existing, dict) else []
+    existing_folders = existing.get("folders", []) if isinstance(existing, dict) else []
+
+    metadata = payload.metadata or {}
+    entry = metadata.get("entry") if isinstance(metadata, dict) else None
+    new_folder = metadata.get("new_folder") if isinstance(metadata, dict) else None
+    if not isinstance(entry, dict):
+        entry = {
+            "id": f"dashboard-{len(existing_queries) + 1}",
+            "title": payload.question,
+            "description": "Query result summary",
+            "query": payload.sql,
+            "lastRun": "just now",
+            "isPinned": True,
+            "category": "all",
+            "metrics": [
+                {"label": "rows", "value": str(metadata.get("row_count", 0))},
+                {"label": "columns", "value": str(metadata.get("column_count", 0))},
+            ],
+            "chartType": "bar",
+        }
+
+    next_folders = list(existing_folders)
+    if isinstance(new_folder, dict):
+        folder_id = str(new_folder.get("id", "")).strip()
+        folder_name = str(new_folder.get("name", "")).strip()
+        if folder_id and folder_name:
+            exists = any(str(item.get("id", "")).strip() == folder_id for item in next_folders if isinstance(item, dict))
+            if not exists:
+                next_folders.append(
+                    {
+                        "id": folder_id,
+                        "name": folder_name,
+                        "tone": str(new_folder.get("tone", "")).strip() or None,
+                        "createdAt": str(new_folder.get("createdAt", "")).strip() or None,
+                    }
+                )
+
+    next_queries = [entry, *existing_queries]
     store.set("dashboard::queries", {"queries": next_queries, "folders": next_folders})
     return {"ok": True, "count": len(next_queries), "folders": len(next_folders)}
