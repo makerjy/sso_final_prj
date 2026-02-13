@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from typing import Any
+from pathlib import Path
 
 from fastapi import HTTPException
 
@@ -35,6 +36,18 @@ def _init_oracle_client() -> None:
     lib_dir = os.getenv("ORACLE_LIB_DIR", "").strip()
     config_dir = os.getenv("ORACLE_TNS_ADMIN", "").strip()
     if not lib_dir:
+        _CLIENT_INIT = True
+        return
+    lib_path = Path(lib_dir)
+    if not lib_path.exists():
+        _CLIENT_INIT = True
+        return
+    # If client libs are missing, keep running in thin mode.
+    has_client_lib = any(
+        next(lib_path.glob(pattern), None) is not None
+        for pattern in ("libclntsh.so*", "oci.dll", "libclntsh.dylib")
+    )
+    if not has_client_lib:
         _CLIENT_INIT = True
         return
     with _CLIENT_LOCK:
