@@ -8,6 +8,17 @@ var/
 !var/metadata/
 !var/metadata/sql_templates.jsonl
 var/mongo/
-oracle/
 .env
 .env copy.example
+
+# Oracle local binaries and sensitive files
+oracle/META-INF/
+oracle/instantclient_*/
+oracle/wallet/
+oracle/**/tnsnames.ora
+oracle/**/sqlnet.ora
+oracle/**/*.pem
+oracle/**/*.key
+oracle/**/*.p12
+oracle/**/*.sso
+*:Zone.Identifier
