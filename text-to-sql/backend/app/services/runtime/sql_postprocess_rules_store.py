@@ -10,6 +10,9 @@ _RULES_CACHE_MTIME: float = -1.0
 _RULES_CACHE: dict[str, Any] = {}
 
 _DEFAULT_RULES: dict[str, Any] = {
+    "execution": {
+        "mode": "conservative",
+    },
     "schema_aliases": {
         "table_aliases": {},
         "column_aliases": {},
@@ -20,22 +23,48 @@ _DEFAULT_RULES: dict[str, Any] = {
         "icd_like_template": "{alias}.ICD_CODE LIKE '{prefix}%'",
         "join_operator": " OR ",
     },
+    "procedure_rewrite": {
+        "enabled": True,
+        "table_name": "PROCEDURES_ICD",
+        "icd_like_template": "{alias}.ICD_CODE LIKE '{prefix}%'",
+        "join_operator": " OR ",
+    },
     "icd_version_inference": {
         "enabled": True,
-        "table_name": "DIAGNOSES_ICD",
+        "table_names": ["DIAGNOSES_ICD", "PROCEDURES_ICD"],
         "version_column": "ICD_VERSION",
         "letter_prefix_version": 10,
         "digit_prefix_version": 9,
+        "prefix_version_overrides": {},
         "predicate_template": "({version_col} = {version} AND {code_expr} LIKE '{prefix}%')",
     },
     "mortality_rewrite": {
         "enabled": True,
-        "join_table": "DIAGNOSES_ICD",
+        "join_tables": ["DIAGNOSES_ICD", "PROCEDURES_ICD"],
         "admissions_table": "ADMISSIONS",
         "outcome_column": "HOSPITAL_EXPIRE_FLAG",
         "key_column": "HADM_ID",
         "numerator_template": "COUNT(DISTINCT CASE WHEN {expire_ref} = 1 THEN {key_ref} END)",
         "denominator_template": "NULLIF(COUNT(DISTINCT {key_ref}), 0)",
+    },
+    "time_window_rewrite": {
+        "enabled": True,
+        "death_anchor_column": "DEATHTIME",
+        "from_column": "DISCHTIME",
+        "to_column": "ADMITTIME",
+        "exclude_question_keywords": ["퇴원 후", "퇴원후", "after discharge", "post-discharge"],
+    },
+    "admissions_icu_alignment": {
+        "enabled": True,
+        "admissions_table": "ADMISSIONS",
+        "icustays_table": "ICUSTAYS",
+    },
+    "label_intent_rewrite": {
+        "enabled": True,
+        "use_metadata_profiles": True,
+        "max_metadata_profiles": 4,
+        "min_metadata_score": 1,
+        "profiles": [],
     },
 }
 
@@ -85,4 +114,3 @@ def load_sql_postprocess_rules() -> dict[str, Any]:
     _RULES_CACHE = _deep_merge(_DEFAULT_RULES, override)
     _RULES_CACHE_MTIME = mtime
     return _RULES_CACHE
-

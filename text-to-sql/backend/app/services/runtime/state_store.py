@@ -4,8 +4,14 @@ from dataclasses import dataclass
 import time
 from typing import Any
 
-from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+try:
+    from pymongo import MongoClient
+    from pymongo.errors import PyMongoError
+except Exception:  # pragma: no cover
+    MongoClient = None  # type: ignore[assignment]
+
+    class PyMongoError(Exception):
+        pass
 
 from app.core.config import get_settings
 
@@ -13,12 +19,12 @@ from app.core.config import get_settings
 @dataclass
 class AppStateStore:
     collection_name: str = "app_state"
-    _client: MongoClient | None = None
+    _client: Any | None = None
     _collection: Any | None = None
 
     def __post_init__(self) -> None:
         settings = get_settings()
-        if not settings.mongo_uri:
+        if not settings.mongo_uri or MongoClient is None:
             return
         self._client = MongoClient(settings.mongo_uri, serverSelectionTimeoutMS=2000)
         database = self._client[settings.mongo_db]

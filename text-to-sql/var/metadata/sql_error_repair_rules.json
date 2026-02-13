@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "max_rules": 200,
+  "rules": [
+    {
+      "created_at": 1770880451,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "d1743f157c2312b8053212cf48dd26f4a8ab310813289e0de4f4f1f3d76f5005",
+      "failed_sql_sample": "SELECT a.ADMISSION_YEAR, ROUND(100 * SUM(CASE WHEN surgery_count >= 2 THEN 1 ELSE 0 END) / COUNT(*), 2) AS reoperation_rate_pct FROM ( SELECT a.HADM_ID, EXTRACT(YEAR FROM a.ADMITTIME) AS ADMISSION_YEAR, COUNT(DISTINCT p.ORDERID) AS surgery_count FROM ADMISSIONS a JOIN PROCEDUREEVENTS p ON a.HADM_ID = p.HADM_ID WHERE a.ADMISSION_TYPE = 'SURGICAL SAME DAY ADMISSION' GROUP BY a.HADM_ID, EXTRACT(YEAR FROM a.ADMITTIME) ) surgery_counts GROUP BY a.ADMISSION_YEAR",
+      "fixed_sql": "SELECT ADMISSION_YEAR, ROUND(100 * SUM(CASE WHEN surgery_count >= 2 THEN 1 ELSE 0 END) / COUNT(*), 2) AS reoperation_rate_pct FROM ( SELECT a.HADM_ID, EXTRACT(YEAR FROM a.ADMITTIME) AS ADMISSION_YEAR, COUNT(DISTINCT p.ORDERID) AS surgery_count FROM ADMISSIONS a JOIN PROCEDUREEVENTS p ON a.HADM_ID = p.HADM_ID WHERE a.ADMISSION_TYPE = 'SURGICAL SAME DAY ADMISSION' GROUP BY a.HADM_ID, EXTRACT(YEAR FROM a.ADMITTIME) ) surgery_counts GROUP BY ADMISSION_YEAR",
+      "fixed_sql_hash": "5df5eda96b2b264edd907ac07d836523e117e54f1f1903b83630d46841ca1ffb",
+      "hit_count": 0,
+      "id": "6422a5e6698444c582094492470f1e44",
+      "last_used_at": 1770880451,
+      "resolution_notes": [
+        "table:admission->ADMISSIONS",
+        "column:admission_type->ADMISSION_TYPE",
+        "column:hadm_id->HADM_ID",
+        "unknown_categorical_equals_to_known_values"
+      ],
+      "success_count": 1,
+      "updated_at": 1770880451
+    }
+  ]
+}

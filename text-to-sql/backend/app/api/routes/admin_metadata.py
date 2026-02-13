@@ -94,6 +94,8 @@ def rag_status():
         "join_templates_docs": _count_jsonl(base / "join_templates.jsonl") + _count_jsonl(base / "sql_templates.jsonl"),
         "glossary_docs": _count_jsonl(base / "glossary_docs.jsonl"),
         "diagnosis_map_docs": _count_jsonl(base / "diagnosis_icd_map.jsonl"),
+        "procedure_map_docs": _count_jsonl(base / "procedure_icd_map.jsonl"),
+        "label_intent_docs": _count_jsonl(base / "label_intent_profiles.jsonl"),
         "column_value_docs": len(load_column_value_rows()),
     }
 

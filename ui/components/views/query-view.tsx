@@ -76,6 +76,12 @@ interface OneShotPayload {
   mode: "demo" | "advanced" | "clarify"
   question: string
   result?: DemoResult
+  assumptions?: {
+    applied?: boolean
+    period?: string
+    cohort?: string
+    message?: string
+  } | null
   risk?: { risk?: number; intent?: string }
   policy?: PolicyResult | null
   draft?: { final_sql?: string }
@@ -162,6 +168,14 @@ const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | n
           : [],
       }
     : undefined
+  const assumptions = payload.assumptions
+    ? {
+        applied: Boolean(payload.assumptions.applied),
+        period: payload.assumptions.period,
+        cohort: payload.assumptions.cohort,
+        message: payload.assumptions.message,
+      }
+    : undefined
   const clarification = payload.clarification
     ? {
         reason: payload.clarification.reason,
@@ -180,6 +194,7 @@ const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | n
       mode: payload.mode,
       question: payload.question,
       result,
+      assumptions,
       risk: payload.risk,
       policy,
       draft,
@@ -647,13 +662,20 @@ export function QueryView() {
       if (data.payload.result?.source) parts.push(`데모 캐시(source: ${data.payload.result.source}) 기반입니다.`)
       return parts.join(" ")
     }
+    const assumptionMessage =
+      data.payload.assumptions?.applied && data.payload.assumptions?.message
+        ? data.payload.assumptions.message.trim()
+        : ""
+    if (assumptionMessage) {
+      return assumptionMessage
+    }
     const base = "요청하신 내용을 바탕으로 SQL을 준비했어요. 실행하면 결과를 가져올게요."
     const payload = data.payload
     const localRiskScore = payload?.final?.risk_score ?? payload?.risk?.risk
     const localRiskIntent = payload?.risk?.intent
     const riskLabel =
       localRiskScore != null ? `위험도 ${localRiskScore}${localRiskIntent ? ` (${localRiskIntent})` : ""}로 평가됐어요.` : ""
-    return [base, riskLabel].filter(Boolean).join(" ")
+    return [assumptionMessage, base, riskLabel].filter(Boolean).join(" ")
   }
 
   useEffect(() => {
@@ -848,7 +870,7 @@ export function QueryView() {
           qid: data.qid,
           sql: generatedSql,
           questionForSuggestions: effectiveQuestionForSuggestions,
-          addAssistantMessage: true,
+          addAssistantMessage: false,
         })
       }
     } catch (err: any) {

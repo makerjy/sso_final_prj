@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover
 class LLMClient:
     def __init__(self) -> None:
         settings = get_settings()
+        self._settings = settings
         if OpenAI is None:
             raise RuntimeError("openai library is not installed")
         self.client = OpenAI(
@@ -27,6 +28,7 @@ class LLMClient:
             model=model,
             messages=messages,
             max_tokens=max_tokens,
+            temperature=self._settings.llm_temperature,
         )
         content = response.choices[0].message.content or ""
         usage = {

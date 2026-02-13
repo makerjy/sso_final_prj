@@ -39,12 +39,37 @@ def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
 
     executed_both = counts["match"] + counts["mismatch"]
     accuracy = (counts["match"] / executed_both) if executed_both else 0.0
+    exec_success_rate = (executed_both / total) if total else 0.0
+
+    same_rows = 0
+    same_cols = 0
+    alias_only_mismatch = 0
+    for item in items:
+        status = item.get("status")
+        if status not in {"match", "mismatch"}:
+            continue
+        compare = item.get("compare") or {}
+        rows_equal = bool(compare.get("same_rows"))
+        cols_equal = bool(compare.get("same_cols"))
+        if rows_equal:
+            same_rows += 1
+        if cols_equal:
+            same_cols += 1
+        if status == "mismatch" and rows_equal and not cols_equal:
+            alias_only_mismatch += 1
+
+    row_accuracy = (same_rows / executed_both) if executed_both else 0.0
+    col_accuracy = (same_cols / executed_both) if executed_both else 0.0
 
     return {
         "total": total,
         **counts,
         "executed_both": executed_both,
         "accuracy": round(accuracy, 4),
+        "exec_success_rate": round(exec_success_rate, 4),
+        "row_accuracy": round(row_accuracy, 4),
+        "col_accuracy": round(col_accuracy, 4),
+        "alias_only_mismatch": alias_only_mismatch,
     }
 
 

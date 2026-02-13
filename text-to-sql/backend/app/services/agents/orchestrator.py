@@ -11,7 +11,8 @@ from app.core.config import get_settings
 from app.services.agents.clarifier import evaluate_question_clarity
 from app.services.agents.sql_engineer import generate_sql
 from app.services.agents.sql_expert import review_sql
-from app.services.agents.sql_postprocess import postprocess_sql
+from app.services.agents.sql_planner import plan_query_intent
+from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
 from app.services.agents.translator import contains_korean, translate_to_english
 from app.services.cost_tracker import get_cost_tracker
 from app.services.policy.gate import precheck_sql
@@ -92,6 +93,93 @@ def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
     return items
 
 
+_QUESTION_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[가-힣]+")
+_PLANNER_COMPLEX_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(연도별|월별|주별|일별|분기별|추이|시계열|사분위|백분위|비교|대비|전후|차이|에 따른|별로|그룹별|하위군)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(vs|versus|compared?|comparison|trend|over\s+time|yearly|monthly|weekly|daily|quartile|q[1-4]|decile|percentile|stratif|subgroup)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(수술\s*후|입원\s*후|\d+\s*(일|주|개월|월|년)\s*이내|after\s+\d+\s*(day|week|month|year)|within\s+\d+\s*(day|week|month|year)|between\s+\S+\s+and\s+\S+)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _count_question_tokens(*texts: str | None) -> int:
+    total = 0
+    for text in texts:
+        if not text:
+            continue
+        total += len(_QUESTION_TOKEN_RE.findall(text))
+    return total
+
+
+def _count_planner_complex_signals(*texts: str | None) -> int:
+    merged = " ".join(str(text).strip() for text in texts if str(text or "").strip())
+    if not merged:
+        return 0
+    return sum(1 for pattern in _PLANNER_COMPLEX_SIGNAL_PATTERNS if pattern.search(merged))
+
+
+def _decide_planner_usage(
+    settings: Any,
+    *,
+    question: str,
+    question_en: str | None,
+    risk_info: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    mode = str(getattr(settings, "planner_activation_mode", "complex_only") or "complex_only").strip().lower()
+    if not bool(getattr(settings, "planner_enabled", False)):
+        return False, {"enabled": False, "mode": mode, "reason": "planner_disabled"}
+    if mode in {"off", "false", "never", "disabled"}:
+        return False, {"enabled": False, "mode": mode, "reason": "activation_mode_off"}
+    if mode in {"always", "on", "all"}:
+        return True, {"enabled": True, "mode": mode, "reason": "activation_mode_always"}
+
+    # default: complex_only
+    mode = "complex_only"
+    token_count = _count_question_tokens(question, question_en)
+    signal_hits = _count_planner_complex_signals(question, question_en)
+    complexity_score = int(risk_info.get("complexity") or 0)
+    complexity_threshold = max(0, int(getattr(settings, "planner_complexity_threshold", 1)))
+    min_question_tokens = max(1, int(getattr(settings, "planner_min_question_tokens", 16)))
+
+    reasons: list[str] = []
+    if signal_hits > 0:
+        reasons.append("complex_signal")
+    if complexity_score >= complexity_threshold:
+        reasons.append("risk_complexity")
+    if token_count >= min_question_tokens:
+        reasons.append("long_question")
+
+    if reasons:
+        return True, {
+            "enabled": True,
+            "mode": mode,
+            "reason": ",".join(reasons),
+            "token_count": token_count,
+            "signal_hits": signal_hits,
+            "risk_complexity": complexity_score,
+            "complexity_threshold": complexity_threshold,
+            "min_question_tokens": min_question_tokens,
+        }
+    return False, {
+        "enabled": False,
+        "mode": mode,
+        "reason": "simple_query",
+        "token_count": token_count,
+        "signal_hits": signal_hits,
+        "risk_complexity": complexity_score,
+        "complexity_threshold": complexity_threshold,
+        "min_question_tokens": min_question_tokens,
+    }
+
+
 _ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_/-]*")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 _CLARIFICATION_SLOT_ORDER = ("period", "cohort", "comparison", "metric")
@@ -156,6 +244,58 @@ _METRIC_HINTS = (
 _TIME_GRAIN_PATTERN = re.compile(
     r"(연도별|월별|주별|일별|분기별|추이|시계열|by\s+year|by\s+month|by\s+week|by\s+day|yearly|monthly|weekly|daily|trend|over\s+time)",
     re.IGNORECASE,
+)
+_DEFINITION_AMBIGUITY_SIGNAL_KEYWORDS = (
+    "정의",
+    "기준",
+    "판정",
+    "분류",
+    "criterion",
+    "criteria",
+    "definition",
+    "define",
+    "rule",
+)
+_DEFINITION_AMBIGUITY_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "hypertension_definition",
+        "match_terms": ("고혈압", "hypertension", "htn"),
+        "criteria_terms": (
+            "i10",
+            "i11",
+            "i12",
+            "i13",
+            "i15",
+            "icd",
+            "진단코드",
+            "진단 코드",
+            "코드기반",
+            "코드 기반",
+            "항고혈압",
+            "복용",
+            "병력",
+            "comorbidity",
+            "history",
+            "위기 제외",
+            "hypertensive crisis",
+        ),
+        "reason_ko": "의학적 정의 기준이 여러 가지라 먼저 기준을 정해야 합니다.",
+        "question_ko": "‘고혈압’을 어떤 기준으로 볼까요?",
+        "options_ko": (
+            "진단 코드 기반 (I10-I15)",
+            "항고혈압제 복용 기준",
+            "입실 전 병력(comorbidity)",
+            "고혈압 위기 제외",
+        ),
+        "reason_en": "Multiple medical definitions are possible, so a definition criterion is required first.",
+        "question_en": "How should hypertension be defined?",
+        "options_en": (
+            "Diagnosis-code based (I10-I15)",
+            "Antihypertensive medication use",
+            "Pre-admission comorbidity history",
+            "Exclude hypertensive crisis",
+        ),
+    },
 )
 
 
@@ -278,6 +418,108 @@ def _has_time_grain_intent(text: str) -> bool:
     if not text:
         return False
     return bool(_TIME_GRAIN_PATTERN.search(text))
+
+
+def _contains_any_term(text: str, terms: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    compact = re.sub(r"\s+", "", lowered)
+    for term in terms:
+        token = str(term).strip().lower()
+        if not token:
+            continue
+        if token in lowered or token.replace(" ", "") in compact:
+            return True
+    return False
+
+
+def _detect_definition_ambiguity_rule(question: str) -> dict[str, Any] | None:
+    if not question.strip():
+        return None
+    for rule in _DEFINITION_AMBIGUITY_RULES:
+        match_terms = tuple(rule.get("match_terms") or ())
+        criteria_terms = tuple(rule.get("criteria_terms") or ())
+        if not _contains_any_term(question, match_terms):
+            continue
+        if _contains_any_term(question, criteria_terms):
+            continue
+        return rule
+    return None
+
+
+def _is_definition_clarification_signal(
+    *,
+    reason: str,
+    clarification_question: str,
+    options: list[str],
+    example_inputs: list[str],
+) -> bool:
+    merged = " ".join([reason, clarification_question, *options, *example_inputs]).strip()
+    if not merged:
+        return False
+    return _contains_any_term(merged, _DEFINITION_AMBIGUITY_SIGNAL_KEYWORDS)
+
+
+def _build_default_scope(
+    *,
+    base_question: str,
+    raw_answers: dict[str, str],
+) -> dict[str, Any]:
+    period_answer = raw_answers.get("period", "")
+    cohort_answer = raw_answers.get("cohort", "")
+
+    has_period_answer = bool(period_answer and _is_specific_slot_answer("period", period_answer))
+    has_cohort_answer = bool(cohort_answer and _is_specific_slot_answer("cohort", cohort_answer))
+    has_time_grain = _has_time_grain_intent(base_question)
+
+    defaults: dict[str, Any] = {"applied": False}
+    is_korean = contains_korean(base_question)
+
+    if not has_period_answer and not has_time_grain:
+        defaults["period"] = "전체 기간" if is_korean else "full period"
+    if not has_cohort_answer:
+        defaults["cohort"] = "전체 환자" if is_korean else "all patients"
+
+    if "period" in defaults or "cohort" in defaults:
+        defaults["applied"] = True
+        base = base_question.strip()
+        if is_korean:
+            defaults["message"] = (
+                f"전체 데이터에 대한 '{base}' 질문의 결과를 반환하였습니다."
+                if base
+                else "전체 데이터에 대한 질문의 결과를 반환하였습니다."
+            )
+        else:
+            defaults["message"] = (
+                f"Returned results for '{base}' on the full dataset."
+                if base
+                else "Returned results on the full dataset."
+            )
+    return defaults
+
+
+def _inject_default_scope_into_question(question: str, default_scope: dict[str, Any]) -> str:
+    if not bool(default_scope.get("applied", False)):
+        return question
+    period = str(default_scope.get("period") or "").strip()
+    cohort = str(default_scope.get("cohort") or "").strip()
+    if not period and not cohort:
+        return question
+
+    is_korean = contains_korean(question)
+    parts: list[str] = []
+    if period:
+        parts.append(f"{'기간' if is_korean else 'period'}: {period}")
+    if cohort:
+        parts.append(f"{'대상 환자' if is_korean else 'cohort'}: {cohort}")
+
+    if not parts:
+        return question
+
+    suffix = " / ".join(parts)
+    base = question.strip()
+    if suffix in base:
+        return base
+    return f"{base} ({suffix})" if base else suffix
 
 
 def _truncate_slot_answer(text: str, *, limit: int = 80) -> str:
@@ -525,8 +767,6 @@ def _infer_required_slots(
     asked_slots: set[str],
 ) -> list[str]:
     required = set(asked_slots)
-    # 기간은 항상 필수 슬롯으로 간주한다.
-    required.add("period")
     for text in [question, reason, clarification_question, *options, *example_inputs]:
         required.update(_extract_slots_from_text(text))
     if not required:
@@ -678,10 +918,9 @@ def _normalize_clarifier_payload(
     conversation: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     base_question, _, raw_answers = _collect_clarification_memory(question, conversation)
-    period_answer = raw_answers.get("period", "")
-    has_period_answer = bool(period_answer and _is_specific_slot_answer("period", period_answer))
-    has_time_grain = _has_time_grain_intent(base_question or question)
-    must_ask_period = not has_period_answer and not has_time_grain
+    resolved_question = base_question or question
+    default_scope = _build_default_scope(base_question=resolved_question, raw_answers=raw_answers)
+    ambiguity_rule = _detect_definition_ambiguity_rule(resolved_question)
 
     need_clarification = bool(payload.get("need_clarification"))
     refined_question = str(payload.get("refined_question") or "").strip()
@@ -694,6 +933,38 @@ def _normalize_clarifier_payload(
     example_inputs = _normalize_string_list(payload.get("example_inputs"), limit=3)
     known_answers: dict[str, str] = {}
 
+    if ambiguity_rule is not None:
+        if contains_korean(question):
+            options_ko = [str(item).strip() for item in ambiguity_rule.get("options_ko", ()) if str(item).strip()]
+            return {
+                "need_clarification": True,
+                "reason": str(ambiguity_rule.get("reason_ko") or "의학적 정의 기준이 모호합니다."),
+                "clarification_question": str(ambiguity_rule.get("question_ko") or "어떤 정의 기준으로 볼까요?"),
+                "options": options_ko[:5],
+                "example_inputs": options_ko[:3],
+                "known_answers": known_answers,
+                "refined_question": "",
+                "default_scope": {"applied": False},
+                "usage": payload.get("usage", {}),
+            }
+        options_en = [str(item).strip() for item in ambiguity_rule.get("options_en", ()) if str(item).strip()]
+        return {
+            "need_clarification": True,
+            "reason": str(
+                ambiguity_rule.get("reason_en")
+                or "Clinical definition ambiguity detected."
+            ),
+            "clarification_question": str(
+                ambiguity_rule.get("question_en") or "Which definition criterion should be used?"
+            ),
+            "options": options_en[:5],
+            "example_inputs": options_en[:3],
+            "known_answers": known_answers,
+            "refined_question": "",
+            "default_scope": {"applied": False},
+            "usage": payload.get("usage", {}),
+        }
+
     if contains_korean(question):
         reason = _strip_english_tokens_for_korean(reason)
         clarification_question = _strip_english_tokens_for_korean(clarification_question)
@@ -702,52 +973,43 @@ def _normalize_clarifier_payload(
         example_inputs = [_strip_english_tokens_for_korean(item) for item in example_inputs]
         example_inputs = [item for item in example_inputs if item]
 
-        default_reason, default_options, default_examples = _default_korean_clarification(question)
+    definition_signal = _is_definition_clarification_signal(
+        reason=reason,
+        clarification_question=clarification_question,
+        options=options,
+        example_inputs=example_inputs,
+    )
+    if need_clarification and not definition_signal:
+        need_clarification = False
+    if need_clarification:
         if not reason:
-            reason = default_reason
-        if not clarification_question:
-            clarification_question = "어떤 기준으로 범위를 좁힐까요?"
-        if not options:
-            options = default_options
-        if not example_inputs:
-            example_inputs = default_examples
-        if need_clarification or must_ask_period:
-            (
-                clarification_question,
-                options,
-                example_inputs,
-                known_answers,
-                required_slots,
-                missing_slots,
-                base_question,
-            ) = _build_korean_consolidated_clarification(
-                question=question,
-                reason=reason,
-                clarification_question=clarification_question,
-                options=options,
-                example_inputs=example_inputs,
-                conversation=conversation,
+            reason = (
+                "의학적 정의 기준이 모호합니다."
+                if contains_korean(question)
+                else "Clinical definition is ambiguous."
             )
-            if "period" in missing_slots:
-                need_clarification = True
-                reason = _PERIOD_ONLY_REASON_KO
-            if not missing_slots:
-                need_clarification = False
-                if not refined_question:
-                    refined_question = _compose_refined_question(
-                        base_question=base_question,
-                        required_slots=required_slots,
-                        known_answers=known_answers,
-                    )
-                clarification_question = ""
-                options = []
-                example_inputs = []
-    elif must_ask_period:
-        need_clarification = True
-        reason = reason or _PERIOD_ONLY_REASON_EN
-        clarification_question = _PERIOD_ONLY_QUESTION_EN
-        options = ["Last 30 days", "Last 12 months", _CURRENT_CALENDAR_YEAR_EN]
-        example_inputs = ["Use the last 30 days", f"Use {_CURRENT_CALENDAR_YEAR_EN.lower()}"]
+        if not clarification_question:
+            clarification_question = (
+                "어떤 정의 기준으로 볼까요?"
+                if contains_korean(question)
+                else "Which definition criterion should be used?"
+            )
+        if not options:
+            options = (
+                ["진단 코드 기준", "약물 기준", "병력 기준"]
+                if contains_korean(question)
+                else ["Diagnosis-code based", "Medication based", "History based"]
+            )
+        if not example_inputs:
+            example_inputs = options[:3]
+        default_scope = {"applied": False}
+    else:
+        reason = ""
+        clarification_question = ""
+        options = []
+        example_inputs = []
+        if not refined_question:
+            refined_question = resolved_question
 
     return {
         "need_clarification": need_clarification,
@@ -757,6 +1019,7 @@ def _normalize_clarifier_payload(
         "example_inputs": example_inputs,
         "known_answers": known_answers,
         "refined_question": refined_question,
+        "default_scope": default_scope,
         "usage": payload.get("usage", {}),
     }
 
@@ -773,6 +1036,7 @@ def run_oneshot(
     settings = get_settings()
     original_question = question
     translated_question = None
+    scope_assumptions: dict[str, Any] = {"applied": False}
     use_translate = settings.translate_ko_to_en if translate is None else translate
     use_rag_multi = settings.rag_multi_query if rag_multi is None else rag_multi
 
@@ -814,52 +1078,97 @@ def run_oneshot(
                     "known_answers": clarity.get("known_answers", {}),
                 },
             }
-        if clarity.get("refined_question"):
-            original_question = clarity["refined_question"]
-            question = clarity["refined_question"]
-            if settings.demo_mode or settings.demo_cache_always:
-                cache = _load_demo_cache(settings.demo_cache_path)
-                cached = _lookup_demo_cache(cache, question)
-                if cached:
-                    return cached
+        scope_candidate = clarity.get("default_scope")
+        if isinstance(scope_candidate, dict):
+            scope_assumptions = scope_candidate
+
+        question_changed = False
+        refined = str(clarity.get("refined_question") or "").strip()
+        if refined:
+            original_question = refined
+            if question != refined:
+                question_changed = True
+            question = refined
+        if bool(scope_assumptions.get("applied", False)):
+            scoped_question = _inject_default_scope_into_question(question, scope_assumptions)
+            if scoped_question != question:
+                question_changed = True
+            question = scoped_question
+        if question_changed and (settings.demo_mode or settings.demo_cache_always):
+            cache = _load_demo_cache(settings.demo_cache_path)
+            cached = _lookup_demo_cache(cache, question)
+            if cached:
+                return cached
 
     if use_translate and contains_korean(question):
         try:
             translated_question, usage = translate_to_english(question)
             _add_llm_cost(usage, "translate")
-            if translated_question:
-                question = translated_question
-            else:
+            if not translated_question:
                 translated_question = None
         except Exception:
             translated_question = None
 
     if (settings.demo_mode or settings.demo_cache_always) and translated_question:
         cache = _load_demo_cache(settings.demo_cache_path)
-        cached = _lookup_demo_cache(cache, question)
+        cached = _lookup_demo_cache(cache, translated_question) or _lookup_demo_cache(cache, question)
         if cached:
             cached["question"] = original_question
-            cached["question_en"] = question
+            cached["question_en"] = translated_question
             return cached
 
-    risk_info = classify(question)
+    risk_info = classify(translated_question or question)
     if translated_question and use_rag_multi:
-        context = build_context_payload_multi([question, original_question])
+        context = build_context_payload_multi([question, translated_question])
+    elif translated_question:
+        context = build_context_payload(translated_question)
     else:
         context = build_context_payload(question)
+
+    planner_payload: dict[str, Any] | None = None
+    planner_intent: dict[str, Any] | None = None
+    use_planner, planner_decision = _decide_planner_usage(
+        settings,
+        question=question,
+        question_en=translated_question,
+        risk_info=risk_info,
+    )
+    if use_planner:
+        try:
+            planned = plan_query_intent(question, context, question_en=translated_question)
+            _add_llm_cost(planned.get("usage", {}), "plan")
+            intent = planned.get("intent")
+            if isinstance(intent, dict):
+                planner_payload = planned
+                planner_intent = intent
+        except Exception:
+            planner_payload = None
+            planner_intent = None
+            planner_decision = {**planner_decision, "fallback": "planner_failed"}
 
     attempt = 0
     last_error: Exception | None = None
     while attempt <= settings.max_retry_attempts:
         attempt += 1
         try:
-            engineer = generate_sql(question, context)
+            engineer = generate_sql(
+                question,
+                context,
+                question_en=translated_question,
+                planner_intent=planner_intent,
+            )
             # LLM 경고 문구는 사용하지 않도록 제거
             engineer.pop("warnings", None)
             final_payload = engineer
 
             if settings.expert_trigger_mode == "score" and risk_info["risk"] >= settings.expert_score_threshold:
-                expert = review_sql(question, context, engineer)
+                expert = review_sql(
+                    question,
+                    context,
+                    engineer,
+                    question_en=translated_question,
+                    planner_intent=planner_intent,
+                )
                 final_payload = expert
                 # LLM 경고 문구는 사용하지 않도록 제거
                 final_payload.pop("warnings", None)
@@ -869,10 +1178,18 @@ def run_oneshot(
 
             final_sql = final_payload.get("final_sql") or ""
             if final_sql:
-                final_sql, rules = postprocess_sql(question, final_sql)
+                profile, profile_reasons = recommend_postprocess_profile(
+                    question,
+                    final_sql,
+                    default_profile="relaxed",
+                )
+                final_sql, rules = postprocess_sql(question, final_sql, profile=profile)
                 if rules:
                     final_payload["final_sql"] = final_sql
                     final_payload["postprocess"] = rules
+                if profile_reasons:
+                    final_payload["postprocess_profile"] = profile
+                    final_payload["postprocess_profile_reasons"] = profile_reasons
 
             policy_result = None
             if not skip_policy and final_sql:
@@ -880,7 +1197,10 @@ def run_oneshot(
             return {
                 "mode": "advanced",
                 "question": original_question,
-                "question_en": question if translated_question else None,
+                "question_en": translated_question if translated_question else None,
+                "assumptions": scope_assumptions if scope_assumptions.get("applied") else None,
+                "planner": planner_payload,
+                "planner_decision": planner_decision,
                 "risk": risk_info,
                 "policy": policy_result,
                 "context": context,

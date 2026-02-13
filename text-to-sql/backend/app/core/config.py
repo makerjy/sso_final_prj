@@ -34,6 +34,15 @@ def _int(value: str | None, default: int) -> int:
         return default
 
 
+def _float(value: str | None, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def _str(value: str | None, default: str = "") -> str:
     if value is None:
         return default
@@ -63,6 +72,13 @@ class Settings:
     templates_per_query: int
     llm_max_output_tokens: int
     llm_timeout_sec: int
+    llm_temperature: float
+    clarifier_enabled: bool
+    planner_enabled: bool
+    planner_model: str
+    planner_activation_mode: str
+    planner_complexity_threshold: int
+    planner_min_question_tokens: int
     translate_ko_to_en: bool
     demo_cache_always: bool
 
@@ -73,6 +89,8 @@ class Settings:
     max_db_joins: int
     row_cap: int
     db_timeout_sec: int
+    sql_auto_repair_enabled: bool
+    sql_auto_repair_max_attempts: int
 
     oracle_dsn: str
     oracle_user: str
@@ -85,8 +103,14 @@ class Settings:
 
     rag_persist_dir: str
     rag_top_k: int
+    rag_embedding_provider: str
+    rag_embedding_model: str
+    rag_embedding_batch_size: int
     rag_embedding_dim: int
     rag_multi_query: bool
+    rag_hybrid_enabled: bool
+    rag_hybrid_candidates: int
+    rag_bm25_max_docs: int
     mongo_uri: str
     mongo_db: str
     mongo_collection: str
@@ -117,6 +141,13 @@ def load_settings() -> Settings:
         templates_per_query=_int(os.getenv("TEMPLATES_PER_QUERY"), 1),
         llm_max_output_tokens=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS"), 500),
         llm_timeout_sec=_int(os.getenv("LLM_TIMEOUT_SEC"), 30),
+        llm_temperature=_float(os.getenv("LLM_TEMPERATURE"), 0.0),
+        clarifier_enabled=_bool(os.getenv("CLARIFIER_ENABLED"), False),
+        planner_enabled=_bool(os.getenv("PLANNER_ENABLED"), True),
+        planner_model=_str(os.getenv("PLANNER_MODEL"), _str(os.getenv("EXPERT_MODEL"), "gpt-4o-mini")),
+        planner_activation_mode=_str(os.getenv("PLANNER_ACTIVATION_MODE"), "complex_only"),
+        planner_complexity_threshold=_int(os.getenv("PLANNER_COMPLEXITY_THRESHOLD"), 1),
+        planner_min_question_tokens=_int(os.getenv("PLANNER_MIN_QUESTION_TOKENS"), 16),
         translate_ko_to_en=_bool(os.getenv("TRANSLATE_KO_TO_EN"), True),
         demo_cache_always=_bool(os.getenv("DEMO_CACHE_ALWAYS"), False),
         max_retry_attempts=_int(os.getenv("MAX_RETRY_ATTEMPTS"), 1),
@@ -125,6 +156,8 @@ def load_settings() -> Settings:
         max_db_joins=_int(os.getenv("MAX_DB_JOINS"), 3),
         row_cap=_int(os.getenv("ROW_CAP"), 5000),
         db_timeout_sec=_int(os.getenv("DB_TIMEOUT_SEC"), 15),
+        sql_auto_repair_enabled=_bool(os.getenv("SQL_AUTO_REPAIR_ENABLED"), True),
+        sql_auto_repair_max_attempts=_int(os.getenv("SQL_AUTO_REPAIR_MAX_ATTEMPTS"), 1),
         oracle_dsn=_str(os.getenv("ORACLE_DSN"), ""),
         oracle_user=_str(os.getenv("ORACLE_USER"), ""),
         oracle_password=_str(os.getenv("ORACLE_PASSWORD"), ""),
@@ -135,8 +168,14 @@ def load_settings() -> Settings:
         oracle_pool_timeout_sec=_int(os.getenv("ORACLE_POOL_TIMEOUT_SEC"), 10),
         rag_persist_dir=_str(os.getenv("RAG_PERSIST_DIR"), "var/rag"),
         rag_top_k=_int(os.getenv("RAG_TOP_K"), 5),
+        rag_embedding_provider=_str(os.getenv("RAG_EMBEDDING_PROVIDER"), "openai"),
+        rag_embedding_model=_str(os.getenv("RAG_EMBEDDING_MODEL"), "text-embedding-3-small"),
+        rag_embedding_batch_size=_int(os.getenv("RAG_EMBEDDING_BATCH_SIZE"), 64),
         rag_embedding_dim=_int(os.getenv("RAG_EMBEDDING_DIM"), 128),
         rag_multi_query=_bool(os.getenv("RAG_MULTI_QUERY"), True),
+        rag_hybrid_enabled=_bool(os.getenv("RAG_HYBRID_ENABLED"), True),
+        rag_hybrid_candidates=_int(os.getenv("RAG_HYBRID_CANDIDATES"), 20),
+        rag_bm25_max_docs=_int(os.getenv("RAG_BM25_MAX_DOCS"), 1500),
         mongo_uri=_str(os.getenv("MONGO_URI"), ""),
         mongo_db=_str(os.getenv("MONGO_DB"), "text_to_sql"),
         mongo_collection=_str(os.getenv("MONGO_COLLECTION"), "rag_docs"),

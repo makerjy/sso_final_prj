@@ -11,6 +11,9 @@ _WRITE_KEYWORDS = re.compile(r"\b(delete|update|insert|merge|drop|alter|truncate
 _CTE_REF = re.compile(r"(?:with|,)\s*([A-Za-z0-9_]+)\s+as\s*\(", re.IGNORECASE)
 _AGG_FN_RE = re.compile(r"\b(count|avg|sum|min|max)\s*\(", re.IGNORECASE)
 _SQL_TOKEN_RE = re.compile(r'"[^"]+"|[A-Za-z_][A-Za-z0-9_.$#]*|[(),]')
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT_RE = re.compile(r"--[^\r\n]*")
+_SINGLE_QUOTED_LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
 
 _FROM_CLAUSE_END_KEYWORDS = {
     "where",
@@ -63,6 +66,13 @@ _WHERE_OPTIONAL_QUESTION_HINTS = (
 
 def _check(name: str, passed: bool, message: str) -> dict[str, str | bool]:
     return {"name": name, "passed": passed, "message": message}
+
+
+def _strip_literals_and_comments(sql: str) -> str:
+    # Avoid false positives (e.g., LIKE '%INSERT%') in write-keyword detection.
+    text = _BLOCK_COMMENT_RE.sub(" ", sql)
+    text = _LINE_COMMENT_RE.sub(" ", text)
+    return _SINGLE_QUOTED_LITERAL_RE.sub("''", text)
 
 
 def _table_ref_candidates(raw: str) -> list[str]:
@@ -181,7 +191,8 @@ def precheck_sql(sql: str, question: str | None = None) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="Empty SQL")
     checks: list[dict[str, str | bool]] = []
 
-    if _WRITE_KEYWORDS.search(text):
+    scan_text = _strip_literals_and_comments(text)
+    if _WRITE_KEYWORDS.search(scan_text):
         checks.append(_check("Read-only", False, "Write keyword detected"))
         raise HTTPException(status_code=403, detail="Write operations are not allowed")
     checks.append(_check("Read-only", True, "No write keyword detected"))

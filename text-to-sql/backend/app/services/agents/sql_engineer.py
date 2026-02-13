@@ -19,14 +19,25 @@ def _extract_json(text: str) -> dict[str, Any]:
     raise ValueError("LLM response is not valid JSON")
 
 
-def generate_sql(question: str, context: dict[str, Any]) -> dict[str, Any]:
+def generate_sql(
+    question: str,
+    context: dict[str, Any],
+    *,
+    question_en: str | None = None,
+    planner_intent: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
     client = LLMClient()
+    payload: dict[str, Any] = {"question": question, "context": context}
+    if question_en and question_en.strip() and question_en.strip() != question.strip():
+        payload["question_en"] = question_en.strip()
+    if isinstance(planner_intent, dict) and planner_intent:
+        payload["planner_intent"] = planner_intent
     messages = [
         {"role": "system", "content": ENGINEER_SYSTEM_PROMPT},
         {
             "role": "user",
-            "content": json.dumps({"question": question, "context": context}, ensure_ascii=True),
+            "content": json.dumps(payload, ensure_ascii=True),
         },
     ]
     response = client.chat(
