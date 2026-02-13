@@ -17,6 +17,15 @@ class ChartSpec(BaseModel):
     y: Optional[str] = None
     group: Optional[str] = None
     agg: Optional[str] = None
+    size: Optional[str] = None
+    animation_frame: Optional[str] = None
+    mode: Optional[str] = None
+    bar_mode: Optional[str] = None
+    orientation: Optional[str] = None
+    series_cols: Optional[List[str]] = None
+    title: Optional[str] = None
+    x_title: Optional[str] = None
+    y_title: Optional[str] = None
 
 
 # 입력: chart_spec, reason, figure_json, code, summary

@@ -187,8 +187,10 @@ def _pick_categorical_column(categorical_columns: Optional[List[str]]) -> str | 
 
 def _infer_intent(user_query: str) -> str:
     q = user_query.lower()
-    if any(k in q for k in ("추세", "trend", "변화", "over time", "시간")):
+    if any(k in q for k in ("추세", "trend", "변화", "over time", "시간", "월별", "연도별", "일별")):
         return "trend"
+    if any(k in q for k in ("scatter", "산점도", "bubble", "버블", "line+scatter", "line scatter")):
+        return "correlation"
     if any(k in q for k in ("분포", "distribution", "hist", "히스토")):
         return "distribution"
     if any(k in q for k in ("비교", "compare", "difference", "vs")):
@@ -198,6 +200,53 @@ def _infer_intent(user_query: str) -> str:
     if any(k in q for k in ("상관", "correlation", "관계")):
         return "correlation"
     return "overview"
+
+
+def _infer_chart_preference(user_query: str) -> str | None:
+    q = (user_query or "").lower()
+    if any(token in q for token in ("histogram", "hist", "히스토그램", "히스토")):
+        return "hist"
+    if any(
+        token in q
+        for token in (
+            "dynamic scatter",
+            "animated scatter",
+            "animation scatter",
+            "동적 산점도",
+            "애니메이션 산점도",
+            "버블",
+            "bubble",
+        )
+    ):
+        return "dynamic_scatter"
+    if any(
+        token in q
+        for token in (
+            "line+scatter",
+            "line scatter",
+            "line and scatter",
+            "lines+markers",
+            "라인 스캐터",
+            "선과 점",
+            "선+점",
+        )
+    ):
+        return "line_scatter"
+    if any(token in q for token in ("scatter plot", "scatter", "산점도")):
+        return "scatter"
+    if any(
+        token in q
+        for token in (
+            "line plot",
+            "line chart",
+            "line",
+            "라인 플롯",
+            "라인 차트",
+            "선 그래프",
+        )
+    ):
+        return "line"
+    return None
 
 
 def _infer_intent_from_glossary(user_query: str, retrieved_context: str | None) -> str | None:
@@ -310,12 +359,17 @@ def extract_intent(
     categorical_columns = column_roles.get("categorical", [])
 
     glossary_intent = _infer_intent_from_glossary(user_query, retrieved_context)
+    chart_preference = _infer_chart_preference(user_query)
 
     try:
         llm_result = _llm_extract_intent(user_query, df_schema, retrieved_context)
         analysis_intent = _normalize_intent(llm_result.analysis_intent)
         if glossary_intent and analysis_intent in ("summary", "overview"):
             analysis_intent = glossary_intent
+        if chart_preference == "line_scatter" and analysis_intent in ("summary", "overview"):
+            analysis_intent = "trend"
+        if chart_preference in ("scatter", "dynamic_scatter") and analysis_intent in ("summary", "overview"):
+            analysis_intent = "correlation"
         primary_outcome = (
             llm_result.y
             or llm_result.x
@@ -327,6 +381,7 @@ def extract_intent(
             group_var = None
         if analysis_intent == "trend" and group_var and time_var and group_var.lower() == time_var.lower():
             group_var = None
+        recommended_chart = (chart_preference or llm_result.recommended_chart or "").strip() or None
 
         log_event("intent.llm.success",
                   llm_result.model_dump(exclude_none=True))
@@ -337,7 +392,7 @@ def extract_intent(
             "time_var": time_var,
             "group_var": group_var,
             "agg": llm_result.agg,
-            "recommended_chart": llm_result.recommended_chart,
+            "recommended_chart": recommended_chart,
             "extra_analyses": [],
             "user_query": user_query,
         }
@@ -346,6 +401,10 @@ def extract_intent(
         log_event("intent.llm.error", {"error": str(exc)})
 
         analysis_intent = glossary_intent or _infer_intent(user_query)
+        if chart_preference == "line_scatter" and analysis_intent in ("overview", "summary"):
+            analysis_intent = "trend"
+        if chart_preference in ("scatter", "dynamic_scatter") and analysis_intent in ("overview", "summary"):
+            analysis_intent = "correlation"
         primary_outcome = _pick_primary_outcome_fallback(
             user_query=user_query,
             columns=columns,
@@ -373,6 +432,7 @@ def extract_intent(
             "primary_outcome": primary_outcome,
             "time_var": time_var,
             "group_var": group_var,
+            "recommended_chart": chart_preference,
             "extra_analyses": [],
             "user_query": user_query,
         }

@@ -208,7 +208,6 @@ def _llm_generate_insight(
         raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
 
     client = OpenAI(api_key=api_key)
-    sample_rows = df.head(20).to_dict(orient="records")
     analysis_briefs = [
         {
             "chart_type": a.chart_spec.chart_type if a.chart_spec else None,
@@ -219,29 +218,43 @@ def _llm_generate_insight(
         }
         for a in analyses[:3]
     ]
-    prompt = (
-        "다음 정보를 바탕으로 한국어 데이터 분석 인사이트를 작성하라.\n"
-        "- 사용자 질문, SQL, 쿼리 결과 샘플, 통계요약, 차트추천 정보를 종합할 것\n"
-        "- 출력은 4~6문장, 실행 가능한 인사이트 중심으로 작성\n"
-        "- 단순 나열 금지, 핵심 패턴/이상치/해석/주의사항 포함\n\n"
-        f"질문: {user_query}\n"
-        f"SQL: {sql}\n"
-        f"스키마 요약: {df_schema}\n"
-        f"통계 요약: {_stats_snapshot(df)}\n"
-        f"차트 추천: {analysis_briefs}\n"
-        f"결과 샘플(최대 20행): {sample_rows}\n"
-    )
-    response = client.responses.create(
-        model=OPENAI_MODEL or "gpt-4o-mini",
-        input=[
-            {"role": "system", "content": "너는 임상 데이터 분석 인사이트 작성 도우미다."},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    text = (getattr(response, "output_text", None) or "").strip()
-    if not text:
-        raise RuntimeError("LLM insight 응답이 비어 있습니다.")
-    return text
+    stats_snapshot = _stats_snapshot(df)
+    model_name = OPENAI_MODEL or "gpt-4o-mini"
+
+    def _build_prompt(max_rows: int) -> str:
+        sample_rows = df.head(max_rows).to_dict(orient="records")
+        return (
+            "다음 정보를 바탕으로 한국어 데이터 분석 인사이트를 작성하라.\n"
+            "- 사용자 질문, SQL, 쿼리 결과 샘플, 통계요약, 차트추천 정보를 종합할 것\n"
+            "- 출력은 4~6문장, 실행 가능한 인사이트 중심으로 작성\n"
+            "- 단순 나열 금지, 핵심 패턴/이상치/해석/주의사항 포함\n"
+            "- SQL 핵심, 결과 요약, 차트 해석, 주의사항을 한 번에 포함할 것\n\n"
+            f"질문: {user_query}\n"
+            f"SQL: {sql}\n"
+            f"스키마 요약: {df_schema}\n"
+            f"통계 요약: {stats_snapshot}\n"
+            f"차트 추천: {analysis_briefs}\n"
+            f"결과 샘플(최대 {max_rows}행): {sample_rows}\n"
+        )
+
+    last_error: Optional[Exception] = None
+    for max_rows in (20, 8):
+        try:
+            response = client.responses.create(
+                model=model_name,
+                input=[
+                    {"role": "system", "content": "너는 임상 데이터 분석 인사이트 작성 도우미다."},
+                    {"role": "user", "content": _build_prompt(max_rows)},
+                ],
+            )
+            text = (getattr(response, "output_text", None) or "").strip()
+            if text:
+                return text
+            raise RuntimeError("LLM insight 응답이 비어 있습니다.")
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"LLM insight 생성 실패: {str(last_error) if last_error else 'unknown'}")
 
 # 입력: user_query, sql, df
 # 출력: VisualizationResponse

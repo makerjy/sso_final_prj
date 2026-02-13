@@ -147,6 +147,22 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
             "chart_spec": {"chart_type": "bar", "x": lower["x_group"], "y": lower["y_value"]},
             "reason": "결과 별칭 기준으로 그룹 집계 차트가 적합합니다.",
         }
+    # Benchmark-like schema -> horizontal stacked bar
+    if "metric_name" in lower and "run_name" in lower and "metric_value" in lower:
+        return {
+            "chart_spec": {
+                "chart_type": "bar_hstack",
+                "x": lower["metric_name"],
+                "y": lower["metric_value"],
+                "group": lower["run_name"],
+                "bar_mode": "stack",
+                "orientation": "h",
+                "title": "Summary Metrics",
+                "x_title": "metric_value",
+                "y_title": "metric_name",
+            },
+            "reason": "메트릭/런 스키마라 수평 누적 막대가 비교에 적합합니다.",
+        }
 
     # Time-series heuristics
     time_cols = [c for c in cols if any(t in c.lower() for t in ("time", "date", "day", "month", "year"))]
@@ -172,6 +188,24 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         c for c in cols
         if pdt.is_string_dtype(df[c]) or pdt.is_categorical_dtype(df[c])
     ]
+    categorical_cols = [
+        c for c in categorical_cols
+        if not _is_identifier_col(c)
+    ]
+
+    def _nunique(col: str) -> int:
+        try:
+            return int(df[col].nunique(dropna=True))
+        except Exception:
+            return 999999
+
+    def _pick_hierarchy(cands: List[str]) -> tuple[Optional[str], Optional[str]]:
+        valid = [c for c in cands if 1 < _nunique(c) <= 30]
+        if len(valid) < 2:
+            return None, None
+        valid.sort(key=lambda c: _nunique(c))
+        # parent는 저카디널리티, child는 상대적으로 상세한 범주
+        return valid[0], valid[1]
 
     if time_cols and numeric_cols:
         return {
@@ -179,7 +213,68 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
             "reason": "시간형 컬럼과 수치형 컬럼이 있어 추세 차트가 적합합니다.",
         }
 
-    # Categorical + two numeric -> pyramid
+    # Categorical hierarchy + numeric -> nested pie (sunburst)
+    parent, child = _pick_hierarchy(categorical_cols)
+    if parent and child and numeric_cols:
+        return {
+            "chart_spec": {
+                "chart_type": "nested_pie",
+                "x": parent,
+                "group": child,
+                "y": numeric_cols[0],
+            },
+            "reason": "상하위 범주 비율을 동시에 보여주기 위해 중첩 파이가 적합합니다.",
+        }
+
+    # Wide multi-numeric table -> grouped bar (simple-to-detailed bar entry)
+    series_hint_tokens = (
+        "women",
+        "men",
+        "gap",
+        "score",
+        "rate",
+        "ratio",
+        "precision",
+        "recall",
+        "f1",
+        "accuracy",
+        "auc",
+    )
+    multi_series_numeric = [
+        c for c in numeric_cols
+        if any(tok in c.lower() for tok in series_hint_tokens)
+    ]
+    if categorical_cols and len(multi_series_numeric) >= 2:
+        x_col = categorical_cols[0]
+        series_cols = multi_series_numeric[:6]
+        return {
+            "chart_spec": {
+                "chart_type": "bar_grouped",
+                "x": x_col,
+                "series_cols": series_cols,
+                "bar_mode": "group",
+            },
+            "reason": "다중 수치 시리즈라 그룹 막대로 항목별 비교가 적합합니다.",
+        }
+
+    # Categorical + numeric + categorical-group -> pyramid
+    if categorical_cols and numeric_cols:
+        x_candidates = [c for c in categorical_cols if 2 <= _nunique(c) <= 40]
+        g_candidates = [c for c in categorical_cols if 2 <= _nunique(c) <= 6]
+        x_col = x_candidates[0] if x_candidates else None
+        g_col = next((c for c in g_candidates if c != x_col), None)
+        if x_col and g_col:
+            return {
+                "chart_spec": {
+                    "chart_type": "pyramid",
+                    "x": x_col,
+                    "y": numeric_cols[0],
+                    "group": g_col,
+                },
+                "reason": "두 그룹을 좌우로 비교하기에 피라미드 막대가 적합합니다.",
+            }
+
+    # Legacy: Categorical + two numeric -> pyramid
     if categorical_cols and len(numeric_cols) >= 2:
         return {
             "chart_spec": {
@@ -198,8 +293,14 @@ def _infer_chart_from_columns(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
             "reason": "수치형 컬럼이 2개 이상이라 상관관계 산점도가 적합합니다.",
         }
 
-    # Categorical + numeric -> bar
+    # Categorical + numeric -> pie (low-cardinality) else bar
     if categorical_cols and numeric_cols:
+        pie_x = next((c for c in categorical_cols if 1 < _nunique(c) <= 12), None)
+        if pie_x:
+            return {
+                "chart_spec": {"chart_type": "pie", "x": pie_x, "y": numeric_cols[0], "agg": "sum"},
+                "reason": "저카디널리티 범주 비중 비교에 파이 차트가 적합합니다.",
+            }
         return {
             "chart_spec": {"chart_type": "bar", "x": categorical_cols[0], "y": numeric_cols[0]},
             "reason": "범주형-수치형 조합으로 비교 막대 차트가 적합합니다.",
@@ -261,6 +362,22 @@ def _pick_safe_group(df: pd.DataFrame) -> str | None:
             return col
     return None
 
+
+def _pick_secondary_group(
+    df: pd.DataFrame,
+    exclude: Optional[str] = None,
+) -> str | None:
+    for col in df.columns:
+        if exclude and col == exclude:
+            continue
+        if _is_identifier_col(col):
+            continue
+        if not (pdt.is_string_dtype(df[col]) or pdt.is_categorical_dtype(df[col])):
+            continue
+        if _is_low_cardinality(df, col, 12):
+            return col
+    return None
+
 # 입력: df
 # 출력: str | None
 # 임상 추세에서 환자 단위 trajectory를 위한 그룹 컬럼 선택
@@ -317,7 +434,11 @@ def _infer_context_flags(user_query: Optional[str], available_columns: List[str]
     q = (user_query or "").lower()
     cols = {c.lower() for c in available_columns}
     icu_kw = any(k in q for k in ("icu", "중환자실", "입실", "입실 후", "입실후"))
-    admit_kw = any(k in q for k in ("입원", "입원 후", "admission", "admit"))
+    admit_kw = any(k in q for k in ("입원 후", "admission after", "admit after"))
+    if not admit_kw:
+        admit_kw = any(k in q for k in ("admission", "admit")) and "admission_type" not in q
+    if "입원유형" in q:
+        admit_kw = False
     # "후" 단독 키워드는 오탐이 많아 숫자+시간 단위 패턴만 허용한다.
     post_days = bool(
         re.search(r"\bafter\s+\d+\s*(day|days|hour|hours|d|h)\b", q)
@@ -337,6 +458,149 @@ def _infer_context_flags(user_query: Optional[str], available_columns: List[str]
         "post_days": post_days,
     }
 
+
+def _infer_bar_style(user_query: Optional[str]) -> Dict[str, bool]:
+    q = (user_query or "").lower()
+    bar_requested = any(token in q for token in ("bar", "막대", "막대형", "바 차트"))
+    stacked = any(token in q for token in ("stack", "stacked", "누적", "스택"))
+    horizontal = any(token in q for token in ("horizontal", "가로", "수평"))
+    percent = any(token in q for token in ("100%", "percent", "비율", "비중", "구성비"))
+    grouped = any(token in q for token in ("grouped", "group", "그룹", "군집", "클러스터", "비교"))
+    detailed = any(token in q for token in ("상세", "구체", "detailed", "세부"))
+    return {
+        "requested": bar_requested,
+        "stacked": stacked,
+        "horizontal": horizontal,
+        "percent": percent,
+        "grouped": grouped,
+        "detailed": detailed,
+    }
+
+
+def _infer_chart_preference(user_query: Optional[str]) -> Optional[str]:
+    q = (user_query or "").lower()
+    if any(
+        token in q
+        for token in (
+            "dynamic scatter",
+            "animated scatter",
+            "animation scatter",
+            "동적 산점도",
+            "애니메이션 산점도",
+            "버블",
+            "bubble",
+        )
+    ):
+        return "dynamic_scatter"
+    if any(
+        token in q
+        for token in (
+            "line+scatter",
+            "line scatter",
+            "line and scatter",
+            "lines+markers",
+            "라인 스캐터",
+            "선과 점",
+            "선+점",
+        )
+    ):
+        return "line_scatter"
+    if any(token in q for token in ("scatter plot", "scatter", "산점도")):
+        return "scatter"
+    if any(
+        token in q
+        for token in ("line plot", "line chart", "line", "라인 플롯", "라인 차트", "선 그래프")
+    ):
+        return "line"
+    return None
+
+
+def _pick_animation_frame_col(
+    df: pd.DataFrame,
+    exclude: Optional[List[str]] = None,
+) -> Optional[str]:
+    blocked = {str(col).lower() for col in (exclude or [])}
+    time_hint = ("date", "time", "month", "year", "day")
+    for col in df.columns:
+        lower = str(col).lower()
+        if lower in blocked:
+            continue
+        if not any(token in lower for token in time_hint):
+            continue
+        try:
+            uniq = int(df[col].nunique(dropna=True))
+        except Exception:
+            uniq = 0
+        if uniq >= 2 and uniq <= 200:
+            return col
+    for col in df.columns:
+        lower = str(col).lower()
+        if lower in blocked:
+            continue
+        if not pdt.is_numeric_dtype(df[col]):
+            continue
+        if _is_identifier_col(col):
+            continue
+        try:
+            uniq = int(df[col].nunique(dropna=True))
+        except Exception:
+            uniq = 0
+        if uniq >= 4 and uniq <= 80:
+            return col
+    return None
+
+
+def _pick_size_col(
+    df: pd.DataFrame,
+    exclude: Optional[List[str]] = None,
+) -> Optional[str]:
+    blocked = {str(col).lower() for col in (exclude or [])}
+    for col in df.columns:
+        lower = str(col).lower()
+        if lower in blocked:
+            continue
+        if _is_identifier_col(col):
+            continue
+        if not pdt.is_numeric_dtype(df[col]):
+            continue
+        series = pd.to_numeric(df[col], errors="coerce").dropna()
+        if series.empty:
+            continue
+        if float(series.max()) <= 0:
+            continue
+        try:
+            uniq = int(series.nunique(dropna=True))
+        except Exception:
+            uniq = 0
+        if uniq >= 4:
+            return col
+    return None
+
+
+def _numeric_candidates(
+    df: pd.DataFrame,
+    exclude: Optional[List[str]] = None,
+) -> List[str]:
+    blocked = {str(col).lower() for col in (exclude or [])}
+    cands: List[str] = []
+    for col in df.columns:
+        lower = str(col).lower()
+        if lower in blocked:
+            continue
+        if _is_identifier_col(col):
+            continue
+        if pdt.is_numeric_dtype(df[col]):
+            cands.append(col)
+    return cands
+
+
+def _pick_numeric_by_tokens(cands: List[str], tokens: List[str]) -> Optional[str]:
+    for token in tokens:
+        for col in cands:
+            if token in col.lower():
+                return col
+    return None
+
 # 입력: cols, candidates
 # 출력: str | None
 # 컬럼 실명 기준으로 가장 먼저 매칭되는 컬럼 선택
@@ -351,7 +615,14 @@ def _first_matching_col(cols: List[str], candidates: List[str]) -> Optional[str]
 
 
 def _first_time_col(cols: List[str]) -> Optional[str]:
-    return _first_matching_col(cols, list(_TIME_CANDIDATES))
+    exact = _first_matching_col(cols, list(_TIME_CANDIDATES))
+    if exact:
+        return exact
+    for col in cols:
+        lower = col.lower()
+        if any(token in lower for token in ("time", "date", "day", "month", "year")):
+            return col
+    return None
 
 # 입력: cols
 # 출력: str | None
@@ -402,6 +673,12 @@ def _dedupe_plans(plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             spec.get("y"),
             spec.get("group"),
             spec.get("agg"),
+            spec.get("size"),
+            spec.get("animation_frame"),
+            spec.get("mode"),
+            spec.get("bar_mode"),
+            spec.get("orientation"),
+            tuple(spec.get("series_cols", []) or []),
         )
         if key in seen:
             continue
@@ -419,6 +696,202 @@ def _record_failure(
     normalized = (reason or "").strip()
     if normalized and normalized not in failure_reasons:
         failure_reasons.append(normalized)
+
+
+def _bar_preferred_chart_type(style: Dict[str, bool]) -> Optional[str]:
+    if not style.get("requested"):
+        return None
+    if style.get("percent") and style.get("horizontal"):
+        return "bar_hpercent"
+    if style.get("percent"):
+        return "bar_percent"
+    if style.get("stacked") and style.get("horizontal"):
+        return "bar_hstack"
+    if style.get("stacked"):
+        return "bar_stacked"
+    if style.get("horizontal"):
+        return "bar_hgroup"
+    if style.get("grouped") or style.get("detailed"):
+        return "bar_grouped"
+    return "bar_basic"
+
+
+def _prioritize_bar_plans(
+    plans: List[Dict[str, Any]],
+    style: Dict[str, bool],
+) -> List[Dict[str, Any]]:
+    preferred = _bar_preferred_chart_type(style)
+    if not preferred:
+        return plans
+
+    # Requested BAR style first, then simple->detailed fallback order.
+    base_order = {
+        "bar_basic": 0,
+        "bar": 0,
+        "bar_grouped": 1,
+        "bar_stacked": 2,
+        "bar_hgroup": 3,
+        "bar_hstack": 4,
+        "bar_percent": 5,
+        "bar_hpercent": 6,
+    }
+
+    def _rank(plan: Dict[str, Any]) -> tuple[int, int, int]:
+        spec = plan.get("chart_spec") or {}
+        chart_type = str(spec.get("chart_type") or "").lower()
+        is_bar = chart_type.startswith("bar")
+        prefer_rank = 0 if chart_type == preferred else 1
+        style_rank = base_order.get(chart_type, 999)
+        return (0 if is_bar else 1, prefer_rank, style_rank)
+
+    return sorted(plans, key=_rank)
+
+
+def _prioritize_requested_chart(
+    plans: List[Dict[str, Any]],
+    preferred_chart: Optional[str],
+) -> List[Dict[str, Any]]:
+    preferred = str(preferred_chart or "").strip().lower()
+    if not preferred:
+        return plans
+
+    def _rank(plan: Dict[str, Any]) -> tuple[int]:
+        spec = plan.get("chart_spec") or {}
+        chart_type = str(spec.get("chart_type") or "").lower()
+        return (0 if chart_type == preferred else 1,)
+
+    return sorted(plans, key=_rank)
+
+
+def _pick_hist_x(
+    df: pd.DataFrame,
+    primary: Optional[str],
+    seed_spec: Dict[str, Any],
+) -> Optional[str]:
+    if primary and primary in df.columns and pdt.is_numeric_dtype(df[primary]) and not _is_identifier_col(primary):
+        return primary
+    seed_y = seed_spec.get("y")
+    if isinstance(seed_y, str) and seed_y in df.columns and pdt.is_numeric_dtype(df[seed_y]) and not _is_identifier_col(seed_y):
+        return seed_y
+    seed_x = seed_spec.get("x")
+    if isinstance(seed_x, str) and seed_x in df.columns and pdt.is_numeric_dtype(df[seed_x]) and not _is_identifier_col(seed_x):
+        return seed_x
+    for col in df.columns:
+        if _is_identifier_col(col):
+            continue
+        if pdt.is_numeric_dtype(df[col]):
+            return col
+    return None
+
+
+def _pick_hist_group(
+    df: pd.DataFrame,
+    group_var: Optional[str],
+    seed_spec: Dict[str, Any],
+) -> Optional[str]:
+    if group_var and group_var in df.columns and not _is_identifier_col(group_var):
+        if pdt.is_string_dtype(df[group_var]) or pdt.is_categorical_dtype(df[group_var]):
+            if _is_low_cardinality(df, group_var, 30):
+                return group_var
+    seed_group = seed_spec.get("group")
+    if isinstance(seed_group, str) and seed_group in df.columns and not _is_identifier_col(seed_group):
+        if pdt.is_string_dtype(df[seed_group]) or pdt.is_categorical_dtype(df[seed_group]):
+            if _is_low_cardinality(df, seed_group, 30):
+                return seed_group
+    return None
+
+
+def _ensure_hist_plan(
+    plans: List[Dict[str, Any]],
+    preferred_chart: Optional[str],
+    primary: Optional[str],
+    group_var: Optional[str],
+    column_only_plan: Optional[Dict[str, Any]],
+    df: pd.DataFrame,
+) -> List[Dict[str, Any]]:
+    preferred = str(preferred_chart or "").strip().lower()
+    if preferred != "hist":
+        return plans
+    if any(str((p.get("chart_spec") or {}).get("chart_type") or "").lower() == "hist" for p in plans):
+        return plans
+
+    seed = column_only_plan or (plans[0] if plans else {})
+    seed_spec = (seed or {}).get("chart_spec") or {}
+    x = _pick_hist_x(df, primary, seed_spec)
+    if not x:
+        return plans
+    g = _pick_hist_group(df, group_var, seed_spec)
+
+    spec: Dict[str, Any] = {"chart_type": "hist", "x": x}
+    if g:
+        spec["group"] = g
+
+    new_plan = {
+        "chart_spec": spec,
+        "reason": "히스토그램 요청이 감지되어 분포형(hist) 차트를 우선 생성했습니다.",
+    }
+    return [new_plan, *plans]
+
+
+def _ensure_bar_plan(
+    plans: List[Dict[str, Any]],
+    style: Dict[str, bool],
+    primary: Optional[str],
+    group_var: Optional[str],
+    column_only_plan: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not style.get("requested"):
+        return plans
+    if any(str((p.get("chart_spec") or {}).get("chart_type") or "").lower().startswith("bar") for p in plans):
+        return plans
+
+    seed = column_only_plan or (plans[0] if plans else {})
+    seed_spec = (seed or {}).get("chart_spec") or {}
+    x = seed_spec.get("x") or group_var
+    y = seed_spec.get("y") or primary
+    g = seed_spec.get("group") or None
+    if not x or not y:
+        return plans
+
+    preferred = _bar_preferred_chart_type(style) or "bar_basic"
+    needs_group = preferred in {
+        "bar_grouped",
+        "bar_stacked",
+        "bar_hstack",
+        "bar_percent",
+        "bar_hpercent",
+    }
+    if needs_group and not g:
+        if preferred in {"bar_hstack", "bar_hpercent"}:
+            preferred = "bar_hgroup"
+        else:
+            preferred = "bar_basic"
+
+    spec: Dict[str, Any] = {
+        "chart_type": preferred,
+        "x": x,
+        "y": y,
+    }
+    if g and preferred in {
+        "bar_grouped",
+        "bar_stacked",
+        "bar_hstack",
+        "bar_percent",
+        "bar_hpercent",
+    }:
+        spec["group"] = g
+    if preferred in {"bar_hgroup", "bar_hstack", "bar_hpercent"}:
+        spec["orientation"] = "h"
+    if preferred in {"bar_stacked", "bar_hstack", "bar_percent", "bar_hpercent"}:
+        spec["bar_mode"] = "stack"
+    elif preferred in {"bar_grouped", "bar_hgroup"}:
+        spec["bar_mode"] = "group"
+
+    new_plan = {
+        "chart_spec": spec,
+        "reason": "막대 차트 요청이 감지되어 BAR 유형을 우선 생성했습니다.",
+    }
+    return [new_plan, *plans]
 
 
 # 입력: intent, group_var, time_var, available_columns, context_flags
@@ -461,7 +934,10 @@ def validate_plan(
         if group_lower in _FORBIDDEN_TRAJECTORY:
             raise ValueError("trend의 group_var로 subject_id/patient_id는 금지입니다.")
         if group_lower not in _ALLOWED_TRAJECTORY:
-            raise ValueError("trend의 group_var는 stay_id/hadm_id만 허용됩니다.")
+            if context_flags.get("icu_context") or context_flags.get("admit_context"):
+                raise ValueError("ICU/입원 trend의 group_var는 stay_id/hadm_id만 허용됩니다.")
+            if any(tok in group_lower for tok in _IDENTIFIER_COLS):
+                raise ValueError("trend의 group_var로 식별자 컬럼은 금지입니다.")
 
     # 3) comparison/distribution에서 식별자 그룹 금지
     # 이유: 식별자 기준 그룹은 과도한 분할로 해석 불가능.
@@ -587,6 +1063,10 @@ def plan_analyses(
     column_only_plan = _infer_chart_from_columns(df)
     context_flags = intent_info.get("context_flags") or _infer_context_flags(
         user_query, list(df.columns))
+    bar_style = _infer_bar_style(user_query)
+    preferred_chart = str(intent_info.get("recommended_chart") or "").strip().lower()
+    if not preferred_chart:
+        preferred_chart = _infer_chart_preference(user_query) or ""
 
     # time/group은 규칙 기반으로 강제 선택
     time_info = derive_time_var(intent, context_flags, list(df.columns))
@@ -608,7 +1088,12 @@ def plan_analyses(
         if intent != "trend" and group_lower in _FORBIDDEN_GROUP_COLS:
             group_var = None
         elif intent == "trend" and group_lower not in _ALLOWED_TRAJECTORY:
-            group_var = None
+            if context_flags.get("icu_context") or context_flags.get("admit_context"):
+                group_var = None
+            elif _is_identifier_col(group_var):
+                group_var = None
+            elif group_var in df.columns and not _is_low_cardinality(df, group_var, 20):
+                group_var = None
         elif intent in ("distribution", "comparison") and _is_identifier_col(group_var):
             group_var = None
 
@@ -684,17 +1169,30 @@ def plan_analyses(
         else:
             patient_group = _pick_patient_group(df)
             line_group = patient_group or group_var
-            # trajectory 그룹이 없으면 line 생성 금지
+            line_chart_type = "line_scatter" if preferred_chart == "line_scatter" else "line"
+            # trajectory 그룹이 있으면 그룹 라인/라인+스캐터 생성
             if line_group:
                 plans.append(
                     {
                         "chart_spec": {
-                            "chart_type": "line",
+                            "chart_type": line_chart_type,
                             "x": time_var,
                             "y": primary,
                             "group": line_group,
                         },
-                        "reason": "환자별 변화(trajectory)를 직접 확인할 수 있습니다.",
+                        "reason": "환자별 변화(trajectory)를 직접 확인할 수 있습니다." if line_chart_type == "line" else "시간 흐름에서 선과 점을 함께 확인할 수 있습니다.",
+                    }
+                )
+            elif not context_flags.get("icu_context") and not context_flags.get("admit_context"):
+                # 일반 추세에서는 그룹이 없어도 라인 계열 차트를 허용한다.
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": line_chart_type,
+                            "x": time_var,
+                            "y": primary,
+                        },
+                        "reason": "시간 축 기반 집계 추세를 확인할 수 있습니다." if line_chart_type == "line" else "선과 점을 함께 사용해 추세와 개별 관측치를 같이 확인할 수 있습니다.",
                     }
                 )
             plans.append(
@@ -741,6 +1239,17 @@ def plan_analyses(
             )
     elif intent == "comparison" and primary:
         if group_var:
+            # BAR variants: simple -> detailed
+            plans.append(
+                {
+                    "chart_spec": {
+                        "chart_type": "bar_basic",
+                        "x": group_var,
+                        "y": primary,
+                    },
+                    "reason": "가장 단순한 막대 비교(기본형)입니다.",
+                }
+            )
             plans.append(
                 {
                     "chart_spec": {
@@ -751,6 +1260,84 @@ def plan_analyses(
                     "reason": "그룹별 분포 차이와 이상치를 비교하기 좋습니다.",
                 }
             )
+            second_group = _pick_secondary_group(df, exclude=group_var)
+            if second_group:
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_grouped",
+                            "x": group_var,
+                            "y": primary,
+                            "group": second_group,
+                            "bar_mode": "group",
+                        },
+                        "reason": "그룹형 막대로 카테고리별 세부 비교를 제공합니다.",
+                    }
+                )
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_stacked",
+                            "x": group_var,
+                            "y": primary,
+                            "group": second_group,
+                            "bar_mode": "stack",
+                        },
+                        "reason": "누적 막대로 전체 대비 구성 기여를 확인합니다.",
+                    }
+                )
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_hstack",
+                            "x": group_var,
+                            "y": primary,
+                            "group": second_group,
+                            "bar_mode": "stack",
+                            "orientation": "h",
+                        },
+                        "reason": "수평 누적 막대로 라벨 가독성을 높입니다.",
+                    }
+                )
+                if bar_style.get("percent"):
+                    plans.append(
+                        {
+                            "chart_spec": {
+                                "chart_type": "bar_percent",
+                                "x": group_var,
+                                "y": primary,
+                                "group": second_group,
+                                "bar_mode": "stack",
+                            },
+                            "reason": "100% 누적 막대로 비율 중심 비교를 제공합니다.",
+                        }
+                    )
+                if not bar_style.get("requested"):
+                    plans.append(
+                        {
+                            "chart_spec": {
+                                "chart_type": "nested_pie",
+                                "x": group_var,
+                                "group": second_group,
+                                "y": primary,
+                                "agg": "sum",
+                            },
+                            "reason": "비교 질문에서 상·하위 그룹 기여도를 한 번에 보여줍니다.",
+                        }
+                    )
+            elif bar_style.get("horizontal"):
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_hgroup",
+                            "x": group_var,
+                            "y": primary,
+                            "bar_mode": "group",
+                            "orientation": "h",
+                        },
+                        "reason": "수평 막대로 비교 가독성을 높입니다.",
+                    }
+                )
     elif intent == "proportion" and primary:
         # 비율 질문은 추세/그룹 비교 둘 다 가능하므로 time 우선, 없으면 group 기반 bar.
         if time_var:
@@ -766,16 +1353,106 @@ def plan_analyses(
                 }
             )
         elif group_var:
+            if not bar_style.get("requested") and group_var in df.columns and _is_low_cardinality(df, group_var, 12):
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "pie",
+                            "x": group_var,
+                            "y": primary,
+                            "agg": "sum",
+                        },
+                        "reason": "그룹 비율을 직관적으로 비교하기 위해 파이 차트를 우선 제공합니다.",
+                    }
+                )
             plans.append(
                 {
                     "chart_spec": {
-                        "chart_type": "bar",
+                        "chart_type": "bar_basic",
                         "x": group_var,
                         "y": primary,
                     },
                     "reason": "그룹별 비율 차이를 확인할 수 있습니다.",
                 }
             )
+            second_group = _pick_secondary_group(df, exclude=group_var)
+            if second_group:
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_grouped",
+                            "x": group_var,
+                            "y": primary,
+                            "group": second_group,
+                            "bar_mode": "group",
+                        },
+                        "reason": "그룹형 막대로 세부 비율을 비교할 수 있습니다.",
+                    }
+                )
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_stacked",
+                            "x": group_var,
+                            "y": primary,
+                            "group": second_group,
+                            "bar_mode": "stack",
+                        },
+                        "reason": "누적 막대로 전체 내 구성 비중을 확인할 수 있습니다.",
+                    }
+                )
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_hstack",
+                            "x": group_var,
+                            "y": primary,
+                            "group": second_group,
+                            "bar_mode": "stack",
+                            "orientation": "h",
+                        },
+                        "reason": "수평 누적 막대로 라벨 겹침을 줄이고 가독성을 높입니다.",
+                    }
+                )
+                if bar_style.get("percent"):
+                    plans.append(
+                        {
+                            "chart_spec": {
+                                "chart_type": "bar_percent",
+                                "x": group_var,
+                                "y": primary,
+                                "group": second_group,
+                                "bar_mode": "stack",
+                            },
+                            "reason": "100% 누적 막대로 구성 비율을 직접 비교합니다.",
+                        }
+                    )
+                if not bar_style.get("requested"):
+                    plans.append(
+                        {
+                            "chart_spec": {
+                                "chart_type": "nested_pie",
+                                "x": group_var,
+                                "group": second_group,
+                                "y": primary,
+                                "agg": "sum",
+                            },
+                            "reason": "상·하위 비율을 동시에 보여주기 위해 중첩 파이를 추가합니다.",
+                        }
+                    )
+            elif bar_style.get("horizontal"):
+                plans.append(
+                    {
+                        "chart_spec": {
+                            "chart_type": "bar_hgroup",
+                            "x": group_var,
+                            "y": primary,
+                            "bar_mode": "group",
+                            "orientation": "h",
+                        },
+                        "reason": "수평 막대로 그룹별 비율을 비교합니다.",
+                    }
+                )
     elif intent == "correlation" and primary:
         if not _is_identifier_col(primary):
             other = None
@@ -789,16 +1466,80 @@ def plan_analyses(
                 other = col
                 break
             if other:
-                plans.append(
-                    {
-                        "chart_spec": {
-                            "chart_type": "scatter",
-                            "x": other,
-                            "y": primary,
-                        },
-                        "reason": "두 변수의 상관관계를 시각화합니다.",
-                    }
-                )
+                chart_type = "scatter"
+                if preferred_chart in ("line", "line_scatter", "dynamic_scatter", "scatter"):
+                    chart_type = preferred_chart
+                if chart_type == "dynamic_scatter":
+                    animation_frame = _pick_animation_frame_col(df)
+                    numeric_cols = _numeric_candidates(df, exclude=[animation_frame or ""])
+                    x_col = _pick_numeric_by_tokens(numeric_cols, ["age", "x", "bill", "amount", "value"]) or (numeric_cols[0] if numeric_cols else other)
+                    y_col = _pick_numeric_by_tokens(numeric_cols, ["los", "rate", "cnt", "count", "score", "days", "y"]) or primary
+                    if y_col == x_col and len(numeric_cols) >= 2:
+                        y_col = next((c for c in numeric_cols if c != x_col), y_col)
+                    size_col = _pick_numeric_by_tokens(numeric_cols, ["cnt", "count", "size", "volume"]) or _pick_size_col(df, exclude=[x_col or "", y_col or "", animation_frame or ""])
+                    color_group = group_var if group_var in df.columns else _pick_secondary_group(df)
+                    if animation_frame and x_col and y_col:
+                        plans.append(
+                            {
+                                "chart_spec": {
+                                    "chart_type": "dynamic_scatter",
+                                    "x": x_col,
+                                    "y": y_col,
+                                    "group": color_group,
+                                    "size": size_col,
+                                    "animation_frame": animation_frame,
+                                },
+                                "reason": "시간/프레임에 따라 점의 이동을 보여주는 동적 산점도입니다.",
+                            }
+                        )
+                    else:
+                        plans.append(
+                            {
+                                "chart_spec": {
+                                    "chart_type": "scatter",
+                                    "x": other,
+                                    "y": primary,
+                                    "group": color_group,
+                                },
+                                "reason": "동적 산점도 요청이지만 프레임 컬럼이 없어 정적 산점도로 대체했습니다.",
+                            }
+                        )
+                elif chart_type == "line_scatter":
+                    plans.append(
+                        {
+                            "chart_spec": {
+                                "chart_type": "line_scatter",
+                                "x": other,
+                                "y": primary,
+                                "group": group_var if group_var in df.columns else None,
+                            },
+                            "reason": "선과 점을 함께 사용해 관계와 변동을 동시에 표시합니다.",
+                        }
+                    )
+                elif chart_type == "line":
+                    plans.append(
+                        {
+                            "chart_spec": {
+                                "chart_type": "line",
+                                "x": other,
+                                "y": primary,
+                                "group": group_var if group_var in df.columns else None,
+                            },
+                            "reason": "두 변수의 변화 패턴을 선형 흐름으로 확인합니다.",
+                        }
+                    )
+                else:
+                    plans.append(
+                        {
+                            "chart_spec": {
+                                "chart_type": "scatter",
+                                "x": other,
+                                "y": primary,
+                                "group": group_var if group_var in df.columns else None,
+                            },
+                            "reason": "두 변수의 상관관계를 시각화합니다.",
+                        }
+                    )
     else:
         # 기본: 컬럼 개요 수준의 간단한 차트
         if primary:
@@ -824,7 +1565,11 @@ def plan_analyses(
                 }
             )
 
+    plans = _ensure_hist_plan(plans, preferred_chart, primary, group_var, column_only_plan, df)
     plans = _dedupe_plans(plans)
+    plans = _prioritize_requested_chart(plans, preferred_chart)
+    plans = _ensure_bar_plan(plans, bar_style, primary, group_var, column_only_plan)
+    plans = _prioritize_bar_plans(plans, bar_style)
     if not plans:
         _record_failure(
             failure_reasons,
