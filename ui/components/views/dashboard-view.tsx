@@ -1,6 +1,7 @@
 "use client"
 
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
+import dynamic from "next/dynamic"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -46,6 +47,8 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
 interface SavedQuery {
   id: string
@@ -166,6 +169,61 @@ const makeFolderId = () => `folder-${Date.now()}`
 const normalizeName = (value: string) => value.trim().replace(/\s+/g, " ")
 
 const nextTone = (index: number) => FOLDER_TONES[index % FOLDER_TONES.length]
+
+const isBrokenDashboardText = (value: string) => {
+  const text = String(value || "").trim()
+  if (!text) return true
+  if (/\?{2,}/.test(text)) return true
+  const qCount = (text.match(/\?/g) || []).length
+  return qCount >= 3
+}
+
+const formatDashboardTitle = (query: SavedQuery) => {
+  if (!isBrokenDashboardText(query.title)) return query.title
+  return "저장된 쿼리"
+}
+
+const formatDashboardLastRun = (value: string) => {
+  if (!isBrokenDashboardText(value)) return value
+  return "방금 전"
+}
+
+const formatDashboardMetricLabel = (label: string, index: number) => {
+  if (!isBrokenDashboardText(label)) return label
+  if (index === 0) return "행 수"
+  if (index === 1) return "컬럼 수"
+  if (index === 2) return "ROW CAP"
+  return "지표"
+}
+
+const isNumericValue = (value: unknown) => {
+  const n = Number(value)
+  return Number.isFinite(n)
+}
+
+const previewRowsToRecords = (query: SavedQuery | null) => {
+  if (!query?.preview?.columns?.length || !Array.isArray(query.preview.rows)) return []
+  const columns = query.preview.columns
+  return query.preview.rows.map((row) => {
+    const cells = Array.isArray(row) ? row : []
+    const record: Record<string, unknown> = {}
+    for (let i = 0; i < columns.length; i += 1) {
+      record[columns[i]] = cells[i]
+    }
+    return record
+  })
+}
+
+const detectBarVariant = (query: SavedQuery | null) => {
+  const t = String(query?.title || "").toLowerCase()
+  const d = String(query?.description || "").toLowerCase()
+  const text = `${t} ${d}`
+  if (text.includes("100%") || text.includes("100 percent")) return "hpercent"
+  if (text.includes("horizontal stacked")) return "hstack"
+  if (text.includes("stacked")) return "stacked"
+  if (text.includes("grouped")) return "grouped"
+  return "basic"
+}
 
 function normalizeDashboardData(rawQueries: SavedQuery[], rawFolders: SavedFolder[]) {
   const folderById = new Map<string, SavedFolder>()
@@ -635,6 +693,145 @@ export function DashboardView() {
   }, [dialogQueries, dialogQueryId, isFolderDialogOpen])
 
   const selectedDialogQuery = dialogQueries.find((item) => item.id === dialogQueryId) || null
+  const selectedDialogRecords = useMemo(
+    () => previewRowsToRecords(selectedDialogQuery),
+    [selectedDialogQuery]
+  )
+  const selectedDialogFigure = useMemo(() => {
+    const q = selectedDialogQuery
+    if (!q) return null
+    const records = selectedDialogRecords
+    if (!records.length) return null
+
+    const columns = q.preview?.columns || []
+    const numericCols = columns.filter((col) => records.some((r) => isNumericValue(r[col])))
+    const categoryCols = columns.filter((col) => !numericCols.includes(col))
+    const title = q.title || "Saved Visualization"
+
+    if (q.chartType === "pie") {
+      const labelCol = categoryCols[0] || columns[0]
+      const valueCol = numericCols[0] || columns[1]
+      if (!labelCol || !valueCol) return null
+      const sums = new Map<string, number>()
+      for (const r of records) {
+        const label = String(r[labelCol] ?? "")
+        const value = Number(r[valueCol])
+        if (!Number.isFinite(value)) continue
+        sums.set(label, (sums.get(label) || 0) + value)
+      }
+      return {
+        data: [
+          {
+            type: "pie",
+            labels: Array.from(sums.keys()),
+            values: Array.from(sums.values()),
+            textinfo: "label+percent",
+          },
+        ],
+        layout: { margin: { l: 24, r: 24, t: 36, b: 24 }, title },
+      }
+    }
+
+    if (q.chartType === "line") {
+      const xCol = categoryCols[0] || columns[0]
+      const yCol = numericCols[0] || columns[1]
+      if (!xCol || !yCol) return null
+      return {
+        data: [
+          {
+            type: "scatter",
+            mode: "lines+markers",
+            x: records.map((r) => r[xCol]),
+            y: records.map((r) => Number(r[yCol])),
+            name: yCol,
+          },
+        ],
+        layout: {
+          margin: { l: 40, r: 16, t: 36, b: 40 },
+          xaxis: { title: xCol },
+          yaxis: { title: yCol },
+          title,
+        },
+      }
+    }
+
+    // bar
+    const variant = detectBarVariant(q)
+    if (numericCols.length >= 2 && categoryCols.length >= 1) {
+      const xCol = categoryCols[0]
+      const traces = numericCols.slice(0, 6).map((col) => ({
+        type: "bar",
+        name: col,
+        x: records.map((r) => String(r[xCol] ?? "")),
+        y: records.map((r) => Number(r[col])),
+      }))
+      return {
+        data: traces,
+        layout: {
+          margin: { l: 40, r: 16, t: 36, b: 40 },
+          barmode: variant === "stacked" ? "stack" : "group",
+          xaxis: { title: xCol },
+          yaxis: { title: "value" },
+          title,
+        },
+      }
+    }
+
+    if (numericCols.length >= 1 && categoryCols.length >= 2) {
+      const xCol = categoryCols[0]
+      const gCol = categoryCols[1]
+      const yCol = numericCols[0]
+      const categories = Array.from(new Set(records.map((r) => String(r[xCol] ?? ""))))
+      const groups = Array.from(new Set(records.map((r) => String(r[gCol] ?? ""))))
+      const index = new Map<string, number>()
+      categories.forEach((c, i) => index.set(c, i))
+      const traces = groups.map((g) => {
+        const values = new Array(categories.length).fill(0)
+        for (const r of records) {
+          if (String(r[gCol] ?? "") !== g) continue
+          const key = String(r[xCol] ?? "")
+          const idx = index.get(key)
+          if (idx == null) continue
+          const v = Number(r[yCol])
+          if (Number.isFinite(v)) values[idx] += v
+        }
+        if (variant === "hstack" || variant === "hpercent") {
+          return { type: "bar", name: g, orientation: "h", y: categories, x: values }
+        }
+        return { type: "bar", name: g, x: categories, y: values }
+      })
+      const barmode = variant === "stacked" || variant === "hstack" || variant === "hpercent" ? "stack" : "group"
+      const barnorm = variant === "hpercent" ? "percent" : undefined
+      const horizontal = variant === "hstack" || variant === "hpercent"
+      return {
+        data: traces,
+        layout: {
+          margin: { l: 56, r: 16, t: 36, b: 40 },
+          barmode,
+          barnorm,
+          xaxis: { title: horizontal ? yCol : xCol },
+          yaxis: { title: horizontal ? xCol : yCol },
+          title,
+        },
+      }
+    }
+
+    if (numericCols.length >= 1 && columns.length >= 2) {
+      const xCol = columns[0]
+      const yCol = numericCols[0]
+      return {
+        data: [{ type: "bar", x: records.map((r) => r[xCol]), y: records.map((r) => Number(r[yCol])) }],
+        layout: {
+          margin: { l: 40, r: 16, t: 36, b: 40 },
+          xaxis: { title: xCol },
+          yaxis: { title: yCol },
+          title,
+        },
+      }
+    }
+
+    return null
+  }, [selectedDialogQuery, selectedDialogRecords])
 
   const handleOpenFolder = (folderId: string) => {
     if (folderId === ALL_FOLDER_ID) return
@@ -649,6 +846,7 @@ export function DashboardView() {
       question: (query.title || "").trim(),
       sql: (query.query || "").trim(),
       description: (query.description || "").trim(),
+      chartType: query.chartType,
       ts: Date.now(),
     }
     localStorage.setItem("ql_pending_dashboard_query", JSON.stringify(payload))
@@ -770,23 +968,68 @@ export function DashboardView() {
                 {dialogQueries.length}개 쿼리
               </Badge>
             </div>
+            {dialogQueries.length > 0 && (
+              <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
+                {dialogQueries.map((q) => (
+                  <Button
+                    key={q.id}
+                    variant={q.id === dialogQueryId ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 px-2 text-[11px] whitespace-nowrap"
+                    onClick={() => setDialogQueryId(q.id)}
+                  >
+                    {formatDashboardTitle(q)}
+                  </Button>
+                ))}
+              </div>
+            )}
             <div className="flex-1 min-h-0 rounded-xl border border-border bg-card/60 p-4 overflow-y-auto">
               {selectedDialogQuery ? (
                 <div className="space-y-4">
-                  <div>
-                    <div className="text-sm font-semibold text-foreground">{selectedDialogQuery.title}</div>
-                    <div className="text-xs text-muted-foreground mt-1">{selectedDialogQuery.description}</div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-foreground">{selectedDialogQuery.title}</div>
+                      <div className="text-xs text-muted-foreground mt-1">{selectedDialogQuery.description}</div>
+                    </div>
+                    <Button size="sm" className="h-8" onClick={() => handleRunQuery(selectedDialogQuery)}>
+                      <Play className="w-3.5 h-3.5 mr-1" />
+                      실행
+                    </Button>
                   </div>
 
                   <Card className="border border-border/60">
                     <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">시각화</CardTitle>
-                      <CardDescription className="text-xs">저장된 시각화가 있으면 여기에 표시됩니다.</CardDescription>
+                      <CardTitle className="text-sm">SQL</CardTitle>
+                      <CardDescription className="text-xs">대시보드에 저장된 원본 SQL</CardDescription>
                     </CardHeader>
                     <CardContent>
-                      <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                        저장된 시각화가 없습니다.
-                      </div>
+                      <pre className="rounded-lg bg-secondary/30 p-3 text-xs overflow-x-auto">
+                        <code>{selectedDialogQuery.query || "-- no sql --"}</code>
+                      </pre>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-border/60">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm">시각화</CardTitle>
+                      <CardDescription className="text-xs">저장된 결과 기반 Plotly 차트</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      {selectedDialogFigure ? (
+                        <div className="h-[340px]">
+                          <Plot
+                            data={Array.isArray(selectedDialogFigure.data) ? selectedDialogFigure.data : []}
+                            layout={selectedDialogFigure.layout || {}}
+                            config={{ responsive: true, displaylogo: false, editable: true }}
+                            style={{ width: "100%", height: "100%" }}
+                            useResizeHandler
+                          />
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                          표시할 시각화 데이터가 없습니다.
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
 
@@ -1053,6 +1296,9 @@ function DashboardQueryRow({
   onShare,
   getChartIcon,
 }: DashboardQueryRowProps) {
+  const displayTitle = formatDashboardTitle(query)
+  const displayLastRun = formatDashboardLastRun(query.lastRun)
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_130px_110px] gap-3 px-4 py-3 hover:bg-secondary/20">
       <div className="min-w-0">
@@ -1061,7 +1307,7 @@ function DashboardQueryRow({
             {getChartIcon(query.chartType)}
           </div>
           <div className="min-w-0">
-            <div className="text-sm font-medium text-foreground truncate">{query.title}</div>
+            <div className="text-sm font-medium text-foreground truncate">{displayTitle}</div>
             <div className="text-xs text-muted-foreground line-clamp-1">{query.description}</div>
           </div>
           {query.isPinned && <Pin className="w-3.5 h-3.5 text-primary shrink-0" />}
@@ -1071,7 +1317,7 @@ function DashboardQueryRow({
       <div className="flex flex-wrap gap-1">
         {query.metrics.slice(0, 3).map((metric, idx) => (
           <Badge key={idx} variant="secondary" className="text-[10px] font-normal">
-            {metric.label}: {metric.value}
+            {formatDashboardMetricLabel(metric.label, idx)}: {metric.value}
           </Badge>
         ))}
       </div>
@@ -1079,7 +1325,7 @@ function DashboardQueryRow({
       <div className="text-xs text-muted-foreground space-y-1">
         <div className="flex items-center gap-1">
           <Clock className="w-3 h-3" />
-          <span>{query.lastRun}</span>
+          <span>{displayLastRun}</span>
         </div>
         {query.schedule && (
           <div className="flex items-center gap-1">

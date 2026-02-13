@@ -1,23 +1,10 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import dynamic from "next/dynamic"
 import { Beaker, Play, RotateCcw, TrendingUp, TrendingDown, Minus, ChevronRight, Lightbulb } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  ResponsiveContainer,
-  Legend,
-} from "recharts"
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "@/components/ui/chart"
 
 interface SimulationParams {
   readmissionDays: number
@@ -38,6 +25,8 @@ const defaultParams: SimulationParams = {
   ageThreshold: 65,
   losThreshold: 7,
 }
+
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
 // Generate survival data based on parameters
 function generateSurvivalData(params: SimulationParams) {
@@ -146,16 +135,37 @@ export function WhatIfAnalysis() {
     setHasSimulated(false)
   }
 
-  const chartConfig = {
-    original: {
-      label: "현재 기준",
-      color: "#6b7280",
-    },
-    simulated: {
-      label: "시뮬레이션",
-      color: "#3ecf8e",
-    },
-  }
+  const survivalFigure = useMemo(() => {
+    if (!survivalData.length) return null
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: survivalData.map((d) => d.time),
+          y: survivalData.map((d) => d.original),
+          name: "Baseline",
+          line: { color: "#6b7280", width: 2, shape: "hv", dash: "dash" },
+          hovertemplate: "day %{x}<br>%{y:.1f}%<extra></extra>",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: survivalData.map((d) => d.time),
+          y: survivalData.map((d) => d.simulated),
+          name: "Simulated",
+          line: { color: "#3ecf8e", width: 2, shape: "hv" },
+          hovertemplate: "day %{x}<br>%{y:.1f}%<extra></extra>",
+        },
+      ],
+      layout: {
+        margin: { l: 48, r: 24, t: 24, b: 42 },
+        xaxis: { title: "Time (days)" },
+        yaxis: { title: "Survival (%)", range: [0, 100] },
+        legend: { orientation: "h", y: 1.14 },
+      },
+    }
+  }, [survivalData])
 
   const renderChangeIndicator = (original: number, newVal: number) => {
     const diff = newVal - original
@@ -350,60 +360,21 @@ export function WhatIfAnalysis() {
                 <ChevronRight className="w-4 h-4 text-primary" />
                 생존 곡선 비교
               </h4>
-              <ChartContainer config={chartConfig} className="h-[280px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={survivalData} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                    <XAxis
-                      dataKey="time"
-                      stroke="var(--muted-foreground)"
-                      fontSize={12}
-                      tickLine={false}
-                      axisLine={false}
-                      tickFormatter={(value) => `${value}일`}
-                    />
-                    <YAxis
-                      stroke="var(--muted-foreground)"
-                      fontSize={12}
-                      tickLine={false}
-                      axisLine={false}
-                      domain={[0, 100]}
-                      tickFormatter={(value) => `${value}%`}
-                    />
-                    <ChartTooltip
-                      content={
-                        <ChartTooltipContent
-                          formatter={(value, name) => {
-                            const label = name === "original" ? "현재 기준" : "시뮬레이션"
-                            return [`${Number(value).toFixed(1)}%`, label]
-                          }}
-                        />
-                      }
-                    />
-                    <Legend
-                      verticalAlign="top"
-                      height={36}
-                      formatter={(value) => (value === "original" ? "현재 기준" : "시뮬레이션")}
-                    />
-                    <Line
-                      type="stepAfter"
-                      dataKey="original"
-                      stroke="#6b7280"
-                      strokeWidth={2}
-                      strokeDasharray="5 5"
-                      dot={false}
-                    />
-                    <Line
-                      type="stepAfter"
-                      dataKey="simulated"
-                      stroke="#3ecf8e"
-                      strokeWidth={2}
-                      dot={false}
-                      activeDot={{ r: 4, fill: "#3ecf8e", stroke: "var(--background)", strokeWidth: 2 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </ChartContainer>
+              <div className="h-[280px]">
+                {survivalFigure ? (
+                  <Plot
+                    data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
+                    layout={survivalFigure.layout || {}}
+                    config={{ responsive: true, displaylogo: false, editable: true }}
+                    style={{ width: "100%", height: "100%" }}
+                    useResizeHandler
+                  />
+                ) : (
+                  <div className="h-full rounded-lg border border-dashed border-border text-sm text-muted-foreground flex items-center justify-center">
+                    No simulation chart data.
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Insight Box */}

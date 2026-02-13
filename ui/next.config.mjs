@@ -5,7 +5,7 @@ const API_BASE_URL =
 const VIS_API_BASE_URL =
   process.env.VIS_API_BASE_URL ||
   process.env.NEXT_PUBLIC_VIS_API_BASE_URL ||
-  "http://localhost:8080"
+  "http://localhost:18080"
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {

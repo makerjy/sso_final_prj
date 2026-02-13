@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import dynamic from "next/dynamic"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -36,17 +37,6 @@ import {
   ChevronRight,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  ResponsiveContainer,
-  ReferenceLine,
-  Legend,
-  Tooltip,
-} from "recharts"
 
 type TabType = "whatif" | "cohorts"
 
@@ -164,6 +154,8 @@ const EMPTY_METRICS: CohortMetrics = {
   icuAdmissionRate: 0,
   erAdmissionRate: 0,
 }
+
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
 function toApiParams(params: CohortParams) {
   return {
@@ -554,6 +546,47 @@ export function CohortView() {
   const survivalData = simulation?.survival ?? []
   const confidence = simulation?.confidence
   const subgroupData: SubgroupPayload = simulation?.subgroups ?? { age: [], gender: [], comorbidity: [] }
+  const survivalFigure = useMemo(() => {
+    if (!survivalData.length) return null
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: survivalData.map((d) => d.time),
+          y: survivalData.map((d) => d.current),
+          name: "Current",
+          line: { color: "#64748b", width: 2, shape: "hv", dash: "dash" },
+          hovertemplate: "day %{x}<br>%{y:.1f}%<extra></extra>",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: survivalData.map((d) => d.time),
+          y: survivalData.map((d) => d.simulated),
+          name: "Simulated",
+          line: { color: "#22c55e", width: 2, shape: "hv" },
+          hovertemplate: "day %{x}<br>%{y:.1f}%<extra></extra>",
+        },
+      ],
+      layout: {
+        margin: { l: 48, r: 24, t: 24, b: 42 },
+        xaxis: { title: "Time (days)" },
+        yaxis: { title: "Survival (%)", range: [0, 100] },
+        legend: { orientation: "h", y: 1.14 },
+        shapes: [
+          {
+            type: "line",
+            x0: Math.min(...survivalData.map((d) => d.time)),
+            x1: Math.max(...survivalData.map((d) => d.time)),
+            y0: 50,
+            y1: 50,
+            line: { color: "#475569", width: 1, dash: "dash" },
+          },
+        ],
+      },
+    }
+  }, [survivalData])
 
   const metricCards = [
     {
@@ -933,46 +966,19 @@ export function CohortView() {
                 <div>
                   <h4 className="text-sm font-medium text-foreground mb-3">생존 곡선 비교</h4>
                   <div className="h-[250px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={survivalData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                        <XAxis
-                          dataKey="time"
-                          stroke="#64748b"
-                          tick={{ fontSize: 10 }}
-                          label={{ value: "시간 (일)", position: "bottom", offset: -5, fontSize: 10, fill: "#64748b" }}
-                        />
-                        <YAxis
-                          stroke="#64748b"
-                          tick={{ fontSize: 10 }}
-                          domain={[0, 100]}
-                          label={{ value: "생존율 (%)", angle: -90, position: "insideLeft", fontSize: 10, fill: "#64748b" }}
-                        />
-                        <Tooltip
-                          contentStyle={{ backgroundColor: "#1e293b", border: "1px solid #334155", borderRadius: "8px" }}
-                          labelStyle={{ color: "#94a3b8" }}
-                        />
-                        <Legend verticalAlign="top" height={36} />
-                        <ReferenceLine y={50} stroke="#475569" strokeDasharray="5 5" />
-                        <Line
-                          type="stepAfter"
-                          dataKey="current"
-                          stroke="#64748b"
-                          strokeWidth={2}
-                          strokeDasharray="5 5"
-                          dot={false}
-                          name="현재 기준"
-                        />
-                        <Line
-                          type="stepAfter"
-                          dataKey="simulated"
-                          stroke="#22c55e"
-                          strokeWidth={2}
-                          dot={false}
-                          name="시뮬레이션"
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
+                    {survivalFigure ? (
+                      <Plot
+                        data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
+                        layout={survivalFigure.layout || {}}
+                        config={{ responsive: true, displaylogo: false, editable: true }}
+                        style={{ width: "100%", height: "100%" }}
+                        useResizeHandler
+                      />
+                    ) : (
+                      <div className="h-full rounded-lg border border-dashed border-border text-sm text-muted-foreground flex items-center justify-center">
+                        No survival data available.
+                      </div>
+                    )}
                   </div>
                 </div>
 

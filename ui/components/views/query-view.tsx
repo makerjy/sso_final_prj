@@ -22,19 +22,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { 
+import {
   Send, 
   Code, 
   BarChart3,
-  CheckCircle2,
   AlertTriangle,
-  XCircle,
   Play,
   Loader2,
   Eye,
   Pencil,
   Sparkles,
-  Shield,
   Table2,
   FileText,
   RefreshCw,
@@ -44,23 +41,7 @@ import {
   BookmarkPlus
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { SurvivalChart } from "@/components/survival-chart"
 import { useAuth } from "@/components/auth-provider"
-import {
-  ResponsiveContainer,
-  CartesianGrid,
-  XAxis,
-  YAxis,
-  Tooltip,
-  Legend,
-  ComposedChart,
-  BarChart,
-  Bar,
-  LineChart,
-  Line,
-  ScatterChart,
-  Scatter,
-} from "recharts"
 
 interface ChatMessage {
   id: string
@@ -105,12 +86,6 @@ interface OneShotPayload {
   mode: "demo" | "advanced" | "clarify"
   question: string
   result?: DemoResult
-  assumptions?: {
-    applied?: boolean
-    period?: string
-    cohort?: string
-    message?: string
-  } | null
   risk?: { risk?: number; intent?: string }
   policy?: PolicyResult | null
   draft?: { final_sql?: string }
@@ -188,6 +163,7 @@ interface ResultTabState {
   showQueryResultPanel: boolean
   editedSql: string
   isEditing: boolean
+  preferredChartType?: "line" | "bar" | "pie" | null
 }
 
 interface DashboardFolderOption {
@@ -276,14 +252,6 @@ const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | n
           : [],
       }
     : undefined
-  const assumptions = payload.assumptions
-    ? {
-        applied: Boolean(payload.assumptions.applied),
-        period: payload.assumptions.period,
-        cohort: payload.assumptions.cohort,
-        message: payload.assumptions.message,
-      }
-    : undefined
   const clarification = payload.clarification
     ? {
         reason: payload.clarification.reason,
@@ -302,7 +270,6 @@ const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | n
       mode: payload.mode,
       question: payload.question,
       result,
-      assumptions,
       risk: payload.risk,
       policy,
       draft,
@@ -331,6 +298,8 @@ export function QueryView() {
   const { user, isHydrated: isAuthHydrated } = useAuth()
   const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  // Keep visualization on same-origin rewrite path to avoid bypassing /visualize proxy.
+  const vizUrl = (path: string) => path
   const chatUser = (user?.name || "김연구원").trim() || "김연구원"
   const chatUserRole = (user?.role || "연구원").trim() || "연구원"
   const chatHistoryUser = (user?.id || chatUser).trim() || chatUser
@@ -390,6 +359,8 @@ export function QueryView() {
   const [isDesktopLayout, setIsDesktopLayout] = useState(false)
   const [resultsPanelWidth, setResultsPanelWidth] = useState(55)
   const [isPanelResizing, setIsPanelResizing] = useState(false)
+  const [selectedStatsBoxColumn, setSelectedStatsBoxColumn] = useState<string>("")
+  const [showStatsBoxPlot, setShowStatsBoxPlot] = useState(false)
   const saveTimerRef = useRef<number | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
   const sqlScrollRef = useRef<HTMLDivElement | null>(null)
@@ -445,52 +416,47 @@ export function QueryView() {
     [previewColumns, previewRows]
   )
   const statsRows = useMemo(() => buildSimpleStats(previewColumns, previewRows), [previewColumns, previewRows])
-  const boxPlotRows = useMemo(
+  const boxPlotEligibleRows = useMemo(
     () =>
-      statsRows
-        .filter((row) => row.count > 0 && row.q1 != null && row.q3 != null && row.min != null && row.max != null)
-        .map((row) => {
-          const min = row.min as number
-          const q1 = row.q1 as number
-          const median = row.median as number
-          const q3 = row.q3 as number
-          const max = row.max as number
-          const iqr = Math.max(0, q3 - q1)
-          const whiskerLow = Math.max(min, q1 - 1.5 * iqr)
-          const whiskerHigh = Math.min(max, q3 + 1.5 * iqr)
-          return {
-            column: row.column,
-            min,
-            q1,
-            median,
-            q3,
-            max,
-            whiskerLow,
-            whiskerHigh,
-            outlierLow: min < whiskerLow ? min : null,
-            outlierHigh: max > whiskerHigh ? max : null,
-            iqrBase: q1,
-            iqr,
-          }
-        }),
+      statsRows.filter((row) => {
+        const required = [row.min, row.q1, row.median, row.q3, row.max, row.avg]
+        return row.count > 0 && required.every((value) => typeof value === "number" && Number.isFinite(value))
+      }),
     [statsRows]
   )
-  const boxPlotYDomain = useMemo<[number, number] | undefined>(() => {
-    if (!boxPlotRows.length) return undefined
-    const minValue = Math.min(...boxPlotRows.map((row) => row.whiskerLow))
-    const maxValue = Math.max(...boxPlotRows.map((row) => row.whiskerHigh))
-    const spread = Math.max(1, maxValue - minValue)
-    const pad = Math.max(20, spread * 0.1)
-    const paddedMin = minValue - pad
-    const paddedMax = maxValue + pad
-    if (paddedMin === paddedMax) return [paddedMin - 1, paddedMax + 1]
-    return [paddedMin, paddedMax]
-  }, [boxPlotRows])
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
-  const recommendedAnalysis = useMemo(
-    () => (Array.isArray(visualizationResult?.analyses) ? visualizationResult!.analyses![0] : null),
-    [visualizationResult]
+  const activeTab = useMemo(
+    () => resultTabs.find((item) => item.id === activeTabId) || null,
+    [resultTabs, activeTabId]
   )
+  const preferredDashboardChartType = activeTab?.preferredChartType || null
+  const recommendedAnalysis = useMemo(() => {
+    const analyses = Array.isArray(visualizationResult?.analyses) ? visualizationResult.analyses : []
+    if (!analyses.length) return null
+    if (preferredDashboardChartType === "pie") {
+      return (
+        analyses.find((item) => {
+          const chartType = String(item?.chart_spec?.chart_type || "").toLowerCase()
+          return chartType === "pie" || chartType === "nested_pie" || chartType === "sunburst"
+        }) || analyses[0]
+      )
+    }
+    if (preferredDashboardChartType === "line") {
+      return (
+        analyses.find(
+          (item) => String(item?.chart_spec?.chart_type || "").toLowerCase() === "line"
+        ) || analyses[0]
+      )
+    }
+    if (preferredDashboardChartType === "bar") {
+      return (
+        analyses.find(
+          (item) => String(item?.chart_spec?.chart_type || "").toLowerCase().startsWith("bar")
+        ) || analyses[0]
+      )
+    }
+    return analyses[0]
+  }, [visualizationResult, preferredDashboardChartType])
   const recommendedFigure = useMemo(() => {
     const fig = recommendedAnalysis?.figure_json
     if (fig && typeof fig === "object") return fig as { data?: unknown[]; layout?: Record<string, unknown> }
@@ -552,6 +518,228 @@ export function QueryView() {
       data,
     }
   }, [recommendedAnalysis, previewColumns, previewRecords])
+  const fallbackChart = useMemo(() => {
+    if (!previewColumns.length || !previewRecords.length) return null
+
+    const numericColumns = previewColumns.filter((col) =>
+      previewRecords.some((row) => Number.isFinite(Number(row?.[col])))
+    )
+    if (!numericColumns.length) return null
+
+    const categoryColumns = previewColumns.filter((col) => !numericColumns.includes(col))
+    const xKey = categoryColumns[0] || previewColumns[0]
+    const yKey = numericColumns.find((col) => col !== xKey) || numericColumns[0]
+    if (!xKey || !yKey) return null
+
+    const grouped = new Map<string, { total: number; count: number }>()
+    for (const row of previewRecords) {
+      const key = String(row?.[xKey] ?? "")
+      const yValue = Number(row?.[yKey])
+      if (!Number.isFinite(yValue)) continue
+      if (!grouped.has(key)) grouped.set(key, { total: 0, count: 0 })
+      const item = grouped.get(key)!
+      item.total += yValue
+      item.count += 1
+    }
+
+    const data = Array.from(grouped.entries())
+      .map(([x, value]) => ({
+        x,
+        y: Number((value.count ? value.total / value.count : 0).toFixed(4)),
+      }))
+      .filter((item) => item.x.length > 0)
+
+    if (!data.length) return null
+    return {
+      type: "bar" as const,
+      xKey,
+      yKey,
+      data: data.slice(0, 50),
+    }
+  }, [previewColumns, previewRecords])
+  const chartForRender = recommendedChart || fallbackChart
+  const localFallbackFigure = useMemo(() => {
+    if (!chartForRender?.data?.length) return null
+
+    if (chartForRender.type === "scatter") {
+      return {
+        data: [
+          {
+            type: "scatter",
+            mode: "markers",
+            x: chartForRender.data.map((p) => p.x),
+            y: chartForRender.data.map((p) => p.y),
+            name: chartForRender.yKey,
+            marker: { color: "#3b82f6", size: 8, opacity: 0.85 },
+          },
+        ],
+        layout: {
+          autosize: true,
+          margin: { l: 52, r: 24, t: 20, b: 56 },
+          xaxis: { title: chartForRender.xKey },
+          yaxis: { title: chartForRender.yKey },
+          paper_bgcolor: "transparent",
+          plot_bgcolor: "transparent",
+        },
+      }
+    }
+
+    return {
+      data: [
+        {
+          type: chartForRender.type === "line" ? "scatter" : "bar",
+          mode: chartForRender.type === "line" ? "lines+markers" : undefined,
+          x: chartForRender.data.map((p) => p.x),
+          y: chartForRender.data.map((p) => p.y),
+          name: chartForRender.yKey,
+          marker: { color: chartForRender.type === "line" ? "#10b981" : "#3b82f6" },
+          line: chartForRender.type === "line" ? { color: "#10b981", width: 2 } : undefined,
+          text: chartForRender.type === "bar" ? chartForRender.data.map((p) => p.y) : undefined,
+          textposition: chartForRender.type === "bar" ? "outside" : undefined,
+        },
+      ],
+      layout: {
+        autosize: true,
+        margin: { l: 52, r: 24, t: 20, b: 56 },
+        xaxis: { title: chartForRender.xKey },
+        yaxis: { title: chartForRender.yKey },
+        paper_bgcolor: "transparent",
+        plot_bgcolor: "transparent",
+      },
+    }
+  }, [chartForRender])
+
+  const survivalFigure = useMemo(() => {
+    if (!survivalChartData?.length) return null
+    const sorted = [...survivalChartData].sort((a, b) => a.time - b.time)
+    return {
+      data: [
+        {
+          type: "scatter",
+          mode: "lines",
+          x: sorted.map((d) => d.time),
+          y: sorted.map((d) => d.upperCI),
+          line: { width: 0 },
+          hoverinfo: "skip",
+          showlegend: false,
+          name: "Upper CI",
+        },
+        {
+          type: "scatter",
+          mode: "lines",
+          x: sorted.map((d) => d.time),
+          y: sorted.map((d) => d.lowerCI),
+          fill: "tonexty",
+          fillcolor: "rgba(62,207,142,0.18)",
+          line: { width: 0 },
+          hoverinfo: "skip",
+          showlegend: false,
+          name: "Lower CI",
+        },
+        {
+          type: "scatter",
+          mode: "lines+markers",
+          x: sorted.map((d) => d.time),
+          y: sorted.map((d) => d.survival),
+          name: "Survival",
+          line: { color: "#3ecf8e", width: 2, shape: "hv" },
+          marker: { size: 5 },
+          hovertemplate: "time=%{x}<br>survival=%{y:.2f}%<extra></extra>",
+        },
+      ],
+      layout: {
+        autosize: true,
+        margin: { l: 56, r: 24, t: 22, b: 56 },
+        xaxis: { title: "Time" },
+        yaxis: { title: "Survival (%)", range: [0, 100] },
+        shapes: [
+          {
+            type: "line",
+            x0: Math.min(...sorted.map((d) => d.time)),
+            x1: Math.max(...sorted.map((d) => d.time)),
+            y0: 50,
+            y1: 50,
+            line: { color: "#94a3b8", width: 1, dash: "dash" },
+          },
+          {
+            type: "line",
+            x0: medianSurvival,
+            x1: medianSurvival,
+            y0: 0,
+            y1: 100,
+            line: { color: "#10b981", width: 1, dash: "dash" },
+          },
+        ],
+        annotations: [
+          {
+            x: 0.99,
+            y: 0.02,
+            xref: "paper",
+            yref: "paper",
+            showarrow: false,
+            text: `N=${totalPatients}, Events=${totalEvents}, Median=${medianSurvival.toFixed(2)}`,
+            font: { size: 11, color: "#64748b" },
+            xanchor: "right",
+            yanchor: "bottom",
+          },
+        ],
+        paper_bgcolor: "transparent",
+        plot_bgcolor: "transparent",
+      },
+    }
+  }, [survivalChartData, medianSurvival, totalPatients, totalEvents])
+
+  const statsBoxPlotFigures = useMemo<Array<{ column: string; figure: { data: unknown[]; layout: Record<string, unknown> } }>>(() => {
+    if (!previewRecords.length || !boxPlotEligibleRows.length) return []
+    const figures: Array<{ column: string; figure: { data: unknown[]; layout: Record<string, unknown> } }> = []
+    for (const row of boxPlotEligibleRows) {
+      const values = previewRecords
+        .map((record) => Number(record?.[row.column]))
+        .filter((value) => Number.isFinite(value))
+      if (!values.length) continue
+      figures.push({
+        column: row.column,
+        figure: {
+          data: [
+            {
+              type: "box",
+              name: row.column,
+              y: values,
+              boxpoints: "outliers",
+              marker: { color: "#60a5fa", opacity: 0.72 },
+              line: { color: "#3b82f6" },
+            },
+          ],
+          layout: {
+            autosize: true,
+            margin: { l: 52, r: 20, t: 10, b: 28 },
+            yaxis: { title: row.column, automargin: true },
+            xaxis: { title: "", showticklabels: false, automargin: true },
+            paper_bgcolor: "transparent",
+            plot_bgcolor: "transparent",
+            showlegend: false,
+          },
+        },
+      })
+    }
+    return figures
+  }, [previewRecords, boxPlotEligibleRows])
+  const selectedStatsBoxPlot = useMemo(() => {
+    if (!statsBoxPlotFigures.length) return null
+    return (
+      statsBoxPlotFigures.find((item) => item.column === selectedStatsBoxColumn) ||
+      statsBoxPlotFigures[0]
+    )
+  }, [statsBoxPlotFigures, selectedStatsBoxColumn])
+  useEffect(() => {
+    if (!statsBoxPlotFigures.length) {
+      if (selectedStatsBoxColumn) setSelectedStatsBoxColumn("")
+      if (showStatsBoxPlot) setShowStatsBoxPlot(false)
+      return
+    }
+    const exists = statsBoxPlotFigures.some((item) => item.column === selectedStatsBoxColumn)
+    if (!exists) setSelectedStatsBoxColumn(statsBoxPlotFigures[0].column)
+  }, [statsBoxPlotFigures, selectedStatsBoxColumn, showStatsBoxPlot])
   const resultInterpretation = useMemo(() => {
     if (summary) return summary
     if (!previewColumns.length) return "쿼리 결과가 없어 해석을 생성할 수 없습니다."
@@ -605,16 +793,18 @@ export function QueryView() {
   }
 
   const integratedInsight = useMemo(() => {
-    if (visualizationResult?.insight) return normalizeInsightText(visualizationResult.insight)
-    const lines: string[] = []
-    lines.push(resultInterpretation)
-    lines.push(chartInterpretation)
-    lines.push(statsInterpretation)
-    if (riskScore != null) {
-      lines.push(`위험 점수는 ${riskScore}${riskIntent ? ` (${riskIntent})` : ""}로 평가되었습니다.`)
+    const serverInsight = normalizeInsightText(
+      String(visualizationResult?.insight || activeTab?.insight || "").trim()
+    )
+    if (serverInsight) return serverInsight
+    if (visualizationLoading) {
+      return "시각화 LLM이 SQL과 쿼리 결과를 기반으로 인사이트를 생성 중입니다."
     }
-    return normalizeInsightText(lines.join("\n\n"))
-  }, [visualizationResult, resultInterpretation, chartInterpretation, statsInterpretation, riskScore, riskIntent])
+    if (visualizationError) {
+      return `시각화 LLM 인사이트 생성에 실패했습니다. (${visualizationError})`
+    }
+    return "시각화 LLM 인사이트가 아직 없습니다. 쿼리를 다시 실행하거나 시각화를 새로고침해 주세요."
+  }, [visualizationResult, activeTab?.insight, visualizationLoading, visualizationError])
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
@@ -641,6 +831,7 @@ export function QueryView() {
     showQueryResultPanel: false,
     editedSql: "",
     isEditing: false,
+    preferredChartType: null,
   })
 
   const updateTab = (tabId: string, patch: Partial<ResultTabState>) => {
@@ -678,7 +869,7 @@ export function QueryView() {
         Object.fromEntries(previewData.columns.map((col, idx) => [col, row?.[idx]]))
       )
       const res = await fetchWithTimeout(
-        apiUrl("/visualize"),
+        vizUrl("/visualize"),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -977,19 +1168,12 @@ export function QueryView() {
       if (data.payload.result?.source) parts.push(`데모 캐시(source: ${data.payload.result.source}) 기반입니다.`)
       return parts.join(" ")
     }
-    const assumptionMessage =
-      data.payload.assumptions?.applied && data.payload.assumptions?.message
-        ? data.payload.assumptions.message.trim()
-        : ""
-    if (assumptionMessage) {
-      return assumptionMessage
-    }
     const base = "요청하신 내용을 바탕으로 SQL을 준비했어요. 실행하면 결과를 가져올게요."
     const payload = data.payload
     const localRiskScore = payload?.final?.risk_score ?? payload?.risk?.risk
     const localRiskIntent = payload?.risk?.intent
     const riskLabel =
-      localRiskScore != null ? `위험도 ${localRiskScore}${localRiskIntent ? ` (${localRiskIntent})` : ""}로 평가됐어요.` : ""
+      localRiskScore != null ? `위험도 ${localRiskScore}${localRiskIntent ? ` (${localRiskIntent})` : ""}로 평가되었어요.` : ""
     return [base, riskLabel].filter(Boolean).join(" ")
   }
 
@@ -1216,8 +1400,21 @@ export function QueryView() {
         await executeAdvancedSql({
           qid: data.qid,
           sql: generatedSql,
-          questionForSuggestions: effectiveQuestionForSuggestions,
+          questionForSuggestions: trimmed,
           addAssistantMessage: true,
+          tabId: tab.id,
+        })
+      } else if (data.payload.mode === "demo" && generatedSql.trim()) {
+        const viz = await fetchVisualizationPlan(
+          generatedSql.trim(),
+          trimmed,
+          data.payload.result?.preview || null,
+          tab.id
+        )
+        updateTab(tab.id, {
+          resultData: data.payload.result?.preview || null,
+          visualization: viz,
+          insight: normalizeInsightText(viz?.insight || ""),
         })
       }
     } catch (err: any) {
@@ -1371,6 +1568,13 @@ export function QueryView() {
             row_cap: previewRowCap ?? null,
           }
         : undefined
+    const resolvedChartType: "line" | "bar" | "pie" = (() => {
+      const specType = String(recommendedAnalysis?.chart_spec?.chart_type || "").toLowerCase()
+      if (specType === "line") return "line"
+      if (specType === "pie" || specType === "nested_pie" || specType === "sunburst") return "pie"
+      if (chartForRender?.type === "line") return "line"
+      return "bar"
+    })()
     const newEntry = {
       id: `dashboard-${Date.now()}`,
       title: finalTitle,
@@ -1382,7 +1586,7 @@ export function QueryView() {
       folderId: folderId || undefined,
       preview: previewPayload,
       metrics,
-      chartType: "bar",
+      chartType: resolvedChartType,
     }
     setBoardSaving(true)
     setBoardMessage(null)
@@ -1545,7 +1749,7 @@ export function QueryView() {
       if (!raw) return
       localStorage.removeItem("ql_pending_dashboard_query")
 
-      let parsed: { question?: string; sql?: string } | null = null
+      let parsed: { question?: string; sql?: string; chartType?: "line" | "bar" | "pie" } | null = null
       try {
         parsed = JSON.parse(raw)
       } catch {
@@ -1555,10 +1759,15 @@ export function QueryView() {
       if (!sqlText) return
 
       const questionText = String(parsed?.question || "").trim() || "대시보드 저장 쿼리"
+      const preferredChartType =
+        parsed?.chartType === "line" || parsed?.chartType === "bar" || parsed?.chartType === "pie"
+          ? parsed.chartType
+          : null
       const tab = createResultTab(questionText)
       tab.sql = sqlText
       tab.editedSql = sqlText
       tab.showSqlPanel = true
+      tab.preferredChartType = preferredChartType
       setResultTabs((prev) => [tab, ...prev])
       setActiveTabId(tab.id)
       setShowResults(true)
@@ -1569,9 +1778,11 @@ export function QueryView() {
       setSuggestedQuestions([])
 
       try {
+        const questionForViz =
+          preferredChartType === "pie" ? `${questionText} 파이 차트로 비율 중심 시각화` : questionText
         await executeAdvancedSql({
           sql: sqlText,
-          questionForSuggestions: questionText,
+          questionForSuggestions: questionForViz,
           addAssistantMessage: true,
           tabId: tab.id,
         })
@@ -1666,81 +1877,6 @@ export function QueryView() {
       }
       return next
     })
-  }
-
-  const validation = (() => {
-    if (!payload) return null
-    if (mode === "demo") {
-      return {
-        status: "safe" as const,
-        checks: [{ name: "Demo cache", passed: true, message: "캐시 결과" }]
-      }
-    }
-    if (mode === "clarify") {
-      return {
-        status: "warning" as const,
-        checks: [{ name: "Clarification", passed: false, message: "추가 질문 응답 대기 중" }]
-      }
-    }
-    const checks: { name: string; passed: boolean; message: string }[] = []
-    const policyChecks = Array.isArray(payload?.policy?.checks)
-      ? payload.policy!.checks!
-      : Array.isArray(runResult?.policy?.checks)
-        ? runResult!.policy!.checks!
-        : []
-    if (policyChecks.length > 0) {
-      const passedAll = policyChecks.every((item) => item.passed)
-      checks.push({ name: "PolicyGate", passed: passedAll, message: passedAll ? "통과" : "실패" })
-      for (const item of policyChecks) {
-        checks.push({
-          name: item.name || "Policy",
-          passed: Boolean(item.passed),
-          message: item.message || "",
-        })
-      }
-    } else {
-      checks.push({ name: "PolicyGate", passed: true, message: "통과" })
-    }
-    if (riskScore != null) {
-      checks.push({
-        name: "Risk score",
-        passed: riskScore < 3,
-        message: `${riskScore}${riskIntent ? ` (${riskIntent})` : ""}`
-      })
-    }
-    let status: "safe" | "warning" | "danger" = "safe"
-    if (checks.some((item) => !item.passed && item.name !== "Risk score")) {
-      status = "danger"
-    } else if ((riskScore ?? 0) >= 4) status = "danger"
-    else if ((riskScore ?? 0) >= 2) status = "warning"
-    return { status, checks }
-  })()
-  const validationStatus = validation?.status ?? "safe"
-  const validationChecks = validation?.checks ?? []
-
-  const getValidationIcon = (status: string) => {
-    switch (status) {
-      case "safe": return <CheckCircle2 className="w-4 h-4 text-primary" />
-      case "warning": return <AlertTriangle className="w-4 h-4 text-yellow-500" />
-      case "danger": return <XCircle className="w-4 h-4 text-destructive" />
-      default: return null
-    }
-  }
-
-  const getValidationLabel = (name: string) => {
-    const labels: Record<string, string> = {
-      "PolicyGate": "정책 게이트",
-      "Read-only": "읽기 전용",
-      "Statement type": "쿼리 타입",
-      "CTE": "CTE 문법",
-      "Join limit": "조인 개수 제한",
-      "WHERE rule": "WHERE 규칙",
-      "Table scope": "테이블 범위",
-      "Risk score": "위험 점수",
-      "Demo cache": "데모 캐시",
-      "Clarification": "질문 명확화",
-    }
-    return labels[name] || name
   }
 
   return (
@@ -1977,42 +2113,6 @@ export function QueryView() {
                 </Button>
               </div>
 
-              <Card
-                className={cn(
-                  "border-l-4",
-                  validationStatus === "safe" && "border-l-primary",
-                  validationStatus === "warning" && "border-l-yellow-500",
-                  validationStatus === "danger" && "border-l-destructive"
-                )}
-              >
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <Shield className="w-4 h-4" />
-                    안전 검증 결과
-                    {getValidationIcon(validationStatus)}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {validationChecks.length ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {validationChecks.map((check, idx) => (
-                        <div key={idx} className="flex items-start gap-2 text-xs">
-                          {check.passed ? (
-                            <CheckCircle2 className="w-3 h-3 text-primary mt-0.5 shrink-0" />
-                          ) : (
-                            <XCircle className="w-3 h-3 text-destructive mt-0.5 shrink-0" />
-                          )}
-                          <span className="text-muted-foreground shrink-0 whitespace-nowrap">{getValidationLabel(check.name)}:</span>
-                          <span className="text-foreground break-words">{check.message}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-muted-foreground">검증 정보가 아직 없습니다.</div>
-                  )}
-                </CardContent>
-              </Card>
-
               {showSqlPanel && (
               <Card>
                 <CardHeader className="pb-2">
@@ -2208,130 +2308,6 @@ export function QueryView() {
 
               <Card>
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">시각화 차트</CardTitle>
-                  <CardDescription className="text-xs">결과 테이블 기반 시각화</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {visualizationLoading ? (
-                    <div className="rounded-lg border border-border p-6 text-xs text-muted-foreground">
-                      시각화 추천 플랜을 생성 중입니다...
-                    </div>
-                  ) : visualizationError ? (
-                    <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-6 text-xs text-destructive">
-                      {visualizationError}
-                    </div>
-                  ) : previewColumns.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                      결과 테이블이 없어 차트를 표시할 수 없습니다.
-                    </div>
-                  ) : recommendedFigure ? (
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Badge variant="outline">
-                          {String(recommendedAnalysis?.chart_spec?.chart_type || "plotly").toUpperCase()}
-                        </Badge>
-                        {recommendedAnalysis?.chart_spec?.x && (
-                          <Badge variant="secondary">X: {recommendedAnalysis.chart_spec.x}</Badge>
-                        )}
-                        {recommendedAnalysis?.chart_spec?.y && (
-                          <Badge variant="secondary">Y: {recommendedAnalysis.chart_spec.y}</Badge>
-                        )}
-                      </div>
-                      <div className="h-[380px] w-full rounded-lg border border-border p-2">
-                        <Plot
-                          data={Array.isArray(recommendedFigure.data) ? recommendedFigure.data : []}
-                          layout={{
-                            autosize: true,
-                            margin: { l: 48, r: 16, t: 16, b: 48 },
-                            paper_bgcolor: "transparent",
-                            plot_bgcolor: "transparent",
-                            ...(recommendedFigure.layout || {}),
-                          }}
-                          config={{ responsive: true, displaylogo: false }}
-                          style={{ width: "100%", height: "100%" }}
-                        />
-                      </div>
-                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
-                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
-                          {recommendedAnalysis?.reason && <p>추천 이유: {normalizeInsightText(recommendedAnalysis.reason)}</p>}
-                          {recommendedAnalysis?.summary && <p>요약: {normalizeInsightText(recommendedAnalysis.summary)}</p>}
-                        </div>
-                      )}
-                    </div>
-                  ) : recommendedChart?.type === "scatter" ? (
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Badge variant="outline">SCATTER</Badge>
-                        <Badge variant="secondary">X: {recommendedChart.xKey}</Badge>
-                        <Badge variant="secondary">Y: {recommendedChart.yKey}</Badge>
-                      </div>
-                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <ScatterChart>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis type="number" dataKey="x" tick={{ fontSize: 12 }} />
-                            <YAxis type="number" dataKey="y" tick={{ fontSize: 12 }} />
-                            <Tooltip />
-                            <Legend />
-                            <Scatter data={recommendedChart.data} fill="#3b82f6" name={recommendedChart.yKey} />
-                          </ScatterChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-                  ) : recommendedChart ? (
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Badge variant="outline">{recommendedChart.type.toUpperCase()}</Badge>
-                        <Badge variant="secondary">X: {recommendedChart.xKey}</Badge>
-                        <Badge variant="secondary">Y: {recommendedChart.yKey}</Badge>
-                      </div>
-                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
-                        <ResponsiveContainer width="100%" height="100%">
-                          {recommendedChart.type === "line" ? (
-                            <LineChart data={recommendedChart.data}>
-                              <CartesianGrid strokeDasharray="3 3" />
-                              <XAxis dataKey="x" tick={{ fontSize: 12 }} />
-                              <YAxis tick={{ fontSize: 12 }} />
-                              <Tooltip />
-                              <Legend />
-                              <Line type="monotone" dataKey="y" stroke="#10b981" strokeWidth={2} dot={false} />
-                            </LineChart>
-                          ) : (
-                            <BarChart data={recommendedChart.data}>
-                              <CartesianGrid strokeDasharray="3 3" />
-                              <XAxis dataKey="x" tick={{ fontSize: 12 }} />
-                              <YAxis tick={{ fontSize: 12 }} />
-                              <Tooltip />
-                              <Legend />
-                              <Bar dataKey="y" fill="#3b82f6" />
-                            </BarChart>
-                          )}
-                        </ResponsiveContainer>
-                      </div>
-                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
-                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
-                          {recommendedAnalysis?.reason && <p>추천 이유: {recommendedAnalysis.reason}</p>}
-                          {recommendedAnalysis?.summary && <p>요약: {recommendedAnalysis.summary}</p>}
-                        </div>
-                      )}
-                    </div>
-                  ) : survivalChartData?.length ? (
-                    <SurvivalChart
-                      data={survivalChartData}
-                      medianSurvival={medianSurvival}
-                      totalPatients={totalPatients}
-                      totalEvents={totalEvents}
-                    />
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                      현재 결과로 생성 가능한 차트가 없습니다. 시간/이벤트 컬럼이 포함되면 생존 차트를 표시합니다.
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-2">
                   <CardTitle className="text-sm">통계 자료</CardTitle>
                   <CardDescription className="text-xs">컬럼별 MIN, Q1, 중앙값, Q3, MAX, 평균, 결측치, NULL 개수</CardDescription>
                 </CardHeader>
@@ -2373,37 +2349,166 @@ export function QueryView() {
                         </table>
                       </div>
 
-                      {boxPlotRows.length ? (
-                        <div className="rounded-lg border border-border p-3">
-                          <div className="mb-2 text-xs text-muted-foreground">박스플롯 (컬럼별 분포)</div>
-                          <div className="h-[320px] w-full">
-                            <ResponsiveContainer width="100%" height="100%">
-                              <ComposedChart data={boxPlotRows}>
-                                <CartesianGrid strokeDasharray="3 3" />
-                                <XAxis dataKey="column" tick={{ fontSize: 12 }} />
-                                <YAxis tick={{ fontSize: 12 }} domain={boxPlotYDomain} allowDataOverflow />
-                                <Tooltip />
-                                <Legend />
-                                <Bar dataKey="iqrBase" stackId="box" fill="transparent" legendType="none" />
-                                <Bar dataKey="iqr" stackId="box" name="IQR (Q1~Q3)" fill="#60a5fa" stroke="#3b82f6" />
-                                <Line type="linear" dataKey="whiskerLow" name="MIN (whisker)" stroke="#64748b" dot={false} />
-                                <Line type="linear" dataKey="whiskerHigh" name="MAX (whisker)" stroke="#64748b" dot={false} />
-                                <Scatter dataKey="median" name="중앙값" fill="#ef4444" />
-                                <Scatter dataKey="outlierLow" name="하위 이상치" fill="#f59e0b" />
-                                <Scatter dataKey="outlierHigh" name="상위 이상치" fill="#f59e0b" />
-                              </ComposedChart>
-                            </ResponsiveContainer>
+                      {statsBoxPlotFigures.length ? (
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-xs text-muted-foreground">박스플롯 (컬럼별 개별 분포)</div>
+                            <div className="flex items-center gap-2">
+                              {showStatsBoxPlot && statsBoxPlotFigures.length > 1 ? (
+                                <div className="w-[220px]">
+                                  <Select
+                                    value={selectedStatsBoxPlot?.column || undefined}
+                                    onValueChange={setSelectedStatsBoxColumn}
+                                  >
+                                    <SelectTrigger className="h-8">
+                                      <SelectValue placeholder="박스플롯 컬럼 선택" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {statsBoxPlotFigures.map((item) => (
+                                        <SelectItem key={item.column} value={item.column}>
+                                          {item.column}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              ) : null}
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-8"
+                                onClick={() => setShowStatsBoxPlot((prev) => !prev)}
+                              >
+                                {showStatsBoxPlot ? "박스플롯 숨기기" : "박스플롯 보기"}
+                              </Button>
+                            </div>
                           </div>
+                          {showStatsBoxPlot && selectedStatsBoxPlot ? (
+                            <div className="rounded-lg border border-border p-3">
+                              <div className="mb-2 text-xs text-muted-foreground">{selectedStatsBoxPlot.column}</div>
+                              <div className="h-[320px] w-full">
+                                <Plot
+                                  data={Array.isArray(selectedStatsBoxPlot.figure.data) ? selectedStatsBoxPlot.figure.data : []}
+                                  layout={selectedStatsBoxPlot.figure.layout || {}}
+                                  config={{ responsive: true, displaylogo: false, editable: false }}
+                                  style={{ width: "100%", height: "100%" }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
+                              박스플롯 보기를 눌러 컬럼 분포를 확인하세요.
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
-                          수치형 컬럼이 없어 박스플롯을 생성할 수 없습니다.
+                          MIN, Q1, 중앙값, Q3, MAX, 평균이 모두 있는 수치형 컬럼이 없어 박스플롯을 생성할 수 없습니다.
                         </div>
                       )}
                     </div>
                   ) : (
                     <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
                       결과가 없어 통계 자료를 표시할 수 없습니다.
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">시각화 차트</CardTitle>
+                  <CardDescription className="text-xs">결과 테이블 기반 시각화</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {visualizationLoading ? (
+                    <div className="rounded-lg border border-border p-6 text-xs text-muted-foreground">
+                      시각화 추천 플랜을 생성 중입니다...
+                    </div>
+                  ) : previewColumns.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      결과 테이블이 없어 차트를 표시할 수 없습니다.
+                    </div>
+                  ) : recommendedFigure ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">
+                          {String(recommendedAnalysis?.chart_spec?.chart_type || "plotly").toUpperCase()}
+                        </Badge>
+                        {recommendedAnalysis?.chart_spec?.x && (
+                          <Badge variant="secondary">X: {recommendedAnalysis.chart_spec.x}</Badge>
+                        )}
+                        {recommendedAnalysis?.chart_spec?.y && (
+                          <Badge variant="secondary">Y: {recommendedAnalysis.chart_spec.y}</Badge>
+                        )}
+                      </div>
+                      <div className="h-[380px] w-full rounded-lg border border-border p-2">
+                        <Plot
+                          data={Array.isArray(recommendedFigure.data) ? recommendedFigure.data : []}
+                          layout={{
+                            autosize: true,
+                            margin: { l: 48, r: 16, t: 16, b: 48 },
+                            paper_bgcolor: "transparent",
+                            plot_bgcolor: "transparent",
+                            ...(recommendedFigure.layout || {}),
+                          }}
+                          config={{ responsive: true, displaylogo: false, editable: true }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
+                      </div>
+                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
+                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
+                          {recommendedAnalysis?.reason && <p>추천 이유: {normalizeInsightText(recommendedAnalysis.reason)}</p>}
+                          {recommendedAnalysis?.summary && <p>요약: {normalizeInsightText(recommendedAnalysis.summary)}</p>}
+                        </div>
+                      )}
+                    </div>
+                  ) : localFallbackFigure && chartForRender ? (
+                    <div className="space-y-3">
+                      {visualizationError && (
+                        <div className="rounded-lg border border-amber-300/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+                          시각화 API 응답이 없어 로컬 폴백 차트를 표시합니다: {visualizationError}
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">{chartForRender.type.toUpperCase()}</Badge>
+                        <Badge variant="secondary">X: {chartForRender.xKey}</Badge>
+                        <Badge variant="secondary">Y: {chartForRender.yKey}</Badge>
+                        {!recommendedChart && <Badge variant="secondary">AUTO</Badge>}
+                      </div>
+                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
+                        <Plot
+                          data={Array.isArray(localFallbackFigure.data) ? localFallbackFigure.data : []}
+                          layout={localFallbackFigure.layout || {}}
+                          config={{ responsive: true, displaylogo: false, editable: true }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
+                      </div>
+                      {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
+                        <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
+                          {recommendedAnalysis?.reason && <p>추천 이유: {recommendedAnalysis.reason}</p>}
+                          {recommendedAnalysis?.summary && <p>요약: {recommendedAnalysis.summary}</p>}
+                        </div>
+                      )}
+                    </div>
+                  ) : survivalFigure ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">SURVIVAL (PLOTLY)</Badge>
+                        <Badge variant="secondary">Median: {medianSurvival.toFixed(2)}</Badge>
+                      </div>
+                      <div className="h-[360px] w-full rounded-lg border border-border p-2">
+                        <Plot
+                          data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
+                          layout={survivalFigure.layout || {}}
+                          config={{ responsive: true, displaylogo: false, editable: true }}
+                          style={{ width: "100%", height: "100%" }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                      현재 결과로 생성 가능한 차트가 없습니다. 시간/이벤트 컬럼이 포함되면 생존 차트를 표시합니다.
                     </div>
                   )}
                 </CardContent>
