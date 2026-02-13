@@ -4659,12 +4659,9 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     )
     rules.extend(services_adm_rules)
 
-    # Low-risk categorical literal normalization helps avoid empty-result queries
-    # from unseen enum-like values (e.g., EVENTTYPE='TRANSFERS').
-    categorical_fixed, categorical_rules = _rewrite_unknown_categorical_equals(q, services_adm_fixed)
-    rules.extend(categorical_rules)
-
-    transfers_eventtype_fixed, transfers_eventtype_rules = _strip_transfers_eventtype_filter(q, categorical_fixed)
+    # Keep relaxed mode intent-preserving: do not rewrite user-provided categorical
+    # literals to nearest known values. This rewrite is reserved for aggressive mode.
+    transfers_eventtype_fixed, transfers_eventtype_rules = _strip_transfers_eventtype_filter(q, services_adm_fixed)
     rules.extend(transfers_eventtype_rules)
 
     ordered_count_fixed, ordered_count_rules = _ensure_order_by_count(q, transfers_eventtype_fixed)
@@ -4790,7 +4787,7 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
         rules.extend(relaxed_rules)
         return relaxed_sql, rules
 
-    if mode == "conservative":
+    if profile_mode != "aggressive" and mode == "conservative":
         conservative_sql, conservative_rules = _postprocess_sql_conservative(q, sql)
         rules.extend(conservative_rules)
         return conservative_sql, rules

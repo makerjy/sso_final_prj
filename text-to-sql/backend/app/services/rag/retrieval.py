@@ -166,10 +166,7 @@ def _local_fallback_search(
     ranked = _bm25_rank(query, docs, k=k)
     if ranked:
         return ranked
-    try:
-        return docs[:k]
-    except Exception:
-        return []
+    return []
 
 
 def _merge_hits(hit_lists: list[list[dict[str, Any]]], k: int) -> list[dict[str, Any]]:
@@ -635,7 +632,7 @@ def _compose_glossary_hits(
             relative_ratio=0.75,
             query=question,
             min_lexical_overlap=0.08,
-            allow_fallback=bool(local_map_hits or intent["diagnosis"]),
+            allow_fallback=False,
         )
 
     if not local_proc_hits and not intent["procedure"]:
@@ -648,7 +645,7 @@ def _compose_glossary_hits(
             relative_ratio=0.75,
             query=question,
             min_lexical_overlap=0.08,
-            allow_fallback=bool(local_proc_hits or intent["procedure"]),
+            allow_fallback=False,
         )
 
     has_structured_local_column = any(
@@ -688,7 +685,7 @@ def _compose_glossary_hits(
             relative_ratio=0.70,
             query=question,
             min_lexical_overlap=0.08,
-            allow_fallback=bool(local_label_hits or intent["label_intent"]),
+            allow_fallback=False,
         )
 
     specialized_count = len(diag_hits) + len(proc_hits) + len(label_hits) + len(col_hits)
@@ -703,7 +700,7 @@ def _compose_glossary_hits(
             relative_ratio=0.75,
             query=question,
             min_lexical_overlap=0.10,
-            allow_fallback=True,
+            allow_fallback=False,
         )
 
     total_hits = len(diag_hits) + len(proc_hits) + len(label_hits) + len(col_hits) + len(general_hits)

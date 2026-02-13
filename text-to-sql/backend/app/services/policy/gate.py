@@ -194,8 +194,6 @@ def _has_safe_full_scope_shape(sql: str) -> bool:
         return True
     if _ROWNUM_LIMIT_RE.search(sql) or _FETCH_FIRST_RE.search(sql) or _LIMIT_RE.search(sql):
         return True
-    if bool(re.match(r"^\s*select\s+distinct\b", sql, re.IGNORECASE)):
-        return True
     return False
 
 
@@ -254,7 +252,12 @@ def precheck_sql(sql: str, question: str | None = None) -> dict[str, object]:
     has_where = re.search(r"\bwhere\b", text, re.IGNORECASE) is not None
     where_optional, where_reason = _can_skip_where(question, text)
     where_ok = has_where or where_optional
-    where_message = "WHERE clause present" if has_where else (where_reason or "WHERE optional")
+    if has_where:
+        where_message = "WHERE clause present"
+    elif where_optional:
+        where_message = where_reason or "WHERE optional"
+    else:
+        where_message = "WHERE clause required"
     checks.append(_check("WHERE rule", where_ok, where_message))
     if not has_where and not where_optional:
         raise HTTPException(status_code=403, detail="WHERE clause required")

@@ -99,24 +99,47 @@ def _repair_sql_once(
     repaired_sql = str(repaired.get("final_sql") or "").strip()
     if not repaired_sql:
         raise HTTPException(status_code=400, detail="Auto-repair returned empty SQL")
-    repaired_sql, rules = postprocess_sql(question, repaired_sql, profile="aggressive")
+    profile, profile_reasons = recommend_postprocess_profile(
+        question,
+        repaired_sql,
+        default_profile="relaxed",
+    )
+    repaired_sql, rules = postprocess_sql(question, repaired_sql, profile=profile)
     if rules:
         repaired["postprocess"] = rules
+    if profile_reasons:
+        repaired["postprocess_profile"] = profile
+        repaired["postprocess_profile_reasons"] = profile_reasons
     return repaired_sql, repaired
 
 
 def _should_attempt_zero_result_repair(question: str, sql: str) -> bool:
-    q = str(question or "").lower()
     text = str(sql or "")
-    if not q or not text:
+    if not text:
         return False
-    has_intent = any(token in q for token in _ZERO_RESULT_HINTS)
+    q = str(question or "").lower().strip()
+    if not q:
+        return False
     has_where = bool(re.search(r"\bwhere\b", text, re.IGNORECASE))
     has_agg_shape = bool(
         re.search(r"\bgroup\s+by\b", text, re.IGNORECASE)
         or re.search(r"\b(count|avg|sum|min|max|stddev|median|ntile)\s*\(", text, re.IGNORECASE)
     )
-    return has_intent and (has_where or has_agg_shape)
+    has_intent = any(token in q for token in _ZERO_RESULT_HINTS)
+    if not has_intent:
+        return False
+    analytic_intent = bool(
+        re.search(
+            r"(비교|대비|차이|분포|추이|상위|비율|비중|건수|vs|versus|trend|distribution|top|rate|ratio|count)",
+            q,
+            re.IGNORECASE,
+        )
+    )
+    if has_where:
+        return analytic_intent
+    if has_agg_shape:
+        return analytic_intent
+    return False
 
 
 @router.post("/oneshot")
@@ -205,10 +228,12 @@ def run_query(req: RunRequest):
 
     sql = req.sql
     stored = None
+    sql_from_store = False
     if req.qid:
         stored = _QUERY_STORE.get(req.qid)
     if not sql and stored and "final" in stored:
         sql = stored["final"].get("final_sql")
+        sql_from_store = bool(str(sql or "").strip())
 
     if not sql:
         raise HTTPException(status_code=400, detail="SQL not provided")
@@ -237,6 +262,8 @@ def run_query(req: RunRequest):
     if not question:
         question = ""
     has_original_question = bool(str(question).strip())
+    allow_template_repair = has_original_question
+    allow_llm_repair = has_original_question
 
     user_name = req.user_name or "사용자"
     user_role = req.user_role or "연구원"
@@ -275,40 +302,44 @@ def run_query(req: RunRequest):
             settings.sql_auto_repair_max_attempts if settings.sql_auto_repair_enabled else 0
         )
         max_zero_result_attempts = (
-            settings.sql_zero_result_repair_max_attempts if settings.sql_zero_result_repair_enabled else 0
+            settings.sql_zero_result_repair_max_attempts
+            if settings.sql_zero_result_repair_enabled and has_original_question
+            else 0
         )
         repair_round = 0
         zero_result_round = 0
         seen_sql_signatures: set[str] = {current_sql.strip().rstrip(";")}
         while True:
-            postprocess_profile = "relaxed" if repair_round == 0 else "aggressive"
-            postprocess_reasons: list[str] = []
-            if repair_round == 0:
+            should_skip_first_pass_rewrite = (
+                sql_from_store and repair_round == 0 and zero_result_round == 0
+            )
+            if has_original_question and not should_skip_first_pass_rewrite:
                 postprocess_profile, postprocess_reasons = recommend_postprocess_profile(
                     question,
                     current_sql,
-                    default_profile=postprocess_profile,
+                    default_profile="relaxed",
                 )
-            preprocessed_sql, pre_rules = postprocess_sql(
-                question,
-                current_sql,
-                profile=postprocess_profile,
-            )
-            if preprocessed_sql.strip() != current_sql.strip():
-                current_sql = preprocessed_sql
-            if pre_rules:
-                auto_repair_history.append(
-                    {
-                        "attempt": repair_round + 1,
-                        "source": "postprocess",
-                        "profile": postprocess_profile,
-                        "profile_reasons": postprocess_reasons,
-                        "error": "",
-                        "risk_score": None,
-                        "postprocess": pre_rules,
-                    }
+                preprocessed_sql, pre_rules = postprocess_sql(
+                    question,
+                    current_sql,
+                    profile=postprocess_profile,
                 )
-            if has_original_question:
+                if preprocessed_sql.strip() != current_sql.strip():
+                    current_sql = preprocessed_sql
+                if pre_rules:
+                    auto_repair_history.append(
+                        {
+                            "attempt": repair_round + 1,
+                            "source": "postprocess",
+                            "profile": postprocess_profile,
+                            "profile_reasons": postprocess_reasons,
+                            "error": "",
+                            "risk_score": None,
+                            "postprocess": pre_rules,
+                        }
+                    )
+            should_apply_guard = has_original_question and not should_skip_first_pass_rewrite
+            if should_apply_guard:
                 guarded_sql, guard_rules, guard_issues = enforce_intent_alignment(
                     question,
                     current_sql,
@@ -340,10 +371,15 @@ def run_query(req: RunRequest):
                     and zero_result_round < max_zero_result_attempts
                     and _should_attempt_zero_result_repair(question, current_sql)
                 ):
+                    zero_profile, zero_profile_reasons = recommend_postprocess_profile(
+                        question,
+                        current_sql,
+                        default_profile="relaxed",
+                    )
                     zero_sql, zero_rules = postprocess_sql(
                         question,
                         current_sql,
-                        profile="aggressive",
+                        profile=zero_profile,
                     )
                     zero_sql = str(zero_sql or "").strip()
                     if zero_sql and zero_sql.rstrip(";") != current_sql.rstrip(";"):
@@ -356,13 +392,15 @@ def run_query(req: RunRequest):
                                 {
                                     "attempt": repair_round + 1,
                                     "source": "zero_result_postprocess",
+                                    "profile": zero_profile,
+                                    "profile_reasons": zero_profile_reasons,
                                     "error": "NO_ROWS_RETURNED",
                                     "risk_score": None,
                                     "postprocess": zero_rules,
                                 }
                             )
                             continue
-                    if repair_round < max_repair_attempts:
+                    if allow_llm_repair and repair_round < max_repair_attempts:
                         try:
                             failed_sql = current_sql
                             repaired_sql, repaired_payload = _repair_sql_once(
@@ -459,24 +497,27 @@ def run_query(req: RunRequest):
                         )
                         repair_round += 1
                         continue
-                templated_sql, template_rules = apply_sql_error_templates(
-                    question=question,
-                    sql=current_sql,
-                    error_message=error_message,
-                )
-                if templated_sql.strip() and templated_sql.strip() != current_sql.strip():
-                    current_sql = templated_sql
-                    auto_repair_history.append(
-                        {
-                            "attempt": repair_round + 1,
-                            "source": "template_repair",
-                            "error": error_message,
-                            "risk_score": None,
-                            "postprocess": template_rules,
-                        }
+                if allow_template_repair:
+                    templated_sql, template_rules = apply_sql_error_templates(
+                        question=question,
+                        sql=current_sql,
+                        error_message=error_message,
                     )
-                    repair_round += 1
-                    continue
+                    if templated_sql.strip() and templated_sql.strip() != current_sql.strip():
+                        current_sql = templated_sql
+                        auto_repair_history.append(
+                            {
+                                "attempt": repair_round + 1,
+                                "source": "template_repair",
+                                "error": error_message,
+                                "risk_score": None,
+                                "postprocess": template_rules,
+                            }
+                        )
+                        repair_round += 1
+                        continue
+                if not allow_llm_repair:
+                    raise
                 failed_sql = current_sql
                 repaired_sql, repaired_payload = _repair_sql_once(
                     question=question,

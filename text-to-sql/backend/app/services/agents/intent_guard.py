@@ -122,6 +122,10 @@ def enforce_intent_alignment(
 
     rewritten, rules = postprocess_sql(question, sql, profile="aggressive")
     after = detect_intent_alignment_issues(question, rewritten, planner_intent=planner_intent)
-    if rewritten.strip() != str(sql or "").strip() or len(after) < len(before):
+    before_set = set(before)
+    after_set = set(after)
+    improved = len(after) < len(before)
+    no_regression = after_set.issubset(before_set)
+    if rewritten.strip() != str(sql or "").strip() and improved and no_regression:
         return rewritten, rules, after
     return sql, [], before

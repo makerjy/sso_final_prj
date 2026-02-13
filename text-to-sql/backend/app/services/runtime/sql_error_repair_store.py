@@ -106,13 +106,22 @@ def load_sql_error_repair_rules() -> dict[str, Any]:
     return _RULES_CACHE
 
 
-def find_learned_sql_fix(sql: str, *, error_message: str | None = None) -> dict[str, Any] | None:
+def find_learned_sql_fix(
+    sql: str,
+    *,
+    error_message: str | None = None,
+    allow_without_error: bool = False,
+) -> dict[str, Any] | None:
     cfg = load_sql_error_repair_rules()
     if not bool(cfg.get("enabled", True)):
         return None
 
     sql_hash = _sql_hash(sql)
     signature = _error_signature(error_message) if error_message is not None else None
+    # Blindly applying learned rewrites without the original error context can
+    # degrade semantic accuracy. Only permit this when explicitly requested.
+    if signature is None and not allow_without_error:
+        return None
     rules = cfg.get("rules", [])
     if not isinstance(rules, list):
         return None

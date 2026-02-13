@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import dataclass
 from datetime import datetime
 import math
 import json
@@ -18,6 +19,7 @@ from app.services.agents.translator import contains_korean, translate_to_english
 from app.services.cost_tracker import get_cost_tracker
 from app.services.policy.gate import precheck_sql
 from app.services.runtime.context_builder import build_context_payload, build_context_payload_multi
+from app.services.runtime.context_budget import trim_context_to_budget
 from app.services.runtime.risk_classifier import classify
 
 _SQL_EXAMPLES_CACHE: dict[str, Any] | None = None
@@ -125,10 +127,15 @@ def _lookup_sql_examples_exact(*questions: str | None) -> dict[str, str] | None:
         if len(candidates) == 1:
             return candidates[0]
         lowered = text.lower()
-        for candidate in candidates:
-            if str(candidate.get("question") or "").strip().lower() == lowered:
-                return candidate
-        return candidates[0]
+        exact_matches = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("question") or "").strip().lower() == lowered
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        # Ambiguous normalized collisions are skipped to avoid mis-anchoring SQL.
+        continue
     return None
 
 
@@ -240,6 +247,40 @@ def _inject_exact_match_example_hint(
     }
     context["examples"] = [hint, *deduped]
     return context
+
+
+@dataclass
+class _ContextPayloadPack:
+    schemas: list[dict[str, Any]]
+    examples: list[dict[str, Any]]
+    templates: list[dict[str, Any]]
+    glossary: list[dict[str, Any]]
+
+
+def _trim_context_payload_to_budget(context: dict[str, Any], budget: int) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return context
+    packed = _ContextPayloadPack(
+        schemas=list(context.get("schemas") or []),
+        examples=list(context.get("examples") or []),
+        templates=list(context.get("templates") or []),
+        glossary=list(context.get("glossary") or []),
+    )
+    trimmed = trim_context_to_budget(packed, budget)
+    return {
+        "schemas": list(getattr(trimmed, "schemas", [])),
+        "examples": list(getattr(trimmed, "examples", [])),
+        "templates": list(getattr(trimmed, "templates", [])),
+        "glossary": list(getattr(trimmed, "glossary", [])),
+    }
+
+
+def _risk_input_text(question: str, question_en: str | None) -> str:
+    base = str(question or "").strip()
+    translated = str(question_en or "").strip()
+    if not translated or translated == base:
+        return base
+    return f"{base}\n{translated}"
 
 
 _QUESTION_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[가-힣]+")
@@ -1288,7 +1329,7 @@ def run_oneshot(
         matched_sql = str(matched_example.get("sql") or "").strip()
         matched_question = str(matched_example.get("question") or "").strip()
         if matched_sql and exact_match_mode == "short_circuit":
-            risk_info = classify(translated_question or question)
+            risk_info = classify(_risk_input_text(question, translated_question))
             final_payload: dict[str, Any] = {
                 "final_sql": matched_sql,
                 "used_tables": [],
@@ -1349,11 +1390,16 @@ def run_oneshot(
         if matched_sql and matched_question:
             matched_example_hint = {"question": matched_question, "sql": matched_sql}
 
-    risk_info = classify(translated_question or question)
+    risk_info = classify(_risk_input_text(question, translated_question))
     if translated_question and use_rag_multi:
         context = build_context_payload_multi([question, translated_question])
     elif translated_question:
-        context = build_context_payload(translated_question)
+        # Korean queries lose lexical signal when retrieval uses translated text only.
+        # Keep bilingual retrieval even when multi-query is disabled.
+        if contains_korean(question):
+            context = build_context_payload_multi([question, translated_question])
+        else:
+            context = build_context_payload(translated_question)
     else:
         context = build_context_payload(question)
     if matched_example_hint:
@@ -1362,6 +1408,7 @@ def run_oneshot(
             question=matched_example_hint.get("question", ""),
             sql=matched_example_hint.get("sql", ""),
         )
+        context = _trim_context_payload_to_budget(context, settings.context_token_budget)
 
     planner_payload: dict[str, Any] | None = None
     planner_intent: dict[str, Any] | None = None
