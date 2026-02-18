@@ -331,6 +331,11 @@ _PLANNER_COMPLEX_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     re.compile(
+        r"\b(count|avg|average|sum|min|max|median)\b.*\bby\b|\bby\b.*\b(count|avg|average|sum|min|max|median)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\btop\s+\d+\b|상위\s*\d+|탑\s*\d+", re.IGNORECASE),
+    re.compile(
         r"(수술\s*후|입원\s*후|\d+\s*(일|주|개월|월|년)\s*이내|after\s+\d+\s*(day|week|month|year)|within\s+\d+\s*(day|week|month|year)|between\s+\S+\s+and\s+\S+)",
         re.IGNORECASE,
     ),
@@ -369,8 +374,8 @@ def _decide_planner_usage(
         return True, {"enabled": True, "mode": mode, "reason": "activation_mode_always"}
 
     # default: complex_only
-    # Intent normalization is safer than skipping planner on seemingly simple questions.
-    # Keep complexity signals for telemetry but run planner by default.
+    # Run planner only when complexity signals are present.
+    # Keep signal telemetry even when planner is skipped.
     mode = "complex_only"
     token_count = _count_question_tokens(question, question_en)
     signal_hits = _count_planner_complex_signals(question, question_en)
@@ -392,10 +397,12 @@ def _decide_planner_usage(
     if has_long_question:
         reasons.append("long_question")
 
-    return True, {
-        "enabled": True,
+    required_gate_count = 1
+    should_run_planner = gate_count >= required_gate_count
+    return should_run_planner, {
+        "enabled": should_run_planner,
         "mode": mode,
-        "reason": ",".join(reasons) if reasons else "intent_normalization_default",
+        "reason": ",".join(reasons) if reasons else "complexity_gate_not_met",
         "token_count": token_count,
         "signal_hits": signal_hits,
         "risk_complexity": complexity_score,
@@ -403,7 +410,24 @@ def _decide_planner_usage(
         "effective_complexity_threshold": effective_complexity_threshold,
         "min_question_tokens": min_question_tokens,
         "gate_count": gate_count,
+        "required_gate_count": required_gate_count,
     }
+
+
+def _should_apply_expert_review(settings: Any, risk_info: dict[str, Any]) -> bool:
+    mode = str(getattr(settings, "expert_trigger_mode", "score") or "score").strip().lower()
+    if mode in {"off", "false", "disabled"}:
+        return False
+    if mode in {"always", "on", "all"}:
+        return True
+
+    risk_score = int(risk_info.get("risk") or 0)
+    complexity_score = int(risk_info.get("complexity") or 0)
+    threshold = max(0, int(getattr(settings, "expert_score_threshold", 0)))
+    if risk_score >= threshold:
+        return True
+    # Analytical prompts can be low-risk but still need an expert pass.
+    return complexity_score >= max(2, threshold - 2)
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_/-]*")
 _MULTI_SPACE_RE = re.compile(r"\s+")
@@ -1264,6 +1288,9 @@ def run_oneshot(
     scope_assumptions: dict[str, Any] = {"applied": False}
     use_translate = settings.translate_ko_to_en if translate is None else translate
     use_rag_multi = settings.rag_multi_query if rag_multi is None else rag_multi
+    oneshot_postprocess_enabled = bool(getattr(settings, "oneshot_postprocess_enabled", False))
+    oneshot_intent_guard_enabled = bool(getattr(settings, "oneshot_intent_guard_enabled", False))
+    oneshot_intent_realign_enabled = bool(getattr(settings, "oneshot_intent_realign_enabled", False))
 
     if settings.demo_mode or settings.demo_cache_always:
         cache = _load_demo_cache(settings.demo_cache_path)
@@ -1342,9 +1369,9 @@ def run_oneshot(
             cached["question_en"] = translated_question
             return cached
 
-    exact_match_mode = str(getattr(settings, "sql_examples_exact_match_mode", "hint") or "hint").strip().lower()
+    exact_match_mode = str(getattr(settings, "sql_examples_exact_match_mode", "off") or "off").strip().lower()
     if exact_match_mode not in {"off", "hint", "short_circuit"}:
-        exact_match_mode = "hint"
+        exact_match_mode = "off"
     matched_example_hint: dict[str, str] | None = None
     matched_example = (
         _lookup_sql_examples_exact(question, translated_question)
@@ -1363,7 +1390,7 @@ def run_oneshot(
                 "source": "sql_examples_exact_match",
                 "matched_question": matched_question,
             }
-            if not skip_policy:
+            if not skip_policy and oneshot_postprocess_enabled:
                 profile, profile_reasons = recommend_postprocess_profile(
                     question,
                     matched_sql,
@@ -1376,21 +1403,23 @@ def run_oneshot(
                 if profile_reasons:
                     final_payload["postprocess_profile"] = profile
                     final_payload["postprocess_profile_reasons"] = profile_reasons
-            aligned_sql, alignment_rules, unresolved_issues = enforce_intent_alignment(
-                question,
-                matched_sql,
-                planner_intent=None,
-            )
-            if aligned_sql.strip() != matched_sql.strip():
-                matched_sql = aligned_sql
-                final_payload["final_sql"] = matched_sql
-                if alignment_rules:
-                    existing = final_payload.get("postprocess")
-                    base_rules = list(existing) if isinstance(existing, list) else []
-                    for rule in alignment_rules:
-                        if rule not in base_rules:
-                            base_rules.append(rule)
-                    final_payload["postprocess"] = base_rules
+            unresolved_issues: list[str] = []
+            if oneshot_intent_guard_enabled:
+                aligned_sql, alignment_rules, unresolved_issues = enforce_intent_alignment(
+                    question,
+                    matched_sql,
+                    planner_intent=None,
+                )
+                if aligned_sql.strip() != matched_sql.strip():
+                    matched_sql = aligned_sql
+                    final_payload["final_sql"] = matched_sql
+                    if alignment_rules:
+                        existing = final_payload.get("postprocess")
+                        base_rules = list(existing) if isinstance(existing, list) else []
+                        for rule in alignment_rules:
+                            if rule not in base_rules:
+                                base_rules.append(rule)
+                        final_payload["postprocess"] = base_rules
             if unresolved_issues:
                 final_payload["intent_alignment_issues"] = unresolved_issues
             policy_result = None
@@ -1472,7 +1501,7 @@ def run_oneshot(
             engineer.pop("warnings", None)
             final_payload = engineer
 
-            if settings.expert_trigger_mode == "score" and risk_info["risk"] >= settings.expert_score_threshold:
+            if _should_apply_expert_review(settings, risk_info):
                 expert = review_sql(
                     question,
                     context,
@@ -1491,37 +1520,45 @@ def run_oneshot(
             _add_llm_cost(usage, "oneshot")
 
             final_sql = final_payload.get("final_sql") or ""
+            unresolved_issues: list[str] = []
             if final_sql:
-                profile, profile_reasons = recommend_postprocess_profile(
-                    question,
-                    final_sql,
-                    default_profile="relaxed",
-                )
-                final_sql, rules = postprocess_sql(question, final_sql, profile=profile)
-                if rules:
-                    final_payload["final_sql"] = final_sql
-                    final_payload["postprocess"] = rules
-                if profile_reasons:
-                    final_payload["postprocess_profile"] = profile
-                    final_payload["postprocess_profile_reasons"] = profile_reasons
+                if oneshot_postprocess_enabled:
+                    profile, profile_reasons = recommend_postprocess_profile(
+                        question,
+                        final_sql,
+                        default_profile="relaxed",
+                    )
+                    final_sql, rules = postprocess_sql(question, final_sql, profile=profile)
+                    if rules:
+                        final_payload["final_sql"] = final_sql
+                        final_payload["postprocess"] = rules
+                    if profile_reasons:
+                        final_payload["postprocess_profile"] = profile
+                        final_payload["postprocess_profile_reasons"] = profile_reasons
 
-                aligned_sql, alignment_rules, unresolved_issues = enforce_intent_alignment(
-                    question,
-                    final_payload.get("final_sql") or final_sql,
-                    planner_intent=planner_intent,
-                )
-                if aligned_sql.strip() != str(final_payload.get("final_sql") or "").strip():
-                    final_payload["final_sql"] = aligned_sql
-                    final_sql = aligned_sql
-                    if alignment_rules:
-                        existing = final_payload.get("postprocess")
-                        base_rules = list(existing) if isinstance(existing, list) else []
-                        for rule in alignment_rules:
-                            if rule not in base_rules:
-                                base_rules.append(rule)
-                        final_payload["postprocess"] = base_rules
+                if oneshot_intent_guard_enabled:
+                    aligned_sql, alignment_rules, unresolved_issues = enforce_intent_alignment(
+                        question,
+                        final_payload.get("final_sql") or final_sql,
+                        planner_intent=planner_intent,
+                    )
+                    if aligned_sql.strip() != str(final_payload.get("final_sql") or "").strip():
+                        final_payload["final_sql"] = aligned_sql
+                        final_sql = aligned_sql
+                        if alignment_rules:
+                            existing = final_payload.get("postprocess")
+                            base_rules = list(existing) if isinstance(existing, list) else []
+                            for rule in alignment_rules:
+                                if rule not in base_rules:
+                                    base_rules.append(rule)
+                            final_payload["postprocess"] = base_rules
                 # Planner intent and SQL are inconsistent: run expert once as a targeted realignment pass.
-                if unresolved_issues and planner_intent and not expert_applied:
+                if (
+                    unresolved_issues
+                    and planner_intent
+                    and not expert_applied
+                    and oneshot_intent_realign_enabled
+                ):
                     try:
                         intent_realign = review_sql(
                             question,

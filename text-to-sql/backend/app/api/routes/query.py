@@ -32,9 +32,6 @@ router = APIRouter()
 
 _QUERY_STORE: dict[str, dict] = {}
 _ZERO_RESULT_HINTS = (
-    "count",
-    "how many",
-    "number of",
     "ratio",
     "rate",
     "trend",
@@ -42,12 +39,29 @@ _ZERO_RESULT_HINTS = (
     "top",
     "비율",
     "비중",
-    "건수",
     "분포",
     "추이",
     "상위",
     "비교",
-    "여부",
+    "대비",
+    "차이",
+)
+_ENABLE_RUNTIME_REWRITE_ON_RETRY = False
+_TEMPLATE_REPAIR_ERROR_CODES = {
+    "ORA-00904",
+    "ORA-00905",
+    "ORA-00933",
+    "ORA-00942",
+    "ORA-00979",
+    "ORA-01722",
+}
+_TEMPLATE_REPAIR_ERROR_MARKERS = (
+    "ORA-00904",
+    "ORA-00905",
+    "ORA-00933",
+    "ORA-00942",
+    "ORA-00979",
+    "ORA-01722",
 )
 
 
@@ -79,6 +93,19 @@ def _add_llm_cost(usage: dict[str, Any], stage: str) -> None:
         get_cost_tracker().add_cost(cost, {"usage": usage, "stage": stage, "source": "llm"})
 
 
+def _is_template_repair_candidate(
+    *,
+    structured_error: dict[str, Any] | None,
+    error_message: str,
+) -> bool:
+    if isinstance(structured_error, dict):
+        code = str(structured_error.get("error_code") or "").strip().upper()
+        if code in _TEMPLATE_REPAIR_ERROR_CODES:
+            return True
+    upper = str(error_message or "").upper()
+    return any(marker in upper for marker in _TEMPLATE_REPAIR_ERROR_MARKERS)
+
+
 def _repair_sql_once(
     *,
     question: str,
@@ -105,7 +132,7 @@ def _repair_sql_once(
     profile, profile_reasons = recommend_postprocess_profile(
         question,
         repaired_sql,
-        default_profile="relaxed",
+        default_profile="auto",
     )
     repaired_sql, rules = postprocess_sql(question, repaired_sql, profile=profile)
     if rules:
@@ -131,18 +158,19 @@ def _should_attempt_zero_result_repair(question: str, sql: str) -> bool:
     has_intent = any(token in q for token in _ZERO_RESULT_HINTS)
     if not has_intent:
         return False
+    if not (has_where and has_agg_shape):
+        return False
+    if re.search(r"\b(subject_id|hadm_id|stay_id|icd_code|itemid)\b", text, re.IGNORECASE):
+        # Identifier-level filters often legitimately return zero rows; avoid broadening them.
+        return False
     analytic_intent = bool(
         re.search(
-            r"(비교|대비|차이|분포|추이|상위|비율|비중|건수|vs|versus|trend|distribution|top|rate|ratio|count)",
+            r"(비교|대비|차이|분포|추이|상위|비율|비중|vs|versus|trend|distribution|top|rate|ratio)",
             q,
             re.IGNORECASE,
         )
     )
-    if has_where:
-        return analytic_intent
-    if has_agg_shape:
-        return analytic_intent
-    return False
+    return analytic_intent
 
 
 @router.post("/oneshot")
@@ -231,12 +259,10 @@ def run_query(req: RunRequest):
 
     sql = req.sql
     stored = None
-    sql_from_store = False
     if req.qid:
         stored = _QUERY_STORE.get(req.qid)
     if not sql and stored and "final" in stored:
         sql = stored["final"].get("final_sql")
-        sql_from_store = bool(str(sql or "").strip())
 
     if not sql:
         raise HTTPException(status_code=400, detail="SQL not provided")
@@ -313,10 +339,12 @@ def run_query(req: RunRequest):
         zero_result_round = 0
         seen_sql_signatures: set[str] = {current_sql.strip().rstrip(";")}
         while True:
-            should_skip_first_pass_rewrite = (
-                sql_from_store and repair_round == 0 and zero_result_round == 0
+            should_apply_runtime_rewrite = (
+                _ENABLE_RUNTIME_REWRITE_ON_RETRY
+                and has_original_question
+                and (repair_round > 0 or zero_result_round > 0)
             )
-            if has_original_question and not should_skip_first_pass_rewrite:
+            if should_apply_runtime_rewrite:
                 postprocess_profile, postprocess_reasons = recommend_postprocess_profile(
                     question,
                     current_sql,
@@ -341,7 +369,7 @@ def run_query(req: RunRequest):
                             "postprocess": pre_rules,
                         }
                     )
-            should_apply_guard = has_original_question and not should_skip_first_pass_rewrite
+            should_apply_guard = should_apply_runtime_rewrite
             if should_apply_guard:
                 guarded_sql, guard_rules, guard_issues = enforce_intent_alignment(
                     question,
@@ -506,7 +534,10 @@ def run_query(req: RunRequest):
                         )
                         repair_round += 1
                         continue
-                if allow_template_repair:
+                if allow_template_repair and _is_template_repair_candidate(
+                    structured_error=structured_error,
+                    error_message=error_message,
+                ):
                     templated_sql, template_rules = apply_sql_error_templates(
                         question=question,
                         sql=current_sql,

@@ -15,12 +15,24 @@ import sys
 sys.path.append(str(ROOT / "backend"))
 
 from app.services.agents.orchestrator import run_oneshot
+from app.services.agents.sql_error_parser import parse_sql_error
 from app.services.agents.sql_error_templates import apply_sql_error_templates
 from app.services.agents.sql_expert import repair_sql_after_error
 from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
 from app.core.config import get_settings
 from app.services.oracle.executor import execute_sql
 from app.services.runtime.sql_error_repair_store import find_learned_sql_fix
+
+
+_TEMPLATE_REPAIR_ERROR_CODES = {
+    "ORA-00904",
+    "ORA-00905",
+    "ORA-00933",
+    "ORA-00942",
+    "ORA-00979",
+    "ORA-01722",
+}
+_TEMPLATE_REPAIR_ERROR_MARKERS = tuple(_TEMPLATE_REPAIR_ERROR_CODES)
 
 
 def load_examples(path: Path) -> list[dict[str, Any]]:
@@ -90,7 +102,7 @@ def _augment_examples_from_report(
     added = 0
     for item in report_rows:
         status = str(item.get("status") or "").strip().lower()
-        if status not in {"mismatch", "exec_error"}:
+        if status not in {"mismatch", "generated_exec_error", "exec_error"}:
             continue
         expected_error = str(item.get("expected_error") or "").strip()
         if expected_error:
@@ -126,6 +138,19 @@ def safe_execute(sql: str) -> tuple[dict[str, Any] | None, str | None]:
         return None, str(exc.detail)
     except Exception as exc:
         return None, str(exc)
+
+
+def _is_template_repair_candidate(
+    *,
+    structured_error: dict[str, Any] | None,
+    error_message: str,
+) -> bool:
+    if isinstance(structured_error, dict):
+        code = str(structured_error.get("error_code") or "").strip().upper()
+        if code in _TEMPLATE_REPAIR_ERROR_CODES:
+            return True
+    upper = str(error_message or "").upper()
+    return any(marker in upper for marker in _TEMPLATE_REPAIR_ERROR_MARKERS)
 
 
 def _extract_payload_context(payload: dict[str, Any]) -> tuple[str | None, dict[str, Any], dict[str, Any] | None]:
@@ -176,6 +201,7 @@ def execute_with_repair(
             return current_sql, None, error, repair_round
 
         error_message = str(error or "")
+        structured_error = parse_sql_error(error_message, sql=current_sql)
         known_fix = find_learned_sql_fix(current_sql, error_message=error_message)
         if isinstance(known_fix, dict):
             known_fixed_sql = str(known_fix.get("fixed_sql") or "").strip()
@@ -184,15 +210,19 @@ def execute_with_repair(
                 repair_round += 1
                 continue
 
-        templated_sql, _ = apply_sql_error_templates(
-            question=question,
-            sql=current_sql,
+        if _is_template_repair_candidate(
+            structured_error=structured_error,
             error_message=error_message,
-        )
-        if templated_sql.strip() and templated_sql.strip() != current_sql.strip():
-            current_sql = templated_sql
-            repair_round += 1
-            continue
+        ):
+            templated_sql, _ = apply_sql_error_templates(
+                question=question,
+                sql=current_sql,
+                error_message=error_message,
+            )
+            if templated_sql.strip() and templated_sql.strip() != current_sql.strip():
+                current_sql = templated_sql
+                repair_round += 1
+                continue
 
         try:
             repaired = repair_sql_after_error(
@@ -343,6 +373,8 @@ def main() -> int:
     exec_ok = 0
     match_ok = 0
     demo_used = 0
+    expected_exec_error = 0
+    generated_exec_error = 0
 
     settings = get_settings()
     service_mode = args.execution_mode == "service_pipeline"
@@ -494,7 +526,13 @@ def main() -> int:
                 "repair_attempts": repair_attempts,
             }
 
-            if exp_result and gen_result:
+            if exp_result is None:
+                expected_exec_error += 1
+                status["status"] = "expected_exec_error"
+            elif gen_result is None:
+                generated_exec_error += 1
+                status["status"] = "generated_exec_error"
+            else:
                 exec_ok += 1
                 matched, detail = compare_results(exp_result, gen_result, args.ignore_order)
                 if matched:
@@ -503,8 +541,6 @@ def main() -> int:
                 else:
                     status["status"] = "mismatch"
                 status["compare"] = detail
-            else:
-                status["status"] = "exec_error"
 
             report.write(json.dumps(status, ensure_ascii=True, default=str) + "\n")
 
@@ -513,6 +549,9 @@ def main() -> int:
         "generated_sql": gen_ok,
         "executed_both": exec_ok,
         "matched": match_ok,
+        "expected_exec_error": expected_exec_error,
+        "generated_exec_error": generated_exec_error,
+        "comparable_cases": exec_ok,
         "demo_used": demo_used,
         "execution_mode": args.execution_mode,
         "db_timeout_sec": get_settings().db_timeout_sec,

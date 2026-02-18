@@ -68,11 +68,28 @@ def save_connection_settings(req: ConnectionSettings):
             "reason": detail or "metadata sync failed",
         }
 
+    tables_synced = int(sync_result.get("tables") or 0)
+    if tables_synced <= 0:
+        return {
+            "ok": True,
+            "metadata_synced": False,
+            "owner": owner.upper(),
+            "reason": "No tables found for the configured schema owner",
+        }
+
+    effective_owner = str(sync_result.get("effective_owner") or owner).strip().upper()
+    if effective_owner:
+        current_default = str(payload.get("defaultSchema") or previous.get("defaultSchema") or "").strip().upper()
+        if current_default != effective_owner:
+            payload["defaultSchema"] = effective_owner
+            persist_connection_settings(payload)
+            reset_pool()
+
     return {
         "ok": True,
         "metadata_synced": True,
-        "owner": owner.upper(),
-        "tables": int(sync_result.get("tables") or 0),
+        "owner": effective_owner or owner.upper(),
+        "tables": tables_synced,
     }
 
 

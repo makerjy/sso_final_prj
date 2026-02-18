@@ -3,6 +3,7 @@
     "mode": "conservative"
   },
   "schema_aliases": {
+    "use_schema_hints": false,
     "table_aliases": {},
     "column_aliases": {}
   },

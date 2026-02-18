@@ -946,10 +946,15 @@ def _build_label_intent_hits(question: str, *, k: int) -> list[dict[str, Any]]:
 
 
 def _filter_schema_hits(question: str, hits: list[dict[str, Any]], *, max_items: int) -> list[dict[str, Any]]:
-    deduped = _dedupe_hits(hits, max_items=max(max_items, 6))
     scoped_tables = {name.lower() for name in load_table_scope() if name}
+    scoped_limit = max_items
     if scoped_tables:
-        return deduped[:max_items]
+        # When table scope is explicit, avoid truncating schema context to rag_top_k.
+        # Keep at least one schema entry per scoped table (bounded for safety).
+        scoped_limit = max(max_items, min(len(scoped_tables), 128))
+    deduped = _dedupe_hits(hits, max_items=max(scoped_limit, 6))
+    if scoped_tables:
+        return deduped[:scoped_limit]
     return _filter_hits(
         deduped,
         max_items=max_items,
@@ -961,15 +966,22 @@ def _filter_schema_hits(question: str, hits: list[dict[str, Any]], *, max_items:
     )
 
 
+def _schema_retrieval_k(settings: Any) -> int:
+    base = max(1, int(getattr(settings, "rag_top_k", 5) or 5))
+    # Preserve broader schema coverage even when global rag_top_k is tuned low.
+    return max(base, 12)
+
+
 def build_candidate_context(question: str) -> CandidateContext:
     settings = get_settings()
     store = MongoStore()
     intent = _detect_search_intent(question)
     examples_limit, templates_limit = _resolve_context_limits(question, settings)
+    schema_k = _schema_retrieval_k(settings)
 
-    schema_hits = _hybrid_search(store, question, k=settings.rag_top_k, where={"type": "schema"})
+    schema_hits = _hybrid_search(store, question, k=schema_k, where={"type": "schema"})
     schema_hits = _apply_table_scope(schema_hits)
-    schema_hits = _filter_schema_hits(question, schema_hits, max_items=settings.rag_top_k)
+    schema_hits = _filter_schema_hits(question, schema_hits, max_items=schema_k)
     example_hits = _hybrid_search(store, question, k=examples_limit, where={"type": "example"})
     example_hits = _dedupe_hits(example_hits, max_items=max(examples_limit * 2, examples_limit))
     example_hits = _filter_hits(
@@ -1128,16 +1140,17 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
     merged_query = " ".join(deduped)
     merged_intent = _detect_search_intent(merged_query)
     examples_limit, templates_limit = _resolve_context_limits(merged_query, settings)
+    schema_k = _schema_retrieval_k(settings)
 
     def _per_query_k(total: int) -> int:
         return max(1, int(math.ceil(total / len(deduped))))
 
     schema_hits = _merge_hits(
-        [_hybrid_search(store, q, k=_per_query_k(settings.rag_top_k), where={"type": "schema"}) for q in deduped],
-        k=settings.rag_top_k,
+        [_hybrid_search(store, q, k=_per_query_k(schema_k), where={"type": "schema"}) for q in deduped],
+        k=schema_k,
     )
     schema_hits = _apply_table_scope(schema_hits)
-    schema_hits = _filter_schema_hits(merged_query, schema_hits, max_items=settings.rag_top_k)
+    schema_hits = _filter_schema_hits(merged_query, schema_hits, max_items=schema_k)
     example_hits = _merge_hits(
         [_hybrid_search(store, q, k=_per_query_k(examples_limit), where={"type": "example"}) for q in deduped],
         k=examples_limit,

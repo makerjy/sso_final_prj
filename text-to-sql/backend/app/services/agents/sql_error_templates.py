@@ -53,6 +53,18 @@ def _find_aliases(sql: str, table_name: str) -> set[str]:
     return aliases
 
 
+def _declared_aliases(sql: str) -> set[str]:
+    aliases: set[str] = set()
+    for match in _TABLE_ALIAS_RE.finditer(sql):
+        table = str(match.group("table") or "").strip().upper()
+        alias = str(match.group("alias") or "").strip().upper()
+        if table:
+            aliases.add(table)
+        if alias:
+            aliases.add(alias)
+    return aliases
+
+
 def _replace_alias_col(sql: str, aliases: set[str], source_col: str, target_col: str) -> str:
     text = sql
     for alias in aliases:
@@ -112,11 +124,13 @@ def _sample_heavy_tables_for_timeout(sql: str, cap: int) -> tuple[str, list[str]
     if not text:
         return text, []
 
+    # Never treat SQL keywords as table aliases in regex replacement.
+    alias_block = r"(?!WHERE\b|GROUP\b|ORDER\b|HAVING\b|JOIN\b|ON\b|UNION\b|INTERSECT\b|MINUS\b|CONNECT\b|START\b|MODEL\b)"
     rules: list[str] = []
     sampled = text
     for table in _HEAVY_TIMEOUT_TABLES:
         pattern = re.compile(
-            rf"\b(?P<kw>FROM|JOIN)\s+{table}\b(?P<alias>\s+(?:AS\s+)?[A-Za-z_][A-Za-z0-9_$#]*)?",
+            rf"\b(?P<kw>FROM|JOIN)\s+{table}\b(?P<alias>\s+(?:AS\s+)?{alias_block}[A-Za-z_][A-Za-z0-9_$#]*)?",
             re.IGNORECASE,
         )
 
@@ -263,15 +277,19 @@ def _repair_invalid_identifier(sql: str, error_message: str) -> tuple[str, list[
         # ORA-00904 often occurs when an outer scope references an inner alias (e.g., dx.icd_code).
         # Drop the alias qualifier and keep the column to preserve intent.
         if err_alias:
-            rewritten = re.sub(
-                rf"\b{re.escape(err_alias)}\.{re.escape(err_col)}\b",
-                err_col,
-                text,
-                flags=re.IGNORECASE,
-            )
-            if rewritten != text:
-                text = rewritten
-                rules.append("template_00904_drop_alias_prefix")
+            declared = _declared_aliases(text)
+            # Only drop alias prefix when the error refers to an undeclared alias.
+            # If alias is declared, preserving qualifier is safer for semantics.
+            if err_alias not in declared:
+                rewritten = re.sub(
+                    rf"\b{re.escape(err_alias)}\.{re.escape(err_col)}\b",
+                    err_col,
+                    text,
+                    flags=re.IGNORECASE,
+                )
+                if rewritten != text:
+                    text = rewritten
+                    rules.append("template_00904_drop_alias_prefix")
 
     return text, rules
 
@@ -383,12 +401,9 @@ def _repair_timeout(question: str, sql: str) -> tuple[str, list[str]]:
             text = stripped
             rules.append("template_timeout_strip_order_by")
 
-    # Timeout fallback should aggressively reduce scan volume.
-    sample_cap = min(max(500, int((get_settings().row_cap or 5000) / 5)), 1000)
-    sampled, sampled_rules = _sample_heavy_tables_for_timeout(text, sample_cap)
-    if sampled_rules:
-        text = sampled
-        rules.extend(sampled_rules)
+    # Keep timeout fallback conservative: avoid broad FROM/JOIN regex rewrites
+    # because they can corrupt SQL structure and reduce semantic fidelity.
+    sampled_rules: list[str] = []
 
     has_agg = bool(
         re.search(r"\bGROUP\s+BY\b|\bCOUNT\s*\(|\bAVG\s*\(|\bSUM\s*\(|\bMIN\s*\(|\bMAX\s*\(", text, re.IGNORECASE)
@@ -398,13 +413,12 @@ def _repair_timeout(question: str, sql: str) -> tuple[str, list[str]]:
         cap = min(max(1000, int(get_settings().row_cap or 5000)), 10000)
         text = f"SELECT * FROM ({text}) WHERE ROWNUM <= {cap}"
         rules.append(f"template_timeout_apply_rownum_cap:{cap}")
-    elif has_agg and not has_rownum and not sampled_rules:
-        # Last-resort cap for aggregate timeouts when no heavy-table rewrite matched.
+    elif has_agg and not has_rownum:
+        # Aggregate queries are wrapped instead of inlining predicates to avoid
+        # malformed SQL when nested GROUP BY/ORDER BY exists.
         cap = min(max(1000, int(get_settings().row_cap or 5000)), 5000)
-        capped, changed = _append_top_level_rownum_cap(text, cap)
-        if changed:
-            text = capped
-            rules.append(f"template_timeout_apply_top_level_rownum:{cap}")
+        text = f"SELECT * FROM ({text}) WHERE ROWNUM <= {cap}"
+        rules.append(f"template_timeout_wrap_rownum_cap:{cap}")
 
     return text, rules
 

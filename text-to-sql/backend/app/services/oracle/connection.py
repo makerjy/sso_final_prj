@@ -20,6 +20,10 @@ _POOL = None
 _POOL_LOCK = threading.Lock()
 _CLIENT_INIT = False
 _CLIENT_LOCK = threading.Lock()
+_SSL_RETRY_ERROR_MARKERS = (
+    "ORA-28759",
+    "ORA-288",
+)
 
 
 def _has_client_lib(lib_path: Path) -> bool:
@@ -150,11 +154,14 @@ def get_pool():
                 _POOL = lib.create_pool(**pool_kwargs)
             except Exception as exc:
                 # When sslMode=require is set without a wallet/tns config,
-                # Oracle thick mode can fail with ORA-28759.
+                # Oracle connections can fail during SSL negotiation; retry
+                # with plain TCP once for best-effort compatibility.
+                upper_msg = str(exc).upper()
                 if (
                     str(dsn).lower().startswith("tcps://")
                     and tcp_fallback_dsn
-                    and "ORA-28759" in str(exc).upper()
+                    and ssl_mode == "require"
+                    and any(marker in upper_msg for marker in _SSL_RETRY_ERROR_MARKERS)
                     and not dsn_override
                 ):
                     try:

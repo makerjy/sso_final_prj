@@ -120,7 +120,7 @@ def enforce_intent_alignment(
     if not before:
         return sql, [], []
 
-    rewritten, rules = postprocess_sql(question, sql, profile="aggressive")
+    rewritten, rules = postprocess_sql(question, sql, profile="auto")
     after = detect_intent_alignment_issues(question, rewritten, planner_intent=planner_intent)
     before_set = set(before)
     after_set = set(after)

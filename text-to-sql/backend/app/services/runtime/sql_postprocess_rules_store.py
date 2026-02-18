@@ -16,6 +16,7 @@ _DEFAULT_RULES: dict[str, Any] = {
         "mode": "conservative",
     },
     "schema_aliases": {
+        "use_schema_hints": False,
         "table_aliases": {},
         "column_aliases": {},
     },

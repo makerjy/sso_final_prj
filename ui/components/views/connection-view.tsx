@@ -103,7 +103,7 @@ export function ConnectionView() {
     database: "mimiciv",
     username: "researcher_01",
     password: "",
-    sslMode: "require",
+    sslMode: "disable",
     defaultSchema: ""
   })
 
@@ -172,9 +172,16 @@ export function ConnectionView() {
         const data: TableCatalogResponse = await tablesRes.json()
         if (Array.isArray(data?.tables) && data.tables.length > 0) {
           const owner = String(data.owner || "")
-          if (owner) {
+          const schemaCandidates = Array.from(
+            new Set(
+              data.tables
+                .map((table) => String(table.schema || "").trim())
+                .filter(Boolean)
+            )
+          )
+          if (schemaCandidates.length === 1) {
             setConnectionConfig(prev => (
-              prev.defaultSchema?.trim() ? prev : { ...prev, defaultSchema: owner }
+              prev.defaultSchema?.trim() ? prev : { ...prev, defaultSchema: schemaCandidates[0] }
             ))
           }
           const nextScopes = data.tables.map(table => {

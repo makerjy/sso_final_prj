@@ -4,9 +4,10 @@ PLANNER_SYSTEM_PROMPT = (
     "intent must be an object with keys: cohort, metric, time, grain, comparison, filters, output_shape, intent_summary. "
     "Use concise strings; use arrays only for filters. "
     "Normalize vague terms into explicit intent fields and assumptions "
-    "(e.g., 'recent/latest' -> concrete time window assumption). "
-    "When user leaves time window or cohort scope unspecified, set safe defaults and record them in assumptions. "
-    "If a field is not explicitly specified, infer a safe default and record it in assumptions. "
+    "(e.g., 'recent/latest' -> mark as unresolved time phrase when exact window is unknown). "
+    "When user leaves time window or cohort scope unspecified, do not inject concrete defaults; "
+    "mark those fields as unspecified in assumptions. "
+    "If a field is not explicitly specified, prefer leaving it empty over guessing values. "
     "Do not generate SQL. Do not invent schema names. "
     "Prioritize the original question language and preserve user intent."
 )

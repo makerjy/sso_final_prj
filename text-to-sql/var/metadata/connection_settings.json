@@ -1,1 +1,1 @@
-{"host": "152.70.37.240", "port": "1521", "database": "pdb1.sub12220829340.vcnkdt2.oraclevcn.com", "username": "team9_user", "password": "team9KDT__2026", "sslMode": "require"}
+{"host": "152.70.37.240", "port": "1521", "database": "pdb1.sub12220829340.vcnkdt2.oraclevcn.com", "username": "team9_user", "password": "team9KDT__2026", "sslMode": "disable"}

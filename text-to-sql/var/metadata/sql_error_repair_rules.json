@@ -171,6 +171,19 @@
       ],
       "success_count": 1,
       "updated_at": 1771392856
+    },
+    {
+      "created_at": 1771416940,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "8a7028db74d9558fc034c8206b047bdc68ae7682c1d6617cd790f2e3b45f1775",
+      "failed_sql_sample": "SELECT TO_CHAR(a.ADMITTIME, YYYY-MM-DD) AS ADMITTIME, COUNT(*) AS CNT FROM ADMISSIONS a WHERE a.ADMITTIME IS NOT NULL GROUP BY TO_CHAR(a.ADMITTIME, YYYY-MM-DD) ORDER BY ADMITTIME",
+      "fixed_sql": "SELECT TO_CHAR(a.ADMITTIME, 'YYYY-MM-DD') AS ADMITTIME, COUNT(*) AS CNT FROM ADMISSIONS a WHERE a.ADMITTIME IS NOT NULL GROUP BY TO_CHAR(a.ADMITTIME, 'YYYY-MM-DD') ORDER BY ADMITTIME",
+      "fixed_sql_hash": "8d880ed0ad0d71071348823b1dec458d1d9230e6dd06932c5fde1059847fb264",
+      "hit_count": 0,
+      "id": "b9992b9492834e7791047c0e33169541",
+      "last_used_at": 1771416940,
+      "success_count": 1,
+      "updated_at": 1771416940
     }
   ]
 }

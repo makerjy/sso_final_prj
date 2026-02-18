@@ -43,7 +43,13 @@ _AGE_FROM_ANCHOR_RE = re.compile(
     re.IGNORECASE,
 )
 _AGE_FROM_BIRTHDATE_RE = re.compile(
-    r"EXTRACT\s*\(\s*YEAR\s+FROM\s+(?:CURRENT_DATE|SYSDATE)\s*\)\s*-\s*EXTRACT\s*\(\s*YEAR\s+FROM\s+([A-Za-z0-9_\\.]*BIRTHDATE)\s*\)",
+    r"EXTRACT\s*\(\s*YEAR\s+FROM\s+(?:CURRENT_DATE|SYSDATE)\s*\)\s*-\s*EXTRACT\s*\(\s*YEAR\s+FROM\s+([A-Za-z0-9_\\.]*"
+    r"(?:BIRTHDATE|DOB))\s*\)",
+    re.IGNORECASE,
+)
+_ANCHOR_MINUS_BIRTH_EXTRACT_RE = re.compile(
+    r"(?P<anchor>[A-Za-z0-9_\\.]*ANCHOR_YEAR)\s*-\s*EXTRACT\s*\(\s*YEAR\s+FROM\s+"
+    r"(?P<birth>[A-Za-z0-9_\\.]*(?:BIRTHDATE|DOB))\s*\)",
     re.IGNORECASE,
 )
 _BIRTH_YEAR_DIFF_RE = re.compile(r"([A-Za-z0-9_\\.]*ANCHOR_YEAR)\s*-\s*([A-Za-z0-9_\\.]*BIRTH_YEAR)", re.IGNORECASE)
@@ -59,6 +65,11 @@ _TIME_WINDOW_RE = re.compile(
     r"(?:\s*-\s*INTERVAL\s*'[^']+'\s*(DAY|MONTH|YEAR))?"
     r"(?:\s+AND\s+\1\s*<=\s*(SYSDATE|CURRENT_DATE)"
     r"(?:\s*-\s*INTERVAL\s*'[^']+'\s*(DAY|MONTH|YEAR))?)?",
+    re.IGNORECASE,
+)
+_QUESTION_TIME_INTENT_RE = re.compile(
+    r"(최근|지난|작년|올해|전년|기간|이내|이후|전후|입원\s*후|수술\s*후|\d+\s*(일|주|개월|달|월|년)|"
+    r"\b(last|past|recent|today|yesterday|week|month|year|since|before|after|between|from|to|within)\b)",
     re.IGNORECASE,
 )
 _DIAGNOSIS_TITLE_FILTER_RE = re.compile(
@@ -90,8 +101,18 @@ _RATIO_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _RATIO_ALIAS_RE = re.compile(r"(RATE|RATIO|PCT|PERCENT)", re.IGNORECASE)
+_RATIO_DENOM_INTENT_RE = re.compile(
+    r"(overall|total|all|out of|among|전체|총|분모|전체 대비|모수)",
+    re.IGNORECASE,
+)
 _COUNT_ALIAS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
 _DENOM_ALIAS_HINT_RE = re.compile(r"(TOTAL|TOT|DENOM|ALL|BASE|OVERALL)", re.IGNORECASE)
+_LAB_INTENT_RE = re.compile(r"(\blab(?:oratory|s|events?)?\b|검사|검체)", re.IGNORECASE)
+_CATEGORICAL_REWRITE_INTENT_RE = re.compile(
+    r"(service|department|admission\s*type|discharge\s*location|admission\s*location|insurance|race|ethnicity|language|status|category|code|"
+    r"유형|종류|구분|상태|범주|코드|진료과|서비스)",
+    re.IGNORECASE,
+)
 _CATEGORICAL_EQ_LITERAL_RE = re.compile(
     r"(?P<ref>(?:[A-Za-z_][A-Za-z0-9_$#]*\.)?[A-Za-z_][A-Za-z0-9_$#]*)\s*=\s*'(?P<lit>[^']+)'",
     re.IGNORECASE,
@@ -343,6 +364,25 @@ def _split_top_level_csv(text: str) -> list[str]:
     return items
 
 
+def _is_single_count_distinct_hadm_projection(sql: str) -> bool:
+    span = _find_final_select_from_span(sql)
+    if not span:
+        return False
+    core, select_idx, from_idx = span
+    select_clause = core[select_idx + len("SELECT"):from_idx]
+    items = _split_top_level_csv(select_clause)
+    if len(items) != 1:
+        return False
+    item = items[0].strip()
+    return bool(
+        re.match(
+            r"^\s*COUNT\s*\(\s*DISTINCT\s+(?:[A-Za-z0-9_]+\.)?HADM_ID\s*\)\s*(?:AS\s+[A-Za-z_][A-Za-z0-9_$#]*)?\s*$",
+            item,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _extract_select_alias(expr: str) -> str | None:
     trimmed = expr.strip()
     if not trimmed:
@@ -534,6 +574,29 @@ def _find_table_alias(text: str, table: str) -> str | None:
     return alias
 
 
+def _has_lab_intent(question: str) -> bool:
+    return bool(_LAB_INTENT_RE.search(str(question or "")))
+
+
+def _next_join_alias(sql: str, base: str) -> str:
+    used_aliases: set[str] = set()
+    for match in re.finditer(
+        r"\b(?:FROM|JOIN)\s+[A-Za-z0-9_]+(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
+        sql,
+        re.IGNORECASE,
+    ):
+        alias = str(match.group(1) or "").strip()
+        if alias and alias.upper() not in {"WHERE", "JOIN", "ON", "GROUP", "ORDER", "HAVING"}:
+            used_aliases.add(alias.upper())
+
+    candidate = base
+    suffix = 1
+    while candidate.upper() in used_aliases:
+        candidate = f"{base}{suffix}"
+        suffix += 1
+    return candidate
+
+
 def _insert_join(text: str, join_clause: str) -> str:
     if re.search(r"\bwhere\b", text, re.IGNORECASE):
         return re.sub(r"\bwhere\b", join_clause + " WHERE", text, count=1, flags=re.IGNORECASE)
@@ -657,6 +720,7 @@ def _should_apply_rownum_cap_conservative(question: str, sql: str) -> bool:
     q = (question or "").lower()
     if not q or not sql:
         return False
+    text_upper = sql.upper()
     explicit_sample_intent = any(
         token in q
         for token in (
@@ -670,8 +734,11 @@ def _should_apply_rownum_cap_conservative(question: str, sql: str) -> bool:
         )
     )
     if explicit_sample_intent:
+        if _OUTER_ROWNUM_RE.match(sql.strip().rstrip(";")) and "GROUP BY" in text_upper and "COUNT(" in text_upper:
+            # Top-N grouped ranking already has explicit row limiting.
+            # Adding an inner sample cap can distort ranking semantics.
+            return False
         return True
-    text_upper = sql.upper()
     if "GROUP BY" in text_upper:
         return False
     if any(agg in text_upper for agg in ("COUNT(", "AVG(", "SUM(", "MIN(", "MAX(")):
@@ -742,8 +809,12 @@ def _apply_schema_mappings(sql: str) -> tuple[str, list[str]]:
     rules_cfg = load_sql_postprocess_rules().get("schema_aliases", {})
     table_aliases_cfg = rules_cfg.get("table_aliases", {})
     column_aliases_cfg = rules_cfg.get("column_aliases", {})
-    table_aliases = dict(_table_aliases())
-    column_aliases = dict(_column_aliases())
+    use_schema_hints = bool(rules_cfg.get("use_schema_hints", False))
+    table_aliases: dict[str, str] = {}
+    column_aliases: dict[str, str] = {}
+    if use_schema_hints:
+        table_aliases.update(dict(_table_aliases()))
+        column_aliases.update(dict(_column_aliases()))
     if isinstance(table_aliases_cfg, dict):
         table_aliases.update({
             str(src): str(dest)
@@ -757,11 +828,15 @@ def _apply_schema_mappings(sql: str) -> tuple[str, list[str]]:
             if str(src).strip() and str(dest).strip()
         })
 
-    # Table name replacements (case-insensitive, word boundaries)
+    # Table name replacements: restrict to FROM/JOIN positions to avoid
+    # accidental rewrites of non-table identifiers.
     for src, dest in table_aliases.items():
-        pattern = re.compile(rf"\b{re.escape(src)}\b", re.IGNORECASE)
+        pattern = re.compile(
+            rf"(?P<prefix>\b(?:FROM|JOIN)\s+){re.escape(src)}\b",
+            re.IGNORECASE,
+        )
         if pattern.search(text):
-            text = pattern.sub(dest, text)
+            text = pattern.sub(lambda m: f"{m.group('prefix')}{dest}", text)
             rules.append(f"table:{src}->{dest}")
 
     # Column name replacements (case-insensitive, word boundaries)
@@ -977,9 +1052,10 @@ def _ensure_chart_label(question: str, sql: str) -> tuple[str, list[str]]:
         return text, rules
 
     alias = _find_table_alias(text, "CHARTEVENTS") or "CHARTEVENTS"
-    join_clause = f" JOIN D_ITEMS d ON {alias}.ITEMID = d.ITEMID"
+    label_alias = _next_join_alias(text, "d")
+    join_clause = f" JOIN D_ITEMS {label_alias} ON {alias}.ITEMID = {label_alias}.ITEMID"
     text = _insert_join(text, join_clause)
-    text = re.sub(r"(?<!\.)\bLABEL\b", "d.LABEL", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\.)\bLABEL\b", f"{label_alias}.LABEL", text, flags=re.IGNORECASE)
     rules.append("force_chart_label")
     return text, rules
 
@@ -991,7 +1067,7 @@ def _ensure_labevents_table(question: str, sql: str) -> tuple[str, list[str]]:
         return text, rules
 
     q = question.lower()
-    if "lab" not in q and "laboratory" not in q:
+    if not _has_lab_intent(q):
         return text, rules
     if "micro" in q or "microbiology" in q:
         return text, rules
@@ -1012,7 +1088,7 @@ def _ensure_lab_label(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
     q = question.lower()
-    if "label" not in q or "lab" not in q:
+    if "label" not in q or not _has_lab_intent(q):
         return text, rules
     if re.search(r"\bD_LABITEMS\b", text, re.IGNORECASE):
         return text, rules
@@ -1020,9 +1096,10 @@ def _ensure_lab_label(question: str, sql: str) -> tuple[str, list[str]]:
         return text, rules
 
     alias = _find_table_alias(text, "LABEVENTS") or "LABEVENTS"
-    join_clause = f" JOIN D_LABITEMS d ON {alias}.ITEMID = d.ITEMID"
+    label_alias = _next_join_alias(text, "d")
+    join_clause = f" JOIN D_LABITEMS {label_alias} ON {alias}.ITEMID = {label_alias}.ITEMID"
     text = _insert_join(text, join_clause)
-    text = re.sub(r"(?<!\.)\bLABEL\b", "d.LABEL", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\.)\bLABEL\b", f"{label_alias}.LABEL", text, flags=re.IGNORECASE)
     rules.append("force_lab_label")
     return text, rules
 
@@ -2046,12 +2123,21 @@ def _rewrite_age_from_birthdate(sql: str) -> tuple[str, list[str]]:
 def _rewrite_birthdate_to_anchor_age(sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
-    if re.search(r"\bBIRTHDATE\b", text, re.IGNORECASE):
-        text = re.sub(r"\bBIRTHDATE\b", "ANCHOR_AGE", text, flags=re.IGNORECASE)
-        rules.append("birthdate_col_to_anchor_age")
-    if re.search(r"\bDOB\b", text, re.IGNORECASE):
-        text = re.sub(r"\bDOB\b", "ANCHOR_AGE", text, flags=re.IGNORECASE)
-        rules.append("dob_col_to_anchor_age")
+
+    def repl(match: re.Match[str]) -> str:
+        anchor = str(match.group("anchor") or "").strip()
+        birth = str(match.group("birth") or "").strip()
+        for expr in (anchor, birth):
+            if "." in expr:
+                alias = expr.split(".", 1)[0]
+                if alias:
+                    return f"{alias}.ANCHOR_AGE"
+        return "ANCHOR_AGE"
+
+    rewritten = _ANCHOR_MINUS_BIRTH_EXTRACT_RE.sub(repl, text)
+    if rewritten != text:
+        text = rewritten
+        rules.append("anchor_minus_birth_extract_to_anchor_age")
     return text, rules
 
 
@@ -2077,6 +2163,9 @@ def _rewrite_birth_year_age(sql: str) -> tuple[str, list[str]]:
 def _normalize_count_aliases(sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
+    if re.search(r"\bFROM\s*\(\s*SELECT\b", text, re.IGNORECASE):
+        # Avoid alias rewrite inside derived tables; outer scopes may reference inner aliases.
+        return text, rules
     keywords = {"FROM", "WHERE", "GROUP", "ORDER", "HAVING", "JOIN", "UNION", "LIMIT", "FETCH"}
     aliases: list[str] = []
 
@@ -2477,6 +2566,10 @@ def _rewrite_prescriptions_hadm_count_to_admissions_exists(question: str, sql: s
         return sql, rules
     if not re.search(r"\bCOUNT\s*\(\s*DISTINCT\s+[A-Za-z0-9_]+\.HADM_ID\s*\)", text, re.IGNORECASE):
         return sql, rules
+    if re.search(r"\bGROUP\s+BY\b|\bHAVING\b", text, re.IGNORECASE):
+        return sql, rules
+    if not _is_single_count_distinct_hadm_projection(text):
+        return sql, rules
 
     from_match = re.search(
         r"\bFROM\s+PRESCRIPTIONS(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?",
@@ -2610,6 +2703,10 @@ def _rewrite_services_hadm_count_to_admissions_join(question: str, sql: str) -> 
     if not re.search(rf"\bCOUNT\s*\(\s*DISTINCT\s+{re.escape(alias)}\s*\.\s*HADM_ID\s*\)", text, re.IGNORECASE):
         if not re.search(r"\bCOUNT\s*\(\s*DISTINCT\s+HADM_ID\s*\)", text, re.IGNORECASE):
             return sql, rules
+    if re.search(r"\bGROUP\s+BY\b|\bHAVING\b", text, re.IGNORECASE):
+        return sql, rules
+    if not _is_single_count_distinct_hadm_projection(text):
+        return sql, rules
 
     where_match = re.search(
         r"\bWHERE\b(?P<body>.*?)(?:\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|$)",
@@ -2868,13 +2965,18 @@ def _strip_transfers_eventtype_filter(question: str, sql: str) -> tuple[str, lis
             "이벤트 타입",
             "이벤트 종류",
             "전입/전출 유형",
+            "전입",
+            "전출",
+            "전원",
+            "admit",
+            "discharge",
         )
     )
     if explicit_eventtype_intent:
         return text, rules
 
     column_pattern = r"(?:UPPER\s*\(\s*)?(?:[A-Za-z0-9_]+\.)?EVENTTYPE(?:\s*\))?"
-    value_pattern = r"'TRANSFERS?'"
+    value_pattern = r"'TRANSFERS'"
     predicate_pattern = rf"{column_pattern}\s*=\s*{value_pattern}"
 
     text = re.sub(
@@ -2973,21 +3075,7 @@ def _strip_time_window_if_absent(question: str, sql: str) -> tuple[str, list[str
     rules: list[str] = []
     text = sql
     q = question.lower()
-    time_keywords = {
-        "last",
-        "past",
-        "recent",
-        "today",
-        "yesterday",
-        "week",
-        "month",
-        "year",
-        "since",
-        "before",
-        "after",
-        "between",
-    }
-    if any(k in q for k in time_keywords):
+    if _QUESTION_TIME_INTENT_RE.search(q):
         return text, rules
 
     if not _TIME_WINDOW_RE.search(text):
@@ -3677,8 +3765,10 @@ def _rewrite_count_columns_to_ratio_by_intent(question: str, sql: str) -> tuple[
         return sql, rules
 
     denominator = next((name for name in count_aliases if _DENOM_ALIAS_HINT_RE.search(name)), None)
-    if not denominator and len(count_aliases) == 2:
-        denominator = count_aliases[1]
+    if not denominator:
+        has_explicit_denominator_intent = bool(_RATIO_DENOM_INTENT_RE.search(question))
+        if has_explicit_denominator_intent and len(count_aliases) == 2:
+            denominator = count_aliases[1]
     if not denominator:
         return sql, rules
 
@@ -3702,6 +3792,8 @@ def _rewrite_count_columns_to_ratio_by_intent(question: str, sql: str) -> tuple[
 def _rewrite_unknown_categorical_equals(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
+    if not _CATEGORICAL_REWRITE_INTENT_RE.search(str(question or "")):
+        return text, rules
     value_index = _column_value_index()
     if not value_index:
         return text, rules
@@ -4733,21 +4825,9 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     hadm_group_fixed, hadm_group_rules = _ensure_prescriptions_hadm_not_null_for_grouping(hadm_not_null_fixed)
     rules.extend(hadm_group_rules)
 
-    admissions_count_fixed, admissions_count_rules = _rewrite_prescriptions_hadm_count_to_admissions_exists(
-        q,
-        hadm_group_fixed,
-    )
-    rules.extend(admissions_count_rules)
-
-    services_adm_fixed, services_adm_rules = _rewrite_services_hadm_count_to_admissions_join(
-        q,
-        admissions_count_fixed,
-    )
-    rules.extend(services_adm_rules)
-
     # Keep relaxed mode intent-preserving: do not rewrite user-provided categorical
     # literals to nearest known values. This rewrite is reserved for aggressive mode.
-    transfers_eventtype_fixed, transfers_eventtype_rules = _strip_transfers_eventtype_filter(q, services_adm_fixed)
+    transfers_eventtype_fixed, transfers_eventtype_rules = _strip_transfers_eventtype_filter(q, hadm_group_fixed)
     rules.extend(transfers_eventtype_rules)
 
     ordered_count_fixed, ordered_count_rules = _ensure_order_by_count(q, transfers_eventtype_fixed)
@@ -4768,10 +4848,7 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     scalar_itemid_fixed, scalar_itemid_rules = _rewrite_itemid_scalar_subquery_to_safe_in(d_items_title_fixed)
     rules.extend(scalar_itemid_rules)
 
-    cte_alias_fixed, cte_alias_rules = _fix_cte_projection_alias_mismatch(scalar_itemid_fixed)
-    rules.extend(cte_alias_rules)
-
-    label_like_fixed, label_like_rules = _rewrite_label_like_case_insensitive(cte_alias_fixed)
+    label_like_fixed, label_like_rules = _rewrite_label_like_case_insensitive(scalar_itemid_fixed)
     rules.extend(label_like_rules)
 
     to_char_fixed, to_char_rules = _quote_to_char_format_literals(label_like_fixed)
@@ -5156,7 +5233,10 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     cap_value = get_settings().row_cap
     if cap_value <= 0:
         cap_value = 100000
-    capped, cap_rules = _apply_rownum_cap(wrapped, cap=cap_value)
+    capped = wrapped
+    cap_rules: list[str] = []
+    if _should_apply_rownum_cap_conservative(q, wrapped):
+        capped, cap_rules = _apply_rownum_cap(wrapped, cap=cap_value)
     rules.extend(cap_rules)
 
     micro_cap_fixed, micro_cap_rules = _strip_rownum_cap_for_micro_topk(capped)
@@ -5186,10 +5266,7 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     itemid_icd_fixed, itemid_icd_rules = _rewrite_itemid_icd_join_mismatch(scalar_itemid_fixed)
     rules.extend(itemid_icd_rules)
 
-    cte_alias_fixed, cte_alias_rules = _fix_cte_projection_alias_mismatch(itemid_icd_fixed)
-    rules.extend(cte_alias_rules)
-
-    label_like_fixed, label_like_rules = _rewrite_label_like_case_insensitive(cte_alias_fixed)
+    label_like_fixed, label_like_rules = _rewrite_label_like_case_insensitive(itemid_icd_fixed)
     rules.extend(label_like_rules)
 
     label_profile_fixed, label_profile_rules = _rewrite_label_filter_by_intent_profile(q, label_like_fixed)

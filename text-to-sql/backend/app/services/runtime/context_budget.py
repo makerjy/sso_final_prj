@@ -8,6 +8,22 @@ except Exception:  # pragma: no cover
     tiktoken = None
 
 
+def _active_table_scope_size() -> int:
+    try:
+        from app.services.runtime.settings_store import load_table_scope
+    except Exception:
+        return 0
+    try:
+        selected = {
+            str(name).strip().lower()
+            for name in load_table_scope()
+            if str(name or "").strip()
+        }
+        return len(selected)
+    except Exception:
+        return 0
+
+
 def _count_tokens(text: str) -> int:
     if tiktoken is None:
         return max(1, len(text.split()))
@@ -61,11 +77,20 @@ def trim_context_to_budget(context: Any, budget: int) -> Any:
     templates = _rank_items(list(getattr(context, "templates", [])))
     glossary = _rank_items(list(getattr(context, "glossary", [])))
 
-    quotas = {
-        "schemas": int(budget * 0.40),
-        "examples": int(budget * 0.30),
-        "glossary": int(budget * 0.20),
-    }
+    scope_size = _active_table_scope_size()
+    if scope_size > 0:
+        schema_ratio = 0.70 if scope_size >= 8 else 0.60
+        quotas = {
+            "schemas": int(budget * schema_ratio),
+            "examples": int(budget * 0.18),
+            "glossary": int(budget * 0.10),
+        }
+    else:
+        quotas = {
+            "schemas": int(budget * 0.55),
+            "examples": int(budget * 0.25),
+            "glossary": int(budget * 0.12),
+        }
     quotas["templates"] = max(0, budget - quotas["schemas"] - quotas["examples"] - quotas["glossary"])
 
     items = {

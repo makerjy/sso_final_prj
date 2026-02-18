@@ -75,9 +75,12 @@ def list_tables():
     results = []
     for name, entry in tables.items():
         columns = entry.get("columns", []) if isinstance(entry, dict) else []
+        table_owner = ""
+        if isinstance(entry, dict):
+            table_owner = str(entry.get("owner") or "").strip()
         results.append({
             "name": name,
-            "schema": owner,
+            "schema": table_owner or owner,
             "columns": len(columns),
             "primary_keys": entry.get("primary_keys", []) if isinstance(entry, dict) else [],
         })

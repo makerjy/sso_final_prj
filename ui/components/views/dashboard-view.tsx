@@ -35,6 +35,10 @@ import {
   Pencil,
   Check,
   ChevronDown,
+  Scale,
+  X,
+  ArrowRight,
+  ChevronRight,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
@@ -325,6 +329,14 @@ export function DashboardView() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+
+  // Comparison State
+  const [selectedQueryIds, setSelectedQueryIds] = useState<Set<string>>(new Set())
+  const [isCompareOpen, setIsCompareOpen] = useState(false)
+  const [comparisonResults, setComparisonResults] = useState<Record<string, { loading: boolean; error?: string; data?: any }>>({})
+  const [visibleComparisonIds, setVisibleComparisonIds] = useState<Set<string>>(new Set())
+  const [comparisonOrder, setComparisonOrder] = useState<string[]>([])
+
   const saveTimer = useRef<number | null>(null)
   const listSectionRef = useRef<HTMLDivElement | null>(null)
 
@@ -587,10 +599,10 @@ export function DashboardView() {
     const nextQueries = queries.map((query) =>
       query.id === queryId
         ? {
-            ...query,
-            folderId,
-            category: folder.name,
-          }
+          ...query,
+          folderId,
+          category: folder.name,
+        }
         : query
     )
     updateDashboardState(nextQueries, folders)
@@ -840,6 +852,67 @@ export function DashboardView() {
     setIsFolderDialogOpen(true)
   }
 
+  const handleToggleCompare = (id: string) => {
+    const next = new Set(selectedQueryIds)
+    if (next.has(id)) {
+      next.delete(id)
+    } else {
+      if (next.size >= 3) {
+        // toast({
+        //   title: "비교 불가",
+        //   description: "비교는 최대 3개까지만 가능합니다.",
+        //   variant: "destructive",
+        // })
+        alert("비교는 최대 3개까지만 가능합니다.")
+        return
+      }
+      next.add(id)
+    }
+    setSelectedQueryIds(next)
+  }
+
+  const executeComparisonQueries = (ids: Set<string>) => {
+    const nextResults: Record<string, { loading: boolean; error?: string; data?: any }> = {}
+
+    ids.forEach(id => {
+      const query = queries.find(q => q.id === id)
+      if (!query) return
+
+      if (query.preview && query.preview.columns && Array.isArray(query.preview.rows)) {
+        // 저장된 프리뷰 데이터를 차트/테이블용 레코드 형식으로 변환
+        const columns = query.preview.columns
+        const rows = query.preview.rows
+        const records = rows.map((row: any[]) => {
+          const rec: any = {}
+          columns.forEach((col: string, i: number) => {
+            rec[col] = row[i]
+          })
+          return rec
+        })
+
+        nextResults[id] = {
+          loading: false,
+          data: { columns, records }
+        }
+      } else {
+        // 프리뷰 데이터가 없는 경우 처리
+        nextResults[id] = {
+          loading: false,
+          error: "저장된 결과 데이터가 없습니다. (쿼리 탭에서 실행 후 저장해주세요)"
+        }
+      }
+    })
+
+    setComparisonResults(prev => ({ ...prev, ...nextResults }))
+  }
+
+  const handleStartCompare = () => {
+    setIsCompareOpen(true)
+    setVisibleComparisonIds(new Set(selectedQueryIds))
+    setComparisonOrder(Array.from(selectedQueryIds))
+    executeComparisonQueries(selectedQueryIds)
+  }
+
   const handleRunQuery = (query: SavedQuery) => {
     if (typeof window === "undefined") return
     const payload = {
@@ -915,6 +988,62 @@ export function DashboardView() {
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
+          <div className="rounded-xl border border-border overflow-hidden bg-secondary/10 p-4 transition-all duration-300">
+            {selectedQueryIds.size > 0 ? (
+              <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold flex items-center gap-2 text-foreground">
+                    <Scale className="w-4 h-4 text-primary" />
+                    비교할 쿼리 ({selectedQueryIds.size}/3)
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setSelectedQueryIds(new Set())}
+                      className="h-7 text-xs text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 mr-1" />
+                      모두 해제
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-7 text-xs gap-1"
+                      disabled={selectedQueryIds.size < 2}
+                      onClick={handleStartCompare}
+                    >
+                      비교하기
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {queries
+                    .filter((q) => selectedQueryIds.has(q.id))
+                    .map((q) => (
+                      <Badge
+                        key={q.id}
+                        variant="secondary"
+                        className="pl-2 pr-1 py-1 flex items-center gap-1 bg-background border shadow-sm"
+                      >
+                        {q.title}
+                        <button
+                          onClick={() => handleToggleCompare(q.id)}
+                          className="ml-1 hover:bg-muted-foreground/20 rounded-full p-0.5 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </Badge>
+                    ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center text-sm text-muted-foreground gap-2 py-2">
+                <Scale className="w-4 h-4 opacity-50" />
+                <span>비교할 쿼리를 드롭다운 메뉴에서 선택해주세요 (최대 3개)</span>
+              </div>
+            )}
+          </div>
           {filteredQueries.length > 0 ? (
             <div className="rounded-xl border border-border overflow-hidden">
               <div className="hidden lg:grid grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_130px_110px] gap-3 px-4 py-2 bg-secondary/40 text-[11px] font-medium text-muted-foreground">
@@ -938,6 +1067,8 @@ export function DashboardView() {
                     onDuplicate={handleDuplicate}
                     onShare={handleShare}
                     getChartIcon={getChartIcon}
+                    selected={selectedQueryIds.has(query.id)}
+                    onToggleCompare={handleToggleCompare}
                   />
                 ))}
               </div>
@@ -953,7 +1084,228 @@ export function DashboardView() {
         </CardContent>
       </Card>
 
-      <Dialog open={isFolderDialogOpen} onOpenChange={(open) => {
+      <Dialog
+        open={isCompareOpen}
+        onOpenChange={(open: boolean) => {
+          setIsCompareOpen(open)
+          if (!open) {
+            setVisibleComparisonIds(new Set())
+            setComparisonOrder([])
+          }
+        }}
+      >
+        <DialogContent className="!left-0 !top-0 !translate-x-0 !translate-y-0 !w-screen !h-screen !max-w-none rounded-none">
+          <DialogHeader>
+            <DialogTitle>상세 비교 분석</DialogTitle>
+            <DialogDescription>선택한 항목의 실행 결과를 비교합니다.</DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 h-[calc(100%-4rem)] flex flex-col min-h-0">
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <Badge variant="secondary">{comparisonOrder.length}개 쿼리</Badge>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={comparisonOrder.length === 0}
+                  onClick={() => executeComparisonQueries(new Set(comparisonOrder))}
+                >
+                  <Play className="w-3.5 h-3.5 mr-1" />
+                  전체 재실행
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setIsCompareOpen(false)}>
+                  <X className="w-4 h-4 mr-1" />
+                  닫기
+                </Button>
+              </div>
+            </div>
+
+            {comparisonOrder.length > 0 ? (
+              <>
+                <div className="flex items-center gap-2 p-2 bg-secondary/10 border border-border rounded-lg overflow-x-auto no-scrollbar">
+                  {comparisonOrder
+                    .map((id) => queries.find((q) => q.id === id))
+                    .filter((q): q is SavedQuery => !!q)
+                    .map((q) => {
+                      const result = comparisonResults[q.id] || { loading: false }
+                      const isVisible = visibleComparisonIds.has(q.id)
+                      return (
+                        <button
+                          key={q.id}
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData("text/plain", q.id)
+                          }}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={(e) => {
+                            e.preventDefault()
+                            const draggedId = e.dataTransfer.getData("text/plain")
+                            if (draggedId === q.id) return
+
+                            const newOrder = [...comparisonOrder]
+                            const fromIndex = newOrder.indexOf(draggedId)
+                            const toIndex = newOrder.indexOf(q.id)
+
+                            if (fromIndex !== -1 && toIndex !== -1) {
+                              newOrder.splice(fromIndex, 1)
+                              newOrder.splice(toIndex, 0, draggedId)
+                              setComparisonOrder(newOrder)
+                            }
+                          }}
+                          onClick={() => {
+                            const next = new Set(visibleComparisonIds)
+                            if (next.has(q.id)) next.delete(q.id)
+                            else next.add(q.id)
+                            setVisibleComparisonIds(next)
+                          }}
+                          className={cn(
+                            "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap border shrink-0 cursor-move active:cursor-grabbing",
+                            isVisible
+                              ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                              : "bg-background text-muted-foreground border-border hover:bg-secondary"
+                          )}
+                        >
+                          <span>{q.title}</span>
+                          {result.loading ? (
+                            <Activity className="w-3 h-3 animate-spin ml-1" />
+                          ) : result.error ? (
+                            <div className="w-1.5 h-1.5 rounded-full bg-red-400 ml-1" />
+                          ) : result.data ? (
+                            <div className="w-1.5 h-1.5 rounded-full bg-green-400 ml-1" />
+                          ) : null}
+                        </button>
+                      )
+                    })}
+                </div>
+
+                <div
+                  className={cn(
+                    "grid gap-4 mt-4 overflow-x-auto",
+                    visibleComparisonIds.size === 1 && "grid-cols-1",
+                    visibleComparisonIds.size === 2 && "grid-cols-1 lg:grid-cols-2",
+                    visibleComparisonIds.size >= 3 && "grid-cols-1 lg:grid-cols-2 xl:grid-cols-3"
+                  )}
+                >
+                  {comparisonOrder
+                    .filter((id) => visibleComparisonIds.has(id))
+                    .map((id) => queries.find((q) => q.id === id))
+                    .filter((q): q is SavedQuery => !!q)
+                    .map((q) => {
+                      const result = comparisonResults[q.id] || { loading: false }
+                      const records = result.data ? result.data.records : []
+                      const columns = result.data ? result.data.columns : []
+
+                      let chartData = null
+                      if (result.data && records.length > 0) {
+                        const numCols = columns.filter((c: string) => records.some((r: any) => typeof r[c] === "number"))
+                        const catCols = columns.filter((c: string) => !numCols.includes(c))
+                        if (numCols.length > 0 && catCols.length > 0) {
+                          chartData = [{
+                            type: "bar",
+                            x: records.map((r: any) => r[catCols[0]]),
+                            y: records.map((r: any) => r[numCols[0]]),
+                          }]
+                        }
+                      }
+
+                      return (
+                        <Card key={q.id} className="border border-border/60 shadow-md overflow-hidden flex flex-col h-full min-h-[500px]">
+                          <CardHeader className="bg-secondary/20 py-3 px-4 flex flex-row items-center justify-between shrink-0">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Badge variant="outline" className="shrink-0">{q.category}</Badge>
+                              <span className="font-semibold text-sm truncate" title={q.title}>{q.title}</span>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              {result.loading && <span className="text-xs text-muted-foreground animate-pulse">실행 중...</span>}
+                              {result.error && <span className="text-xs text-destructive">{result.error}</span>}
+                              {result.data && <span className="text-xs text-green-600 flex items-center"><Check className="w-3 h-3 mr-1" /> 완료</span>}
+                            </div>
+                          </CardHeader>
+                          <CardContent className="p-0 flex flex-col flex-1 min-h-0">
+                            {result.loading ? (
+                              <div className="flex-1 flex items-center justify-center">
+                                <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                                  <Activity className="w-6 h-6 animate-spin" />
+                                  <span className="text-xs">데이터 불러오는 중...</span>
+                                </div>
+                              </div>
+                            ) : result.error ? (
+                              <div className="flex-1 flex items-center justify-center text-destructive text-sm opacity-80 p-4 text-center">
+                                데이터를 불러오지 못했습니다. <br /> {result.error}
+                              </div>
+                            ) : result.data ? (
+                              <div className="flex flex-col h-full min-h-0 divide-y divide-border">
+                                <div className="h-[250px] p-2 bg-white">
+                                  {chartData ? (
+                                    <Plot
+                                      data={chartData}
+                                      layout={{ autosize: true, margin: { l: 30, r: 10, t: 10, b: 30 } }}
+                                      config={{ responsive: true, displayModeBar: false }}
+                                      style={{ width: "100%", height: "100%" }}
+                                      useResizeHandler
+                                    />
+                                  ) : (
+                                    <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
+                                      시각화 가능한 데이터가 없습니다.
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="bg-secondary/10 border-b border-border">
+                                  <details className="group">
+                                    <summary className="flex items-center gap-2 p-2 cursor-pointer text-[10px] font-semibold text-muted-foreground hover:text-foreground transition-colors select-none">
+                                      <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+                                      SQL 보기
+                                    </summary>
+                                    <div className="px-2 pb-2">
+                                      <pre className="text-[10px] bg-secondary/50 p-2 rounded overflow-x-auto font-mono text-muted-foreground max-h-[100px]">
+                                        {q.query}
+                                      </pre>
+                                    </div>
+                                  </details>
+                                </div>
+
+                                <div className="flex-1 min-h-0 overflow-auto bg-white relative">
+                                  <table className="w-full text-xs text-left border-collapse">
+                                    <thead className="bg-secondary/30 sticky top-0 z-10">
+                                      <tr>
+                                        {columns.map((col: string) => (
+                                          <th key={col} className="p-2 font-medium border-b border-border whitespace-nowrap text-muted-foreground">{col}</th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {records.map((row: any, idx: number) => (
+                                        <tr key={idx} className="border-b border-border/50 hover:bg-secondary/5">
+                                          {columns.map((col: string) => (
+                                            <td key={`${idx}-${col}`} className="p-2 truncate max-w-[120px]">{String(row[col])}</td>
+                                          ))}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+                                실행 대기 중
+                              </div>
+                            )}
+                          </CardContent>
+                        </Card>
+                      )
+                    })}
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+                비교할 쿼리를 먼저 선택해주세요.
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isFolderDialogOpen} onOpenChange={(open: boolean) => {
         setIsFolderDialogOpen(open)
         if (!open) setOpenedFolderId(null)
       }}>
@@ -1086,7 +1438,7 @@ export function DashboardView() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isCreateFolderOpen} onOpenChange={(open) => {
+      <Dialog open={isCreateFolderOpen} onOpenChange={(open: boolean) => {
         setIsCreateFolderOpen(open)
         if (!open) {
           setCreateFolderName("")
@@ -1129,7 +1481,7 @@ export function DashboardView() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isRenameFolderOpen} onOpenChange={(open) => {
+      <Dialog open={isRenameFolderOpen} onOpenChange={(open: boolean) => {
         setIsRenameFolderOpen(open)
         if (!open) {
           setRenameFolderTargetId(null)
@@ -1165,7 +1517,7 @@ export function DashboardView() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isDeleteFolderOpen} onOpenChange={(open) => {
+      <Dialog open={isDeleteFolderOpen} onOpenChange={(open: boolean) => {
         setIsDeleteFolderOpen(open)
         if (!open) {
           setDeleteFolderTargetId(null)
@@ -1220,13 +1572,13 @@ function FolderCard({ folder, active, onSelect, onOpen, onRename, onDelete }: Fo
             onDoubleClick={onOpen}
           >
             <div className="flex items-center gap-2 min-w-0">
-                <div className="w-9 h-9 rounded-lg bg-secondary flex items-center justify-center shrink-0">
-                  {folder.id === ALL_FOLDER_ID ? (
-                    <FolderOpen className="w-4 h-4 text-primary" />
-                  ) : (
-                    <Folder className="w-4 h-4 text-primary" />
-                  )}
-                </div>
+              <div className="w-9 h-9 rounded-lg bg-secondary flex items-center justify-center shrink-0">
+                {folder.id === ALL_FOLDER_ID ? (
+                  <FolderOpen className="w-4 h-4 text-primary" />
+                ) : (
+                  <Folder className="w-4 h-4 text-primary" />
+                )}
+              </div>
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-foreground truncate">{folder.name}</div>
                 <div className="text-xs text-muted-foreground">{folder.count}개 쿼리</div>
@@ -1282,6 +1634,8 @@ interface DashboardQueryRowProps {
   onDuplicate: (id: string) => void
   onShare: (query: SavedQuery) => void
   getChartIcon: (type: string) => ReactNode
+  selected: boolean
+  onToggleCompare: (id: string) => void
 }
 
 function DashboardQueryRow({
@@ -1295,12 +1649,19 @@ function DashboardQueryRow({
   onDuplicate,
   onShare,
   getChartIcon,
+  selected,
+  onToggleCompare,
 }: DashboardQueryRowProps) {
   const displayTitle = formatDashboardTitle(query)
   const displayLastRun = formatDashboardLastRun(query.lastRun)
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_130px_110px] gap-3 px-4 py-3 hover:bg-secondary/20">
+    <div
+      className={cn(
+        "grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_130px_110px] gap-3 px-4 py-3 hover:bg-secondary/20 transition-colors",
+        selected && "bg-primary/5 hover:bg-primary/10 -ml-[2px] border-l-2 border-primary"
+      )}
+    >
       <div className="min-w-0">
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-secondary flex items-center justify-center shrink-0">
@@ -1373,6 +1734,10 @@ function DashboardQueryRow({
             <DropdownMenuItem onClick={() => onTogglePin(query.id)}>
               {query.isPinned ? <StarOff className="w-4 h-4 mr-2" /> : <Star className="w-4 h-4 mr-2" />}
               {query.isPinned ? "고정 해제" : "고정"}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onToggleCompare(query.id)}>
+              <Scale className="w-4 h-4 mr-2" />
+              {selected ? "비교 목록에서 제외" : "비교 목록에 추가"}
             </DropdownMenuItem>
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>폴더 이동</DropdownMenuSubTrigger>

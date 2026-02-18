@@ -91,6 +91,9 @@ class Settings:
     planner_min_question_tokens: int
     translate_ko_to_en: bool
     demo_cache_always: bool
+    oneshot_postprocess_enabled: bool
+    oneshot_intent_guard_enabled: bool
+    oneshot_intent_realign_enabled: bool
 
     max_retry_attempts: int
     expert_trigger_mode: str
@@ -112,6 +115,7 @@ class Settings:
     oracle_pool_max: int
     oracle_pool_inc: int
     oracle_pool_timeout_sec: int
+    metadata_owner_fallback_enabled: bool
 
     rag_persist_dir: str
     rag_top_k: int
@@ -143,7 +147,7 @@ class Settings:
 
 def load_settings() -> Settings:
     return Settings(
-        demo_mode=_bool(os.getenv("DEMO_MODE"), True),
+        demo_mode=_bool(os.getenv("DEMO_MODE"), False),
         budget_limit_krw=_int(os.getenv("BUDGET_LIMIT_KRW"), 10000),
         cost_alert_threshold_krw=_int(os.getenv("COST_ALERT_THRESHOLD_KRW"), 8000),
         llm_cost_per_1k_tokens_krw=_int(os.getenv("LLM_COST_PER_1K_TOKENS_KRW"), 1),
@@ -151,7 +155,7 @@ def load_settings() -> Settings:
         engineer_model=_str(os.getenv("ENGINEER_MODEL"), "gpt-4o"),
         expert_model=_str(os.getenv("EXPERT_MODEL"), "gpt-4o"),
         intent_model=_str(os.getenv("INTENT_MODEL"), "local"),
-        context_token_budget=_int(os.getenv("CONTEXT_TOKEN_BUDGET"), 2000),
+        context_token_budget=_int(os.getenv("CONTEXT_TOKEN_BUDGET"), 3600),
         examples_per_query=_int(os.getenv("EXAMPLES_PER_QUERY"), 3),
         templates_per_query=_int(os.getenv("TEMPLATES_PER_QUERY"), 1),
         sql_examples_path=_str(os.getenv("SQL_EXAMPLES_PATH"), "var/metadata/sql_examples.jsonl"),
@@ -160,8 +164,8 @@ def load_settings() -> Settings:
             "var/metadata/sql_examples_augmented.jsonl",
         ),
         sql_examples_include_augmented=_bool(os.getenv("SQL_EXAMPLES_INCLUDE_AUGMENTED"), True),
-        sql_examples_exact_match_enabled=_bool(os.getenv("SQL_EXAMPLES_EXACT_MATCH_ENABLED"), True),
-        sql_examples_exact_match_mode=_str(os.getenv("SQL_EXAMPLES_EXACT_MATCH_MODE"), "hint"),
+        sql_examples_exact_match_enabled=_bool(os.getenv("SQL_EXAMPLES_EXACT_MATCH_ENABLED"), False),
+        sql_examples_exact_match_mode=_str(os.getenv("SQL_EXAMPLES_EXACT_MATCH_MODE"), "off"),
         llm_max_output_tokens=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS"), 500),
         llm_max_output_tokens_engineer=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS_ENGINEER"), 700),
         llm_max_output_tokens_expert=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS_EXPERT"), 700),
@@ -174,19 +178,22 @@ def load_settings() -> Settings:
         planner_enabled=_bool(os.getenv("PLANNER_ENABLED"), True),
         planner_model=_str(os.getenv("PLANNER_MODEL"), _str(os.getenv("EXPERT_MODEL"), "gpt-4o-mini")),
         planner_activation_mode=_str(os.getenv("PLANNER_ACTIVATION_MODE"), "complex_only"),
-        planner_complexity_threshold=_int(os.getenv("PLANNER_COMPLEXITY_THRESHOLD"), 1),
-        planner_min_question_tokens=_int(os.getenv("PLANNER_MIN_QUESTION_TOKENS"), 16),
+        planner_complexity_threshold=_int(os.getenv("PLANNER_COMPLEXITY_THRESHOLD"), 2),
+        planner_min_question_tokens=_int(os.getenv("PLANNER_MIN_QUESTION_TOKENS"), 20),
         translate_ko_to_en=_bool(os.getenv("TRANSLATE_KO_TO_EN"), True),
         demo_cache_always=_bool(os.getenv("DEMO_CACHE_ALWAYS"), False),
+        oneshot_postprocess_enabled=_bool(os.getenv("ONESHOT_POSTPROCESS_ENABLED"), True),
+        oneshot_intent_guard_enabled=_bool(os.getenv("ONESHOT_INTENT_GUARD_ENABLED"), True),
+        oneshot_intent_realign_enabled=_bool(os.getenv("ONESHOT_INTENT_REALIGN_ENABLED"), True),
         max_retry_attempts=_int(os.getenv("MAX_RETRY_ATTEMPTS"), 1),
         expert_trigger_mode=_str(os.getenv("EXPERT_TRIGGER_MODE"), "score"),
         expert_score_threshold=_int(os.getenv("EXPERT_SCORE_THRESHOLD"), 3),
-        max_db_joins=_int(os.getenv("MAX_DB_JOINS"), 3),
+        max_db_joins=_int(os.getenv("MAX_DB_JOINS"), 12),
         row_cap=_int(os.getenv("ROW_CAP"), 5000),
         db_timeout_sec=_int(os.getenv("DB_TIMEOUT_SEC"), 30),
         sql_auto_repair_enabled=_bool(os.getenv("SQL_AUTO_REPAIR_ENABLED"), True),
         sql_auto_repair_max_attempts=_int(os.getenv("SQL_AUTO_REPAIR_MAX_ATTEMPTS"), 1),
-        sql_zero_result_repair_enabled=_bool(os.getenv("SQL_ZERO_RESULT_REPAIR_ENABLED"), True),
+        sql_zero_result_repair_enabled=_bool(os.getenv("SQL_ZERO_RESULT_REPAIR_ENABLED"), False),
         sql_zero_result_repair_max_attempts=_int(os.getenv("SQL_ZERO_RESULT_REPAIR_MAX_ATTEMPTS"), 1),
         oracle_dsn=_str(os.getenv("ORACLE_DSN"), ""),
         oracle_user=_str(os.getenv("ORACLE_USER"), ""),
@@ -196,8 +203,9 @@ def load_settings() -> Settings:
         oracle_pool_max=_int(os.getenv("ORACLE_POOL_MAX"), 4),
         oracle_pool_inc=_int(os.getenv("ORACLE_POOL_INC"), 1),
         oracle_pool_timeout_sec=_int(os.getenv("ORACLE_POOL_TIMEOUT_SEC"), 10),
+        metadata_owner_fallback_enabled=_bool(os.getenv("METADATA_OWNER_FALLBACK_ENABLED"), False),
         rag_persist_dir=_str(os.getenv("RAG_PERSIST_DIR"), "var/rag"),
-        rag_top_k=_int(os.getenv("RAG_TOP_K"), 5),
+        rag_top_k=_int(os.getenv("RAG_TOP_K"), 8),
         rag_embedding_provider=_str(os.getenv("RAG_EMBEDDING_PROVIDER"), "openai"),
         rag_embedding_model=_str(os.getenv("RAG_EMBEDDING_MODEL"), "text-embedding-3-small"),
         rag_embedding_batch_size=_int(os.getenv("RAG_EMBEDDING_BATCH_SIZE"), 64),
