@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import sys
+import hashlib
 from pathlib import Path
 from typing import Iterable, List, Tuple
-from uuid import uuid4
 
 from openai import OpenAI
 
@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.config.rag_config import EMBEDDING_MODEL, RAG_BATCH_SIZE, RAG_DOC_VERSION
+from src.config.rag_config import EMBEDDING_MODEL, EMBEDDING_DIM, RAG_BATCH_SIZE, RAG_DOC_VERSION
 from src.db.vector_store import ensure_collection, get_mongo_collection, upsert_embeddings
 
 
@@ -71,13 +71,49 @@ def _normalize_doc(doc: dict) -> Tuple[str, dict]:
         metadata = doc.get("metadata", {}) | {"type": "example"}
         return text, metadata
 
+    if "table" in doc and "column" in doc and "top_values" in doc:
+        table = str(doc.get("table") or "").strip().upper()
+        column = str(doc.get("column") or "").strip().upper()
+        data_type = str(doc.get("data_type") or "").strip().upper()
+        num_distinct = doc.get("num_distinct")
+        num_nulls = doc.get("num_nulls")
+        row_count = doc.get("row_count")
+        values = []
+        for item in list(doc.get("top_values") or [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("value") or "").strip()
+            count = item.get("count")
+            if not value:
+                continue
+            if count is None:
+                values.append(value)
+            else:
+                values.append(f"{value}({count})")
+        value_text = ", ".join(values) if values else "-"
+        text = (
+            f"Table value profile: {table}.{column} ({data_type or 'UNKNOWN'}). "
+            f"Distinct={num_distinct}, Nulls={num_nulls}, Rows={row_count}. "
+            f"Top values: {value_text}."
+        )
+        metadata = doc.get("metadata", {}) | {"type": "table_profile", "table": table, "column": column}
+        return text, metadata
+
     return json.dumps(doc, ensure_ascii=False), doc.get("metadata", {})
 
 
 def _embed_texts(texts: List[str]) -> List[List[float]]:
     client = OpenAI()
-    response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    kwargs = {"model": EMBEDDING_MODEL, "input": texts}
+    if EMBEDDING_MODEL.startswith("text-embedding-3") and EMBEDDING_DIM > 0:
+        kwargs["dimensions"] = EMBEDDING_DIM
+    response = client.embeddings.create(**kwargs)
     return [item.embedding for item in response.data]
+
+
+def _stable_doc_id(text: str, metadata: dict) -> str:
+    seed = f"{RAG_DOC_VERSION}\n{text}\n{json.dumps(metadata, sort_keys=True, ensure_ascii=False)}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()
 
 
 def _batch(iterable: List[str], size: int) -> Iterable[List[str]]:
@@ -95,11 +131,12 @@ def build_index() -> None:
     normalized = [_normalize_doc(d) for d in docs]
     texts = [text for text, _ in normalized]
     metadatas = [meta | {"text": text, "doc_version": RAG_DOC_VERSION} for text, meta in normalized]
-    ids = [str(uuid4()) for _ in docs]
+    ids = [_stable_doc_id(text, meta) for text, meta in normalized]
     for metadata, doc_id in zip(metadatas, ids):
         metadata["doc_id"] = doc_id
 
     collection = get_mongo_collection()
+    collection.delete_many({"metadata.doc_version": RAG_DOC_VERSION})
 
     # Bootstrap collection with first embedding vector size.
     first_embeddings = _embed_texts(texts[:1])

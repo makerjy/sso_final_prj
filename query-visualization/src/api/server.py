@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -14,13 +15,27 @@ from src.utils.logging import log_event, new_request_id
 load_dotenv()
 
 app = FastAPI(title="Query Visualization API")
-MAX_ROWS = 10000
-MAX_TEXT_LENGTH = 2000
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+MAX_ROWS = _env_int("VIS_MAX_ROWS", 10000, minimum=1)
+MAX_QUERY_TEXT_LENGTH = _env_int("VIS_MAX_QUERY_TEXT_LENGTH", 4000, minimum=1)
+MAX_SQL_TEXT_LENGTH = _env_int("VIS_MAX_SQL_TEXT_LENGTH", 12000, minimum=1)
 
 
 class VisualizeRequest(BaseModel):
-    user_query: str = Field(..., min_length=1, max_length=MAX_TEXT_LENGTH)
-    sql: str = Field(..., min_length=1, max_length=MAX_TEXT_LENGTH)
+    user_query: str = Field(..., min_length=1, max_length=MAX_QUERY_TEXT_LENGTH)
+    sql: str = Field(..., min_length=1, max_length=MAX_SQL_TEXT_LENGTH)
     rows: List[Dict[str, Any]]
 
 

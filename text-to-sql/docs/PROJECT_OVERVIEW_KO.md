@@ -1,160 +1,159 @@
-# Text-to-SQL 전체 구조 + 핵심 상세 문서 
+# Text-to-SQL ?꾩껜 援ъ“ + ?듭떖 ?곸꽭 臾몄꽌 
 
-## 1) 전체 구조 요약
+## 1) ?꾩껜 援ъ“ ?붿빟
 
-- `(root)` 프로젝트 최상위 파일 (README, .gitignore 등)
-- `backend/` API 서버(FastAPI), RAG, Oracle, 정책, 예산, 로깅
-- `../ui/` Next.js 기반 웹 UI (repo root, 현재 연결 대상)
-- `ui/` 레거시 UI (text-to-sql 내부)
-- `scripts/` 검증/평가/데모캐시 스크립트
-- `deploy/` Docker Compose 및 Dockerfile
-- `docs/` 문서 모음
-- `var/` 런타임 데이터(메타데이터, 캐시, 로그 등)
+- `(root)` ?꾨줈?앺듃 理쒖긽???뚯씪 (README, .gitignore ??
+- `backend/` API ?쒕쾭(FastAPI), RAG, Oracle, ?뺤콉, ?덉궛, 濡쒓퉭
+- `../ui/` Next.js 湲곕컲 ??UI (repo root, ?꾩옱 ?곌껐 ???
+- `ui/` ?덇굅??UI (text-to-sql ?대?)
+- `scripts/` 寃利??됯?/?곕え罹먯떆 ?ㅽ겕由쏀듃
+- `deploy/` Docker Compose 諛?Dockerfile
+- `docs/` 臾몄꽌 紐⑥쓬
+- `var/` ?고????곗씠??硫뷀??곗씠?? 罹먯떆, 濡쒓렇 ??
 
 
-## 2) 핵심 상세 설명
+## 2) ?듭떖 ?곸꽭 ?ㅻ챸
 
-### 2.1 전체 처리 흐름 (한눈에 보기)
+### 2.1 ?꾩껜 泥섎━ ?먮쫫 (?쒕늿??蹂닿린)
 
-1) 사용자가 UI(`/ask`)에서 질문 입력
-2) Demo 모드이면 캐시(`var/cache/demo_cache.json`)에서 즉시 응답
-3) Advanced 모드이면 RAG 컨텍스트 생성
-4) ENGINEER 모델이 SQL 초안 생성
-5) 위험도가 높으면 EXPERT 모델이 재검토
-6) 후처리 규칙으로 Oracle 문법/매핑 보정
-7) PolicyGate가 안전성 검사 (SELECT-only, WHERE 필수 등)
-8) Oracle 실행 후 결과 반환
+1) ?ъ슜?먭? UI(`/ask`)?먯꽌 吏덈Ц ?낅젰
+2) Demo 紐⑤뱶?대㈃ 罹먯떆(`var/cache/demo_cache.json`)?먯꽌 利됱떆 ?묐떟
+3) Advanced 紐⑤뱶?대㈃ RAG 而⑦뀓?ㅽ듃 ?앹꽦
+4) ENGINEER 紐⑤뜽??SQL 珥덉븞 ?앹꽦
+5) ?꾪뿕?꾧? ?믪쑝硫?EXPERT 紐⑤뜽???ш???
+6) ?꾩쿂由?洹쒖튃?쇰줈 Oracle 臾몃쾿/留ㅽ븨 蹂댁젙
+7) PolicyGate媛 ?덉쟾??寃??(SELECT-only, WHERE ?꾩닔 ??
+8) Oracle ?ㅽ뻾 ??寃곌낵 諛섑솚
 
 ---
 
-### 2.2 Backend (API + RAG + Oracle) 상세
+### 2.2 Backend (API + RAG + Oracle) ?곸꽭
 
-**핵심 설정**
+**?듭떖 ?ㅼ젙**
 - `backend/app/core/config.py`
-  - `.env`를 읽어 모든 핵심 설정을 로딩합니다.
-  - 모델/예산/DB/RAG 설정은 이 파일이 기준입니다.
-  - 예: `ENGINEER_MODEL`, `EXPERT_MODEL`, `ROW_CAP`, `DB_TIMEOUT_SEC` 등
+  - `.env`瑜??쎌뼱 紐⑤뱺 ?듭떖 ?ㅼ젙??濡쒕뵫?⑸땲??
+  - 紐⑤뜽/?덉궛/DB/RAG ?ㅼ젙? ???뚯씪??湲곗??낅땲??
+  - ?? `ENGINEER_MODEL`, `EXPERT_MODEL`, `ROW_CAP`, `DB_TIMEOUT_SEC` ??
 
-**API 진입점**
+**API 吏꾩엯??*
 - `backend/app/main.py`
-  - FastAPI 앱 생성 및 라우터 등록
+  - FastAPI ???앹꽦 諛??쇱슦???깅줉
 
-**API 라우트**
-- `backend/app/api/routes/query.py` : 질문 처리(oneshot/run 등)
-- `backend/app/api/routes/admin_metadata.py` : 메타데이터 동기화
-- `backend/app/api/routes/admin_budget.py` : 예산 상태/설정
-- `backend/app/api/routes/admin_oracle.py` : Oracle 풀 상태
-- `backend/app/api/routes/report.py` : 리포트/증빙 업로드
+**API ?쇱슦??*
+- `backend/app/api/routes/query.py` : 吏덈Ц 泥섎━(oneshot/run ??
+- `backend/app/api/routes/admin_metadata.py` : 硫뷀??곗씠???숆린??
+- `backend/app/api/routes/admin_budget.py` : ?덉궛 ?곹깭/?ㅼ젙
+- `backend/app/api/routes/admin_oracle.py` : Oracle ? ?곹깭
+- `backend/app/api/routes/report.py` : 由ы룷??利앸튃 ?낅줈??
 
-**RAG 파이프라인**
+**RAG ?뚯씠?꾨씪??*
 - `backend/app/services/rag/indexer.py`
-  - `var/metadata/*` 문서를 색인에 적재
+  - `var/metadata/*` 臾몄꽌瑜??됱씤???곸옱
 - `backend/app/services/rag/retrieval.py`
-  - 질문에 관련된 스키마/예시/템플릿/용어집을 검색
+  - 吏덈Ц??愿?⑤맂 ?ㅽ궎留??덉떆/?쒗뵆由??⑹뼱吏묒쓣 寃??
 - `backend/app/services/rag/mongo_store.py`
-  - MongoDB 또는 SimpleStore 기반 검색 저장소
+  - MongoDB ?먮뒗 SimpleStore 湲곕컲 寃????μ냼
 - `backend/app/services/runtime/context_budget.py`
-  - 토큰 예산에 맞춰 컨텍스트를 잘라냄
+  - ?좏겙 ?덉궛??留욎떠 而⑦뀓?ㅽ듃瑜??섎씪??
 
-**SQL 생성(LLM)과 오케스트레이션**
+**SQL ?앹꽦(LLM)怨??ㅼ??ㅽ듃?덉씠??*
 - `backend/app/services/agents/orchestrator.py`
-  - Demo 캐시, RAG, 엔지니어/엑스퍼트 모델 호출을 총괄
+  - Demo 罹먯떆, RAG, ?붿??덉뼱/?묒뒪?쇳듃 紐⑤뜽 ?몄텧??珥앷큵
 - `backend/app/services/agents/sql_engineer.py`
-  - ENGINEER 모델로 SQL 초안 생성
+  - ENGINEER 紐⑤뜽濡?SQL 珥덉븞 ?앹꽦
 - `backend/app/services/agents/sql_expert.py`
-  - 위험도가 높으면 EXPERT 모델로 재검토
+  - ?꾪뿕?꾧? ?믪쑝硫?EXPERT 紐⑤뜽濡??ш???
 - `backend/app/services/agents/llm_client.py`
-  - OpenAI 호환 API 호출 래퍼
+  - OpenAI ?명솚 API ?몄텧 ?섑띁
 - `backend/app/services/agents/prompts.py`
-  - 모델 프롬프트(Oracle 문법 등 지시사항)
+  - 紐⑤뜽 ?꾨＼?꾪듃(Oracle 臾몃쾿 ??吏?쒖궗??
 - `backend/app/services/agents/sql_postprocess.py`
-  - 생성 SQL을 Oracle 문법/스키마에 맞게 자동 보정
+  - ?앹꽦 SQL??Oracle 臾몃쾿/?ㅽ궎留덉뿉 留욊쾶 ?먮룞 蹂댁젙
 
-**Oracle 연결/실행**
+**Oracle ?곌껐/?ㅽ뻾**
 - `backend/app/services/oracle/connection.py`
-  - Oracle 연결 풀 관리
+  - Oracle ?곌껐 ? 愿由?
 - `backend/app/services/oracle/executor.py`
-  - SQL 실행, row cap/timeout 적용
+  - SQL ?ㅽ뻾, row cap/timeout ?곸슜
 - `backend/app/services/oracle/metadata_extractor.py`
-  - 스키마 정보 추출 (ALL_* 뷰)
+  - ?ㅽ궎留??뺣낫 異붿텧 (ALL_* 酉?
 
-**정책/예산/로그**
+**?뺤콉/?덉궛/濡쒓렇**
 - `backend/app/services/policy/gate.py`
-  - SELECT-only, WHERE 필수, JOIN 제한 등
+  - SELECT-only, WHERE ?꾩닔, JOIN ?쒗븳 ??
 - `backend/app/services/budget_gate.py`
-  - 예산 한도/알림 처리
+  - ?덉궛 ?쒕룄/?뚮┝ 泥섎━
 - `backend/app/services/cost_tracker.py`
-  - 비용 누적 및 로그 기록
+  - 鍮꾩슜 ?꾩쟻 諛?濡쒓렇 湲곕줉
 - `backend/app/services/logging_store/store.py`
-  - 이벤트 로그 저장
+  - ?대깽??濡쒓렇 ???
 
 ---
 
-### 2.3 UI (Next.js) 상세
+### 2.3 UI (Next.js) ?곸꽭
 
-현재 사용 UI는 repo root `../ui/` 입니다.  
-아래 파일 경로는 레거시 UI(`text-to-sql/ui`) 기준입니다.
+?꾩옱 ?ъ슜 UI??repo root `../ui/` ?낅땲??  
 
 - `ui/app/ask/page.tsx`
-  - 질문 입력/데모 실행 화면
+  - 吏덈Ц ?낅젰/?곕え ?ㅽ뻾 ?붾㈃
 - `ui/app/review/[qid]/page.tsx`
-  - SQL 검토 + 실행 동의 화면
+  - SQL 寃??+ ?ㅽ뻾 ?숈쓽 ?붾㈃
 - `ui/app/results/[qid]/page.tsx`
-  - 결과 표시 화면
+  - 寃곌낵 ?쒖떆 ?붾㈃
 - `ui/app/admin/page.tsx`
-  - 예산/RAG 상태 등 관리 화면
+  - ?덉궛/RAG ?곹깭 ??愿由??붾㈃
 - `ui/app/layout.tsx`, `ui/app/globals.css`
-  - 공통 레이아웃/스타일
+  - 怨듯넻 ?덉씠?꾩썐/?ㅽ???
 
 ---
 
-### 2.4 Scripts (검증/평가) 상세
+### 2.4 Scripts (寃利??됯?) ?곸꽭
 
-- `scripts/validate_assets.py` : 메타데이터 유효성 검사
-- `scripts/validate_index.py` : RAG 인덱스 생성/검증
-- `scripts/validate_examples.py` : SQL 예시 검증
-- `scripts/pregen_demo_cache.py` : 데모 캐시 생성
-- `scripts/eval_questions.py` : 질문→SQL→결과 비교 평가
-- `scripts/eval_report_summary.py` : 평가 요약 + CSV 출력
-- `scripts/test_oracle_connection.py` : Oracle 연결 확인
+- `scripts/validate_assets.py` : 硫뷀??곗씠???좏슚??寃??
+- `scripts/validate_index.py` : RAG ?몃뜳???앹꽦/寃利?
+- `scripts/validate_examples.py` : SQL ?덉떆 寃利?
+- `scripts/pregen_demo_cache.py` : ?곕え 罹먯떆 ?앹꽦
+- `scripts/eval_questions.py` : 吏덈Ц?뭆QL?믨껐怨?鍮꾧탳 ?됯?
+- `scripts/eval_report_summary.py` : ?됯? ?붿빟 + CSV 異쒕젰
+- `scripts/test_oracle_connection.py` : Oracle ?곌껐 ?뺤씤
 
 ---
 
-### 2.5 Deploy (Docker) 상세
+### 2.5 Deploy (Docker) ?곸꽭
 
 - `deploy/compose/docker-compose.yml`
-  - API/UI 컨테이너 구성 및 포트 매핑
+  - API/UI 而⑦뀒?대꼫 援ъ꽦 諛??ы듃 留ㅽ븨
 - `deploy/docker/Dockerfile.api`
-  - API 이미지 빌드
+  - API ?대?吏 鍮뚮뱶
 - `deploy/docker/Dockerfile.ui`
-  - UI 이미지 빌드
+  - UI ?대?吏 鍮뚮뱶
 
 ---
 
-### 2.6 var/ 디렉토리 (런타임 데이터)
+### 2.6 var/ ?붾젆?좊━ (?고????곗씠??
 
-- `var/metadata/` : 스키마/예시/용어집/템플릿 등 RAG 문서
-- `var/cache/` : Demo 캐시
-- `var/logs/` : 실행 로그, 비용, 평가 결과 등
-- `var/rag/` : SimpleStore 저장소 (Mongo 설정이 없을 때 사용)
-- `var/mongo/` : Docker Compose MongoDB 데이터 디렉터리
+- `var/metadata/` : ?ㅽ궎留??덉떆/?⑹뼱吏??쒗뵆由???RAG 臾몄꽌
+- `var/cache/` : Demo 罹먯떆
+- `var/logs/` : ?ㅽ뻾 濡쒓렇, 鍮꾩슜, ?됯? 寃곌낵 ??
+- `var/rag/` : SimpleStore ??μ냼 (Mongo ?ㅼ젙???놁쓣 ???ъ슜)
+- `var/mongo/` : Docker Compose MongoDB ?곗씠???붾젆?곕━
 
-> 이 디렉토리는 **런타임 생성 데이터**가 많으므로 보통 git에서 제외합니다.
+> ???붾젆?좊━??**?고????앹꽦 ?곗씠??*媛 留롮쑝誘濡?蹂댄넻 git?먯꽌 ?쒖쇅?⑸땲??
 
 ---
 
 ## 3) FAQ
 
-**Q. 모델 학습은 어디서 하나요?**
-- 이 프로젝트 안에서 학습은 하지 않습니다. 외부 LLM(API)을 사용합니다.
+**Q. 紐⑤뜽 ?숈뒿? ?대뵒???섎굹??**
+- ???꾨줈?앺듃 ?덉뿉???숈뒿? ?섏? ?딆뒿?덈떎. ?몃? LLM(API)???ъ슜?⑸땲??
 
-**Q. 성능을 높이려면 무엇을 바꿔야 하나요?**
-- `var/metadata/sql_examples.jsonl`, `glossary_docs.jsonl`를 보강하고
-- `sql_postprocess.py`에 보정 규칙을 추가하는 것이 가장 효과적입니다.
+**Q. ?깅뒫???믪씠?ㅻ㈃ 臾댁뾿??諛붽퓭???섎굹??**
+- `var/metadata/sql_examples.jsonl`, `glossary_docs.jsonl`瑜?蹂닿컯?섍퀬
+- `sql_postprocess.py`??蹂댁젙 洹쒖튃??異붽??섎뒗 寃껋씠 媛???④낵?곸엯?덈떎.
 
 ---
 
-## 4) 참고 문서
+## 4) 李멸퀬 臾몄꽌
 
-- `docs/TECHNICAL.md` : 기술 문서(운영/구성 상세)
-- `docs/MODEL_GUIDE_KO.md` : 모델 사용/학습 방식 설명서
+- `docs/TECHNICAL.md` : 湲곗닠 臾몄꽌(?댁쁺/援ъ꽦 ?곸꽭)
+- `docs/MODEL_GUIDE_KO.md` : 紐⑤뜽 ?ъ슜/?숈뒿 諛⑹떇 ?ㅻ챸??

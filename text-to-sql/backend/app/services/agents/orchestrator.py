@@ -8,6 +8,8 @@ import json
 import re
 from pathlib import Path
 
+from fastapi import HTTPException
+
 from app.core.config import get_settings
 from app.services.agents.clarifier import evaluate_question_clarity
 from app.services.agents.sql_engineer import generate_sql
@@ -25,6 +27,9 @@ from app.services.runtime.risk_classifier import classify
 _SQL_EXAMPLES_CACHE: dict[str, Any] | None = None
 _SQL_EXAMPLES_CACHE_PATH: str | None = None
 _SQL_EXACT_KEEP_RE = re.compile(r"[^0-9a-z가-힣]+")
+
+
+_DEFERRED_SCOPE_TABLES = {"dual"}
 
 
 def _load_demo_cache(path: str) -> dict[str, Any]:
@@ -176,6 +181,38 @@ def _add_llm_cost(usage: dict[str, Any], stage: str) -> None:
     if settings.llm_cost_per_1k_tokens_krw > 0 and total_tokens > 0:
         cost = int(math.ceil((total_tokens / 1000) * settings.llm_cost_per_1k_tokens_krw))
         get_cost_tracker().add_cost(cost, {"usage": usage, "stage": stage, "source": "llm"})
+
+
+def _is_deferred_table_scope_error(exc: HTTPException) -> bool:
+    detail = str(getattr(exc, "detail", "") or "").strip()
+    if not detail:
+        return False
+    lowered = detail.lower()
+    if not lowered.startswith("table not allowed:"):
+        return False
+    raw = detail.split(":", 1)[1] if ":" in detail else ""
+    blocked = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    return bool(blocked) and all(name in _DEFERRED_SCOPE_TABLES for name in blocked)
+
+
+def _precheck_oneshot_sql(sql: str, question: str) -> dict[str, Any]:
+    try:
+        return precheck_sql(sql, question)
+    except HTTPException as exc:
+        if not _is_deferred_table_scope_error(exc):
+            raise
+        return {
+            "passed": False,
+            "deferred": True,
+            "detail": str(exc.detail),
+            "checks": [
+                {
+                    "name": "Table scope",
+                    "passed": False,
+                    "message": "Disallowed: DUAL (deferred to run-time repair)",
+                }
+            ],
+        }
 
 
 def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
@@ -1358,7 +1395,7 @@ def run_oneshot(
                 final_payload["intent_alignment_issues"] = unresolved_issues
             policy_result = None
             if not skip_policy and matched_sql:
-                policy_result = precheck_sql(matched_sql, original_question)
+                policy_result = _precheck_oneshot_sql(matched_sql, original_question)
             return {
                 "mode": "advanced",
                 "question": original_question,
@@ -1529,7 +1566,7 @@ def run_oneshot(
 
             policy_result = None
             if not skip_policy and final_sql:
-                policy_result = precheck_sql(final_sql, original_question)
+                policy_result = _precheck_oneshot_sql(final_sql, original_question)
             return {
                 "mode": "advanced",
                 "question": original_question,

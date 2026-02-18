@@ -77,6 +77,7 @@ def _build_local_doc_cache() -> dict[str, list[dict[str, Any]]]:
         "example": [],
         "template": [],
         "glossary": [],
+        "table_profile": [],
     }
 
     schema_catalog = _load_json(base / "schema_catalog.json") or {"tables": {}}
@@ -121,7 +122,22 @@ def _build_local_doc_cache() -> dict[str, list[dict[str, Any]]]:
         )
 
     glossary_items = _load_jsonl(base / "glossary_docs.jsonl")
+    glossary_items.extend(_load_jsonl(base / "external_rag_docs.jsonl"))
     for idx, item in enumerate(glossary_items):
+        if "text" in item:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            term = str(metadata.get("term") or item.get("term") or item.get("key") or item.get("name") or "").strip()
+            cache["glossary"].append(
+                {
+                    "id": f"glossary::{idx}",
+                    "text": text,
+                    "metadata": {"type": "glossary", "term": term, **metadata},
+                }
+            )
+            continue
         term = str(item.get("term") or item.get("key") or item.get("name") or "").strip()
         desc = str(item.get("desc") or item.get("definition") or item.get("value") or "").strip()
         if not term and not desc:
@@ -131,6 +147,41 @@ def _build_local_doc_cache() -> dict[str, list[dict[str, Any]]]:
                 "id": f"glossary::{idx}",
                 "text": f"Glossary: {term} = {desc}".strip(),
                 "metadata": {"type": "glossary", "term": term},
+            }
+        )
+
+    table_profile_items = _load_jsonl(base / "table_value_profiles.jsonl")
+    for idx, item in enumerate(table_profile_items):
+        table = str(item.get("table") or "").strip().upper()
+        column = str(item.get("column") or "").strip().upper()
+        data_type = str(item.get("data_type") or "").strip().upper()
+        if not table or not column:
+            continue
+        raw_values = item.get("top_values") or []
+        values: list[str] = []
+        if isinstance(raw_values, list):
+            for value_row in raw_values[:10]:
+                if not isinstance(value_row, dict):
+                    continue
+                value = str(value_row.get("value") or "").strip()
+                count = value_row.get("count")
+                if not value:
+                    continue
+                if count is None:
+                    values.append(value)
+                else:
+                    values.append(f"{value}({count})")
+        value_text = ", ".join(values) if values else "-"
+        text = (
+            f"Table value profile: {table}.{column} ({data_type or 'UNKNOWN'}). "
+            f"Distinct={item.get('num_distinct')}, Nulls={item.get('num_nulls')}, Rows={item.get('row_count')}. "
+            f"Top values: {value_text}."
+        )
+        cache["table_profile"].append(
+            {
+                "id": f"table_profile::{idx}",
+                "text": text,
+                "metadata": {"type": "table_profile", "table": table, "column": column},
             }
         )
 
@@ -307,7 +358,7 @@ def _hit_signature(hit: dict[str, Any]) -> str:
     column = str(metadata.get("column") or "").strip().lower()
     term = str(metadata.get("term") or metadata.get("name") or "").strip().lower()
     text = _normalize_dedupe_text(str(hit.get("text") or ""))[:240]
-    if source_type in {"schema", "column_value"}:
+    if source_type in {"schema", "column_value", "table_profile"}:
         key = f"{source_type}|{table}|{column}|{text}"
     elif source_type in {"diagnosis_map", "procedure_map", "label_intent"}:
         key = f"{source_type}|{term}|{text}"
@@ -485,12 +536,12 @@ def _hybrid_search(
     vec_scores = _normalize_scores({doc_id: _hit_score(hit) for doc_id, hit in vec_by_id.items()})
     bm25_scores = _normalize_scores({doc_id: _hit_score(hit) for doc_id, hit in bm25_by_id.items()})
     if mode in {"legacy", "hybrid_legacy"}:
-        if source_type in {"diagnosis_map", "procedure_map", "column_value", "label_intent"}:
+        if source_type in {"diagnosis_map", "procedure_map", "column_value", "label_intent", "table_profile"}:
             w_vec, w_bm25, w_overlap = 0.45, 0.45, 0.10
         else:
             w_vec, w_bm25, w_overlap = 0.60, 0.30, 0.10
     else:
-        if source_type in {"diagnosis_map", "procedure_map", "column_value", "label_intent"}:
+        if source_type in {"diagnosis_map", "procedure_map", "column_value", "label_intent", "table_profile"}:
             w_vec, w_bm25, w_overlap = 0.55, 0.35, 0.10
         else:
             w_vec, w_bm25, w_overlap = 0.50, 0.40, 0.10
@@ -944,9 +995,17 @@ def build_candidate_context(question: str) -> CandidateContext:
         )
     else:
         template_hits = []
-    general_glossary_hits = _dedupe_hits(
+    raw_glossary_hits = _dedupe_hits(
         _hybrid_search(store, question, k=settings.rag_top_k, where={"type": "glossary"}),
         max_items=settings.rag_top_k,
+    )
+    table_profile_hits = _dedupe_hits(
+        _hybrid_search(store, question, k=settings.rag_top_k, where={"type": "table_profile"}),
+        max_items=settings.rag_top_k,
+    )
+    general_glossary_hits = _dedupe_hits(
+        _merge_hits([raw_glossary_hits, table_profile_hits], k=max(settings.rag_top_k * 2, settings.rag_top_k)),
+        max_items=max(settings.rag_top_k * 2, settings.rag_top_k),
     )
     diagnosis_map_hits = (
         _dedupe_hits(
@@ -1110,11 +1169,20 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
         )
     else:
         template_hits = []
-    general_glossary_hits = _merge_hits(
+    raw_glossary_hits = _merge_hits(
         [_hybrid_search(store, q, k=_per_query_k(settings.rag_top_k), where={"type": "glossary"}) for q in deduped],
         k=settings.rag_top_k,
     )
-    general_glossary_hits = _dedupe_hits(general_glossary_hits, max_items=settings.rag_top_k)
+    raw_glossary_hits = _dedupe_hits(raw_glossary_hits, max_items=settings.rag_top_k)
+    table_profile_hits = _merge_hits(
+        [_hybrid_search(store, q, k=_per_query_k(settings.rag_top_k), where={"type": "table_profile"}) for q in deduped],
+        k=settings.rag_top_k,
+    )
+    table_profile_hits = _dedupe_hits(table_profile_hits, max_items=settings.rag_top_k)
+    general_glossary_hits = _dedupe_hits(
+        _merge_hits([raw_glossary_hits, table_profile_hits], k=max(settings.rag_top_k * 2, settings.rag_top_k)),
+        max_items=max(settings.rag_top_k * 2, settings.rag_top_k),
+    )
     if merged_intent["diagnosis"]:
         diagnosis_map_hits = _merge_hits(
             [_hybrid_search(store, q, k=_per_query_k(settings.rag_top_k), where={"type": "diagnosis_map"}) for q in deduped],

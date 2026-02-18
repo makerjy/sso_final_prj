@@ -210,11 +210,32 @@ def clean_column_values(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [merged[key] for key in order]
 
 
+def clean_table_value_profiles(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for row in rows:
+        table = str(row.get("table") or "").strip().upper()
+        column = str(row.get("column") or "").strip().upper()
+        if not table or not column:
+            continue
+        key = (table, column)
+        if key not in merged:
+            merged[key] = dict(row)
+            order.append(key)
+            continue
+        current = merged[key]
+        prev_distinct = int(current.get("num_distinct") or 0)
+        new_distinct = int(row.get("num_distinct") or 0)
+        if new_distinct > prev_distinct:
+            merged[key] = dict(row)
+    return [merged[key] for key in order]
+
+
 def _clean_one(path: Path) -> tuple[int, int]:
     rows = _load_jsonl(path)
     before = len(rows)
     name = path.name
-    if name == "sql_examples.jsonl":
+    if name in {"sql_examples.jsonl", "sql_examples_augmented.jsonl"}:
         cleaned = clean_sql_examples(rows)
     elif name in {"join_templates.jsonl", "sql_templates.jsonl"}:
         cleaned = clean_templates(rows)
@@ -226,6 +247,8 @@ def _clean_one(path: Path) -> tuple[int, int]:
         cleaned = clean_label_intents(rows)
     elif name == "column_value_docs.jsonl":
         cleaned = clean_column_values(rows)
+    elif name == "table_value_profiles.jsonl":
+        cleaned = clean_table_value_profiles(rows)
     else:
         cleaned = rows
     if cleaned != rows:
@@ -242,12 +265,14 @@ def main() -> int:
     targets = [
         "glossary_docs.jsonl",
         "sql_examples.jsonl",
+        "sql_examples_augmented.jsonl",
         "join_templates.jsonl",
         "sql_templates.jsonl",
         "diagnosis_icd_map.jsonl",
         "procedure_icd_map.jsonl",
         "label_intent_profiles.jsonl",
         "column_value_docs.jsonl",
+        "table_value_profiles.jsonl",
     ]
 
     report: list[dict[str, Any]] = []

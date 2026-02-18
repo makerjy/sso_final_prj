@@ -792,6 +792,58 @@ export function QueryView() {
       .trim()
   }
 
+  const splitInsightIntoPoints = (text: string): string[] => {
+    const normalized = String(text || "")
+      .replace(/\r/g, "")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{2,}/g, "\n")
+      .trim()
+    if (!normalized) return []
+
+    const rawLines = normalized
+      .split("\n")
+      .map((line) => line.replace(/^[\-\*\u2022\u25CF\u25E6]\s*/, "").trim())
+      .filter(Boolean)
+
+    const points: string[] = []
+    const seen = new Set<string>()
+
+    const pushPoint = (value: string) => {
+      const cleaned = value.replace(/\s+/g, " ").trim()
+      if (!cleaned) return
+      const key = cleaned.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      points.push(cleaned)
+    }
+
+    for (const line of rawLines) {
+      const sentenceParts =
+        line
+          .match(/[^.!?]+[.!?]?/g)
+          ?.map((part) => part.trim())
+          .filter(Boolean) || []
+
+      if (sentenceParts.length > 1) {
+        sentenceParts.forEach(pushPoint)
+        continue
+      }
+
+      if (line.length > 110 && line.includes(",")) {
+        line
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .forEach(pushPoint)
+        continue
+      }
+
+      pushPoint(line)
+    }
+
+    return points.slice(0, 6)
+  }
+
   const integratedInsight = useMemo(() => {
     const serverInsight = normalizeInsightText(
       String(visualizationResult?.insight || activeTab?.insight || "").trim()
@@ -805,6 +857,8 @@ export function QueryView() {
     }
     return "시각화 LLM 인사이트가 아직 없습니다. 쿼리를 다시 실행하거나 시각화를 새로고침해 주세요."
   }, [visualizationResult, activeTab?.insight, visualizationLoading, visualizationError])
+  const insightPoints = useMemo(() => splitInsightIntoPoints(integratedInsight), [integratedInsight])
+  const insightHeadline = insightPoints[0] || integratedInsight
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
@@ -2519,9 +2573,24 @@ export function QueryView() {
                   <CardTitle className="text-sm">해석</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
-                    <h4 className="font-medium text-foreground mb-2">데이터 분석 인사이트</h4>
-                    <p className="text-sm text-muted-foreground whitespace-pre-line">{integratedInsight}</p>
+                  <div className="rounded-lg border border-primary/30 bg-primary/10 p-4">
+                    <div className="space-y-3">
+                      <div className="rounded-md border border-primary/20 bg-background/70 px-3 py-2 text-sm font-medium leading-relaxed text-foreground">
+                        {insightHeadline}
+                      </div>
+                      {insightPoints.length > 1 ? (
+                        <ul className="space-y-2 text-sm text-muted-foreground">
+                          {insightPoints.slice(1).map((point, idx) => (
+                            <li key={`insight-${idx}-${point.slice(0, 24)}`} className="flex items-start gap-2">
+                              <span className="mt-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/20 text-[11px] font-semibold text-primary">
+                                {idx + 1}
+                              </span>
+                              <span className="leading-relaxed">{point}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
                   </div>
                 </CardContent>
               </Card>

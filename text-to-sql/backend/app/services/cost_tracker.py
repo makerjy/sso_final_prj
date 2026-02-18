@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.services.logging_store.store import append_event
+from app.services.runtime.state_store import get_state_store
 
 
 @dataclass
@@ -30,7 +31,22 @@ class CostTracker:
     state: CostState = field(default_factory=CostState)
     config: BudgetConfig = field(default_factory=BudgetConfig)
 
+    @property
+    def _state_key(self) -> str:
+        return "cost_state"
+
+    @property
+    def _config_key(self) -> str:
+        return "budget_config"
+
     def load(self) -> None:
+        store = get_state_store()
+        if store.enabled:
+            data = store.get(self._state_key)
+            if isinstance(data, dict):
+                self.state.total_krw = int(data.get("total_krw", 0) or 0)
+                self.state.last_updated = int(data.get("last_updated", 0) or 0)
+                return
         path = Path(self.state_path)
         if not path.exists():
             return
@@ -42,6 +58,15 @@ class CostTracker:
         self.state.last_updated = int(data.get("last_updated", 0))
 
     def load_config(self) -> None:
+        store = get_state_store()
+        if store.enabled:
+            data = store.get(self._config_key)
+            if isinstance(data, dict):
+                if "budget_limit_krw" in data and data.get("budget_limit_krw") is not None:
+                    self.config.budget_limit_krw = int(data["budget_limit_krw"])
+                if "cost_alert_threshold_krw" in data and data.get("cost_alert_threshold_krw") is not None:
+                    self.config.cost_alert_threshold_krw = int(data["cost_alert_threshold_krw"])
+                return
         path = Path(self.config_path)
         if not path.exists():
             return
@@ -55,22 +80,28 @@ class CostTracker:
             self.config.cost_alert_threshold_krw = int(data["cost_alert_threshold_krw"])
 
     def persist(self) -> None:
-        path = Path(self.state_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "total_krw": self.state.total_krw,
             "last_updated": int(time.time()),
         }
+        store = get_state_store()
+        if store.enabled and store.set(self._state_key, payload):
+            return
+        path = Path(self.state_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
 
     def persist_config(self) -> None:
-        path = Path(self.config_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {}
         if self.config.budget_limit_krw is not None:
             payload["budget_limit_krw"] = self.config.budget_limit_krw
         if self.config.cost_alert_threshold_krw is not None:
             payload["cost_alert_threshold_krw"] = self.config.cost_alert_threshold_krw
+        store = get_state_store()
+        if store.enabled and store.set(self._config_key, payload):
+            return
+        path = Path(self.config_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
 
     def add_cost(self, krw: int, meta: dict[str, Any] | None = None) -> None:

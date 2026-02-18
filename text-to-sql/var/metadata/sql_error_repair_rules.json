@@ -151,6 +151,26 @@
       ],
       "success_count": 1,
       "updated_at": 1770971494
+    },
+    {
+      "created_at": 1771392856,
+      "error_signature": "no_rows_returned",
+      "failed_sql_hash": "599f1cc6ecfcc9793f953e767b4aeced9ab6cf6b6f03b73411943edd3a363584",
+      "failed_sql_sample": "SELECT CASE WHEN a.HOSPITAL_EXPIRE_FLAG = 1 THEN 'Deceased' ELSE 'Survived' END AS mortality_status, AVG(c.VALUENUM) AS avg_lactate\nFROM CHARTEVENTS c\nJOIN D_ITEMS d ON c.ITEMID = d.ITEMID\nJOIN ICUSTAYS i ON c.STAY_ID = i.STAY_ID\nJOIN ADMISSIONS a ON i.HADM_ID = a.HADM_ID\nWHERE c.VALUENUM IS NOT NULL AND d.LABEL = 'Lactate' AND c.CHARTTIME BETWEEN i.INTIME AND i.INTIME + INTERVAL '24' HOUR\nGROUP BY CASE WHEN a.HOSPITAL_EXPIRE_FLAG = 1 THEN 'Deceased' ELSE 'Survived' END",
+      "fixed_sql": "WITH lactate_events AS (\n    SELECT c.HADM_ID, c.VALUENUM\n    FROM CHARTEVENTS c\n    JOIN D_ITEMS d ON c.ITEMID = d.ITEMID\n    JOIN ICUSTAYS i ON c.STAY_ID = i.STAY_ID\n    WHERE le.VALUENUM IS NOT NULL AND c.VALUENUM IS NOT NULL \n      AND d.LABEL = 'Lactate' \n      AND c.CHARTTIME BETWEEN i.INTIME AND i.INTIME + INTERVAL '24' HOUR\n),\npatient_mortality AS (\n    SELECT HADM_ID, CASE WHEN HOSPITAL_EXPIRE_FLAG = 1 THEN 'Deceased' ELSE 'Survived' END AS mortality_status\n    FROM ADMISSIONS\n)\nSELECT pm.mortality_status, AVG(le.VALUENUM) AS avg_lactate\nFROM lactate_events le\nJOIN patient_mortality pm ON le.HADM_ID = pm.HADM_ID\nGROUP BY pm.mortality_status",
+      "fixed_sql_hash": "1c77f3930d2034f2df9c41bd6704362f76f5b57177ec728a87eaa01c6bf7331d",
+      "hit_count": 0,
+      "id": "82156cf7d48f4165b70c3c0634535f8b",
+      "last_used_at": 1771392856,
+      "resolution_notes": [
+        "table:d_items->D_ITEMS",
+        "column:hospital_expire_flag->HOSPITAL_EXPIRE_FLAG",
+        "column:stay_id->STAY_ID",
+        "column:hadm_id->HADM_ID",
+        "avg_not_null_valuenum"
+      ],
+      "success_count": 1,
+      "updated_at": 1771392856
     }
   ]
 }

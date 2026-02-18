@@ -74,6 +74,19 @@ def _schema_docs(schema_catalog: dict[str, Any], join_graph: dict[str, Any] | No
 def _glossary_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     docs = []
     for idx, item in enumerate(items):
+        if "text" in item:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            term = str(metadata.get("term") or item.get("term") or item.get("key") or item.get("name") or "").strip()
+            docs.append({
+                "id": f"glossary::{idx}",
+                "text": text,
+                "metadata": {"type": "glossary", "term": term, **metadata},
+            })
+            continue
+
         term = item.get("term") or item.get("key") or item.get("name") or ""
         desc = item.get("desc") or item.get("definition") or item.get("value") or ""
         text = f"Glossary: {term} = {desc}".strip()
@@ -214,6 +227,53 @@ def _column_value_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return docs
 
 
+def _table_profile_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    docs = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        table = str(item.get("table") or "").strip().upper()
+        column = str(item.get("column") or "").strip().upper()
+        data_type = str(item.get("data_type") or "").strip().upper()
+        if not table or not column:
+            continue
+        num_distinct = item.get("num_distinct")
+        num_nulls = item.get("num_nulls")
+        row_count = item.get("row_count")
+        raw_values = item.get("top_values") or []
+        values: list[str] = []
+        if isinstance(raw_values, list):
+            for value_row in raw_values[:12]:
+                if not isinstance(value_row, dict):
+                    continue
+                value = str(value_row.get("value") or "").strip()
+                count = value_row.get("count")
+                if not value:
+                    continue
+                if count is None:
+                    values.append(value)
+                else:
+                    values.append(f"{value}({count})")
+        value_text = ", ".join(values) if values else "-"
+        text = (
+            f"Table value profile: {table}.{column} ({data_type or 'UNKNOWN'}). "
+            f"Distinct={num_distinct}, Nulls={num_nulls}, Rows={row_count}. "
+            f"Top values: {value_text}."
+        )
+        docs.append(
+            {
+                "id": f"table_profile::{idx}",
+                "text": text,
+                "metadata": {
+                    "type": "table_profile",
+                    "table": table,
+                    "column": column,
+                },
+            }
+        )
+    return docs
+
+
 def _label_intent_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     docs = []
     for idx, item in enumerate(items):
@@ -262,6 +322,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     schema_catalog = _load_json(base / "schema_catalog.json") or {"tables": {}}
     join_graph = _load_json(base / "join_graph.json") or {"edges": []}
     glossary_items = _load_jsonl(base / "glossary_docs.jsonl")
+    glossary_items.extend(_load_jsonl(base / "external_rag_docs.jsonl"))
     example_items = _load_jsonl(base / "sql_examples.jsonl")
     augmented_example_items = _load_jsonl(base / "sql_examples_augmented.jsonl")
     if augmented_example_items:
@@ -281,6 +342,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     procedure_map_items = _load_jsonl(base / "procedure_icd_map.jsonl")
     label_intent_items = _load_jsonl(base / "label_intent_profiles.jsonl")
     column_value_items = load_column_value_rows()
+    table_profile_items = _load_jsonl(base / "table_value_profiles.jsonl")
 
     docs: list[dict[str, Any]] = []
     docs.extend(_schema_docs(schema_catalog, join_graph))
@@ -289,6 +351,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     docs.extend(_procedure_map_docs(procedure_map_items))
     docs.extend(_label_intent_docs(label_intent_items))
     docs.extend(_column_value_docs(column_value_items))
+    docs.extend(_table_profile_docs(table_profile_items))
     docs.extend(_example_docs(example_items))
     docs.extend(_template_docs(join_template_items, kind="join"))
     docs.extend(_template_docs(sql_template_items, kind="sql"))
@@ -303,6 +366,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
         "procedure_map_docs": len(_procedure_map_docs(procedure_map_items)),
         "label_intent_docs": len(_label_intent_docs(label_intent_items)),
         "column_value_docs": len(_column_value_docs(column_value_items)),
+        "table_profile_docs": len(_table_profile_docs(table_profile_items)),
         "sql_examples_docs": len(example_items),
         "join_templates_docs": len(join_template_items) + len(sql_template_items),
     }

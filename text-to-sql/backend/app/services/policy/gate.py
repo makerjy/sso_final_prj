@@ -280,6 +280,8 @@ def precheck_sql(sql: str, question: str | None = None) -> dict[str, object]:
 
     allowed_tables = {name.lower() for name in load_table_scope() if name}
     if allowed_tables:
+        # Oracle pseudo-table used in scalar SELECT patterns; safe to allow even with scope enabled.
+        allowed_tables.add("dual")
         cte_names = {name.lower() for name in _CTE_REF.findall(text)}
         found_tables, disallowed = _resolve_table_refs(
             text,

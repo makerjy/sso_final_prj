@@ -118,13 +118,16 @@ def get_pool():
     ssl_mode = str(overrides.get("sslMode") or "").strip().lower()
     dsn_override = str(overrides.get("dsn") or "").strip()
     dsn = settings.oracle_dsn
+    tcp_fallback_dsn = ""
     if dsn_override:
         dsn = dsn_override
     elif host and port and database:
         if ssl_mode in {"require", "verify-ca", "verify-full"}:
             dsn = f"tcps://{host}:{port}/{database}"
+            tcp_fallback_dsn = f"{host}:{port}/{database}"
         else:
             dsn = f"{host}:{port}/{database}"
+            tcp_fallback_dsn = dsn
     if not dsn:
         raise HTTPException(
             status_code=500, detail="ORACLE_DSN is not configured")
@@ -132,16 +135,41 @@ def get_pool():
     lib = _require_oracledb()
     with _POOL_LOCK:
         if _POOL is None:
-            _POOL = lib.create_pool(
-                user=(overrides.get("username") or settings.oracle_user),
-                password=(overrides.get("password")
-                          or settings.oracle_password),
-                dsn=dsn,
-                min=settings.oracle_pool_min,
-                max=settings.oracle_pool_max,
-                increment=settings.oracle_pool_inc,
-                timeout=settings.oracle_pool_timeout_sec,
-            )
+            username = (overrides.get("username") or settings.oracle_user)
+            password = (overrides.get("password") or settings.oracle_password)
+            pool_kwargs = {
+                "user": username,
+                "password": password,
+                "dsn": dsn,
+                "min": settings.oracle_pool_min,
+                "max": settings.oracle_pool_max,
+                "increment": settings.oracle_pool_inc,
+                "timeout": settings.oracle_pool_timeout_sec,
+            }
+            try:
+                _POOL = lib.create_pool(**pool_kwargs)
+            except Exception as exc:
+                # When sslMode=require is set without a wallet/tns config,
+                # Oracle thick mode can fail with ORA-28759.
+                if (
+                    str(dsn).lower().startswith("tcps://")
+                    and tcp_fallback_dsn
+                    and "ORA-28759" in str(exc).upper()
+                    and not dsn_override
+                ):
+                    try:
+                        pool_kwargs["dsn"] = tcp_fallback_dsn
+                        _POOL = lib.create_pool(**pool_kwargs)
+                    except Exception as retry_exc:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=f"Oracle pool create failed: {retry_exc}",
+                        ) from retry_exc
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Oracle pool create failed: {exc}",
+                    ) from exc
     return _POOL
 
 

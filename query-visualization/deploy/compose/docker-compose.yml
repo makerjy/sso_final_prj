@@ -14,14 +14,3 @@ services:
       - ../../oracle/instantclient_23_26:/opt/oracle/instantclient:ro
     ports:
       - "${VIS_API_HOST_PORT:-8080}:8080"
-
-  ui:
-    build:
-      context: ../../..
-      dockerfile: query-visualization/deploy/docker/Dockerfile.ui
-    depends_on:
-      - api
-    environment:
-      - PY_API_URL=http://api:8080/visualize
-    ports:
-      - "${VIS_UI_HOST_PORT:-3001}:3001"

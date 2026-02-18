@@ -212,7 +212,7 @@ def load_settings() -> Settings:
         mongo_uri=_str(os.getenv("MONGO_URI"), ""),
         mongo_db=_str(os.getenv("MONGO_DB"), "text_to_sql"),
         mongo_collection=_str(os.getenv("MONGO_COLLECTION"), "rag_docs"),
-        mongo_vector_index=_str(os.getenv("MONGO_VECTOR_INDEX"), ""),
+        mongo_vector_index=_str(os.getenv("MONGO_VECTOR_INDEX") or None, "rag_vector_index"),
         events_log_path=_str(os.getenv("EVENTS_LOG_PATH"), "var/logs/events.jsonl"),
         cost_state_path=_str(os.getenv("COST_STATE_PATH"), "var/logs/cost_state.json"),
         budget_config_path=_str(os.getenv("BUDGET_CONFIG_PATH"), "var/logs/budget_config.json"),

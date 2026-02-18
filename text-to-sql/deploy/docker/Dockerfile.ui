@@ -4,6 +4,8 @@ WORKDIR /app
 
 ARG API_BASE_URL
 ENV API_BASE_URL=$API_BASE_URL
+ARG VIS_API_BASE_URL
+ENV VIS_API_BASE_URL=$VIS_API_BASE_URL
 
 COPY ui/package.json /app/package.json
 RUN npm install

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Iterable, List, Optional
 from uuid import uuid4
 
@@ -17,7 +18,16 @@ from src.config.rag_config import (
 def get_mongo_collection():
     if not MONGODB_URI:
         raise RuntimeError("MONGODB_URI is not set")
-    client = MongoClient(MONGODB_URI)
+    # Fail fast when Atlas is unreachable so visualization can continue with fallback context.
+    selection_timeout_ms = int(os.getenv("MONGODB_SERVER_SELECTION_TIMEOUT_MS", "2500"))
+    connect_timeout_ms = int(os.getenv("MONGODB_CONNECT_TIMEOUT_MS", "2500"))
+    socket_timeout_ms = int(os.getenv("MONGODB_SOCKET_TIMEOUT_MS", "2500"))
+    client = MongoClient(
+        MONGODB_URI,
+        serverSelectionTimeoutMS=selection_timeout_ms,
+        connectTimeoutMS=connect_timeout_ms,
+        socketTimeoutMS=socket_timeout_ms,
+    )
     db = client[MONGODB_DB]
     return db[MONGODB_COLLECTION]
 
