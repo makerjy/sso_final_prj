@@ -11,6 +11,7 @@ import re
 
 from app.services.agents.orchestrator import run_oneshot
 from app.services.agents.intent_guard import enforce_intent_alignment
+from app.services.agents.sql_error_parser import parse_sql_error
 from app.services.agents.sql_expert import repair_sql_after_error
 from app.services.agents.sql_error_templates import apply_sql_error_templates
 from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
@@ -86,6 +87,7 @@ def _repair_sql_once(
     planner_intent: dict[str, Any] | None,
     failed_sql: str,
     error_message: str,
+    structured_error: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     repaired = repair_sql_after_error(
         question,
@@ -94,6 +96,7 @@ def _repair_sql_once(
         error_message,
         question_en=question_en,
         planner_intent=planner_intent,
+        structured_error=structured_error,
     )
     _add_llm_cost(repaired.get("usage", {}), "run_repair")
     repaired_sql = str(repaired.get("final_sql") or "").strip()
@@ -410,6 +413,11 @@ def run_query(req: RunRequest):
                                 planner_intent=planner_intent,
                                 failed_sql=failed_sql,
                                 error_message="NO_ROWS_RETURNED: query executed successfully but returned 0 rows.",
+                                structured_error={
+                                    "error_code": "NO_ROWS_RETURNED",
+                                    "error_message": "Query executed successfully but returned 0 rows.",
+                                    "hint": "Broaden restrictive predicates while preserving original intent.",
+                                },
                             )
                             repaired_sql = str(repaired_sql or "").strip()
                             if repaired_sql and repaired_sql.rstrip(";") != current_sql.rstrip(";"):
@@ -475,6 +483,7 @@ def run_query(req: RunRequest):
                 error_message = (
                     str(exc.detail) if isinstance(exc, HTTPException) and exc.detail else str(exc)
                 )
+                structured_error = parse_sql_error(error_message, sql=current_sql)
                 if repair_round >= max_repair_attempts:
                     raise
                 known_fix = find_learned_sql_fix(current_sql, error_message=error_message)
@@ -526,6 +535,7 @@ def run_query(req: RunRequest):
                     planner_intent=planner_intent,
                     failed_sql=failed_sql,
                     error_message=error_message,
+                    structured_error=structured_error,
                 )
                 if repaired_sql.strip() == current_sql.strip():
                     raise
@@ -543,6 +553,7 @@ def run_query(req: RunRequest):
                         "attempt": repair_round + 1,
                         "source": "llm_repair",
                         "error": error_message,
+                        "error_detail": structured_error,
                         "risk_score": repaired_payload.get("risk_score"),
                         "postprocess": repaired_payload.get("postprocess", []),
                     }

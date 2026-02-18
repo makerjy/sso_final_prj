@@ -315,6 +315,11 @@ def main() -> int:
         default=50,
         help="Maximum new rows to append when --augment-on-fail is enabled (0 = unlimited).",
     )
+    parser.add_argument(
+        "--respect-budget-gate",
+        action="store_true",
+        help="Keep runtime budget gate enabled (default: disabled in service_pipeline evaluation).",
+    )
     args = parser.parse_args()
 
     if args.db_timeout_sec and args.db_timeout_sec > 0:
@@ -346,6 +351,12 @@ def main() -> int:
     OneShotRequest = None
     RunRequest = None
     if service_mode:
+        # Evaluation should not terminate early due budget gate.
+        # This override only affects this script process.
+        if not args.respect_budget_gate:
+            from app.api.routes import query as query_route  # pylint: disable=import-outside-toplevel
+
+            query_route.ensure_budget_ok = lambda: None  # type: ignore[assignment]
         from app.api.routes.query import (  # pylint: disable=import-outside-toplevel
             OneShotRequest as _OneShotRequest,
             RunRequest as _RunRequest,

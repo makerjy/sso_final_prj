@@ -17,6 +17,7 @@ _SINGLE_QUOTED_LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
 _ROWNUM_LIMIT_RE = re.compile(r"\bROWNUM\s*<=\s*\d+", re.IGNORECASE)
 _FETCH_FIRST_RE = re.compile(r"\bFETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\b", re.IGNORECASE)
 _LIMIT_RE = re.compile(r"\bLIMIT\s+\d+\b", re.IGNORECASE)
+_DISTINCT_SELECT_RE = re.compile(r"^\s*SELECT\s+DISTINCT\b", re.IGNORECASE)
 
 _FROM_CLAUSE_END_KEYWORDS = {
     "where",
@@ -73,6 +74,19 @@ _WHERE_OPTIONAL_QUESTION_HINTS = (
     "상태",
     "플래그",
     "트렌드",
+)
+
+_WHERE_OPTIONAL_SAMPLE_HINTS = (
+    "sample",
+    "preview",
+    "distinct",
+    "list distinct",
+    "value list",
+    "미리보기",
+    "샘플",
+    "예시",
+    "고유값",
+    "distinct 값",
 )
 
 
@@ -203,6 +217,8 @@ def _can_skip_where(question: str | None, sql: str) -> tuple[bool, str]:
     if not question:
         return False, ""
     q = question.lower()
+    if _DISTINCT_SELECT_RE.search(sql) and any(hint in q for hint in _WHERE_OPTIONAL_SAMPLE_HINTS):
+        return True, "Distinct sample/list question: WHERE optional"
     if not any(hint in q for hint in _WHERE_OPTIONAL_QUESTION_HINTS):
         return False, ""
     has_aggregate_shape = bool(_AGG_FN_RE.search(sql)) or bool(re.search(r"\bgroup\s+by\b", sql, re.IGNORECASE))

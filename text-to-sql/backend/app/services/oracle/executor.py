@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from app.core.config import get_settings
 from app.services.oracle.connection import acquire_connection
+from app.services.runtime.settings_store import load_connection_settings
 
 
 def _sanitize_sql(sql: str) -> str:
@@ -19,6 +20,7 @@ def _apply_row_cap(sql: str, row_cap: int) -> str:
 
 def execute_sql(sql: str) -> dict[str, Any]:
     settings = get_settings()
+    overrides = load_connection_settings()
     text = _sanitize_sql(sql)
     # Keep executor policy aligned with precheck_sql:
     # allow plain SELECT and CTE-based read-only queries (WITH ... SELECT ...).
@@ -34,8 +36,13 @@ def execute_sql(sql: str) -> dict[str, Any]:
         except Exception:
             pass
         cur = conn.cursor()
-        if settings.oracle_default_schema:
-            schema = settings.oracle_default_schema.strip()
+        session_schema = str(
+            overrides.get("defaultSchema")
+            or settings.oracle_default_schema
+            or ""
+        ).strip()
+        if session_schema:
+            schema = session_schema
             if re.fullmatch(r"[A-Za-z0-9_$#]+", schema):
                 cur.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {schema}")
         capped_sql = _apply_row_cap(text, settings.row_cap)

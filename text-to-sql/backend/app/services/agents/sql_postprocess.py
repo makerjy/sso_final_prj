@@ -2141,14 +2141,62 @@ def _ensure_group_by_not_null_for_simple_avg(question: str, sql: str) -> tuple[s
 def _rewrite_avg_count_alias(sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
-    if re.search(r"\bAVG\s*\(\s*(diagnosis_count|procedure_count|num_diagnoses|num_procedures|[A-Za-z0-9_]*_count)\s*\)", text, re.IGNORECASE):
-        text = re.sub(
+    aliases_in_order = re.findall(r"\bAS\s+([A-Za-z_][A-Za-z0-9_$#]*)\b", text, flags=re.IGNORECASE)
+    projected_aliases = {alias.upper() for alias in aliases_in_order}
+    count_like_aliases: list[str] = []
+    seen_count_aliases: set[str] = set()
+    for alias in aliases_in_order:
+        alias_upper = alias.upper()
+        if alias_upper in seen_count_aliases:
+            continue
+        if not _COUNTLIKE_ALIAS_RE.match(alias_upper):
+            continue
+        seen_count_aliases.add(alias_upper)
+        count_like_aliases.append(alias)
+
+    agg_alias_ref_re = re.compile(
+        r"\b(?P<fn>AVG|STDDEV)\s*\(\s*(?P<alias>[A-Za-z_][A-Za-z0-9_$#]*)\s*\)",
+        re.IGNORECASE,
+    )
+
+    # If outer aggregate references an alias that is not projected, map it to the
+    # single projected count-like alias to avoid ORA-00904.
+    if len(count_like_aliases) == 1:
+        target_alias = count_like_aliases[0]
+        changed = False
+
+        def _repl_agg_alias(match: re.Match[str]) -> str:
+            nonlocal changed
+            alias = str(match.group("alias") or "").strip()
+            alias_upper = alias.upper()
+            if alias_upper in projected_aliases:
+                return match.group(0)
+            if alias_upper == "CNT" or alias_upper.endswith("_COUNT"):
+                changed = True
+                fn = str(match.group("fn") or "AVG").upper()
+                return f"{fn}({target_alias})"
+            return match.group(0)
+
+        rewritten = agg_alias_ref_re.sub(_repl_agg_alias, text)
+        if changed and rewritten != text:
+            text = rewritten
+            rules.append("aggregate_alias_to_existing_count_alias")
+
+    # Keep AVG(..._COUNT)->AVG(CNT) normalization only when CNT is explicitly projected.
+    if "CNT" in projected_aliases and re.search(
+        r"\bAVG\s*\(\s*(diagnosis_count|procedure_count|num_diagnoses|num_procedures|[A-Za-z0-9_]*_count)\s*\)",
+        text,
+        re.IGNORECASE,
+    ):
+        rewritten = re.sub(
             r"\bAVG\s*\(\s*(diagnosis_count|procedure_count|num_diagnoses|num_procedures|[A-Za-z0-9_]*_count)\s*\)",
             "AVG(CNT)",
             text,
             flags=re.IGNORECASE,
         )
-        rules.append("avg_count_alias_to_cnt")
+        if rewritten != text:
+            text = rewritten
+            rules.append("avg_count_alias_to_cnt")
     return text, rules
 
 
@@ -2254,6 +2302,44 @@ def _strip_rownum_predicates(sql: str) -> tuple[str, bool]:
     text = re.sub(r"\bWHERE\s+AND\b", "WHERE", text, flags=re.IGNORECASE)
     text = re.sub(r"\s{2,}", " ", text).strip()
     return text, changed
+
+
+def _strip_unrequested_top_n_cap(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    if _extract_top_n_from_question(question) is not None:
+        return sql, rules
+
+    q = str(question or "").lower()
+    if any(token in q for token in ("sample", "preview", "샘플", "미리보기", "예시")):
+        return sql, rules
+
+    text = str(sql or "").strip().rstrip(";")
+    if not text:
+        return sql, rules
+
+    def _is_small_topn(value: str) -> bool:
+        try:
+            limit = int(value)
+        except Exception:
+            return False
+        return 0 < limit <= 200
+
+    outer = _OUTER_ROWNUM_RE.match(text)
+    if outer:
+        inner = outer.group(1).strip()
+        limit = outer.group(2)
+        if _is_small_topn(limit) and ("GROUP BY" in inner.upper() or "ORDER BY" in inner.upper()):
+            rules.append(f"strip_unrequested_top_n_rownum:{limit}")
+            return inner, rules
+
+    if "GROUP BY" in text.upper() or "ORDER BY" in text.upper():
+        match = re.search(r"\bROWNUM\s*<=\s*(\d+)\b", text, re.IGNORECASE)
+        if match and _is_small_topn(match.group(1)):
+            stripped, changed = _strip_rownum_predicates(text)
+            if changed:
+                rules.append(f"strip_unrequested_top_n_rownum:{match.group(1)}")
+                return stripped, rules
+    return text, rules
 
 
 def _enforce_top_n_wrapper(question: str, sql: str) -> tuple[str, list[str]]:
@@ -4694,7 +4780,10 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     rewritten, rewrite_rules = _rewrite_oracle_syntax(to_char_fixed)
     rules.extend(rewrite_rules)
 
-    top_fixed, top_rules = _enforce_top_n_wrapper(q, rewritten)
+    uncapped, uncap_rules = _strip_unrequested_top_n_cap(q, rewritten)
+    rules.extend(uncap_rules)
+
+    top_fixed, top_rules = _enforce_top_n_wrapper(q, uncapped)
     rules.extend(top_rules)
     return top_fixed, rules
 
@@ -5113,6 +5202,8 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     rules.extend(rewrite_rules)
     ratio_fixed, ratio_rules = _rewrite_count_columns_to_ratio_by_intent(q, rewritten)
     rules.extend(ratio_rules)
-    top_fixed, top_rules = _enforce_top_n_wrapper(q, ratio_fixed)
+    uncapped, uncap_rules = _strip_unrequested_top_n_cap(q, ratio_fixed)
+    rules.extend(uncap_rules)
+    top_fixed, top_rules = _enforce_top_n_wrapper(q, uncapped)
     rules.extend(top_rules)
     return top_fixed, rules

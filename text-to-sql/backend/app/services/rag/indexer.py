@@ -29,15 +29,40 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return items
 
 
-def _schema_docs(schema_catalog: dict[str, Any]) -> list[dict[str, Any]]:
+def _schema_docs(schema_catalog: dict[str, Any], join_graph: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     docs = []
+    join_graph = join_graph if isinstance(join_graph, dict) else {}
     tables = schema_catalog.get("tables", {})
+    edges = join_graph.get("edges", []) if isinstance(join_graph, dict) else []
+    fk_index: dict[str, list[str]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        src_table = str(edge.get("from_table") or "").strip().upper()
+        src_col = str(edge.get("from_column") or "").strip().upper()
+        dst_table = str(edge.get("to_table") or "").strip().upper()
+        dst_col = str(edge.get("to_column") or "").strip().upper()
+        if not (src_table and src_col and dst_table and dst_col):
+            continue
+        fk_index.setdefault(src_table, []).append(f"{src_col}->{dst_table}.{dst_col}")
     for table_name, entry in tables.items():
         columns = entry.get("columns", [])
         pk = entry.get("primary_keys", [])
-        col_text = ", ".join([f"{c['name']}:{c['type']}" for c in columns])
+        col_text = ", ".join(
+            [
+                f"{c.get('name')}:{c.get('type')}:{'NULL' if c.get('nullable') else 'NOT NULL'}"
+                for c in columns
+                if isinstance(c, dict)
+            ]
+        )
         pk_text = ", ".join(pk)
-        text = f"Table {table_name}. Columns: {col_text}. Primary keys: {pk_text}."
+        fk_text = ", ".join(fk_index.get(str(table_name).upper(), []))
+        text = (
+            f"Table {table_name}. "
+            f"Columns(name:type:nullability): {col_text or '-'}; "
+            f"Primary keys: {pk_text or '-'}; "
+            f"Foreign keys: {fk_text or '-'}."
+        )
         docs.append({
             "id": f"schema::{table_name}",
             "text": text,
@@ -235,6 +260,7 @@ def _label_intent_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     base = Path(metadata_dir)
     schema_catalog = _load_json(base / "schema_catalog.json") or {"tables": {}}
+    join_graph = _load_json(base / "join_graph.json") or {"edges": []}
     glossary_items = _load_jsonl(base / "glossary_docs.jsonl")
     example_items = _load_jsonl(base / "sql_examples.jsonl")
     augmented_example_items = _load_jsonl(base / "sql_examples_augmented.jsonl")
@@ -257,7 +283,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     column_value_items = load_column_value_rows()
 
     docs: list[dict[str, Any]] = []
-    docs.extend(_schema_docs(schema_catalog))
+    docs.extend(_schema_docs(schema_catalog, join_graph))
     docs.extend(_glossary_docs(glossary_items))
     docs.extend(_diagnosis_map_docs(diagnosis_map_items))
     docs.extend(_procedure_map_docs(procedure_map_items))
@@ -271,7 +297,7 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     store.upsert_documents(docs)
 
     return {
-        "schema_docs": len(_schema_docs(schema_catalog)),
+        "schema_docs": len(_schema_docs(schema_catalog, join_graph)),
         "glossary_docs": len(glossary_items),
         "diagnosis_map_docs": len(_diagnosis_map_docs(diagnosis_map_items)),
         "procedure_map_docs": len(_procedure_map_docs(procedure_map_items)),

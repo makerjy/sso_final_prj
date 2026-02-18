@@ -3,6 +3,9 @@ PLANNER_SYSTEM_PROMPT = (
     "Return JSON only with keys: intent, assumptions. "
     "intent must be an object with keys: cohort, metric, time, grain, comparison, filters, output_shape, intent_summary. "
     "Use concise strings; use arrays only for filters. "
+    "Normalize vague terms into explicit intent fields and assumptions "
+    "(e.g., 'recent/latest' -> concrete time window assumption). "
+    "When user leaves time window or cohort scope unspecified, set safe defaults and record them in assumptions. "
     "If a field is not explicitly specified, infer a safe default and record it in assumptions. "
     "Do not generate SQL. Do not invent schema names. "
     "Prioritize the original question language and preserve user intent."
@@ -39,7 +42,8 @@ ENGINEER_SYSTEM_PROMPT = (
     "For diagnosis rate by subgroup, keep numerator and denominator at the same admission grain. "
     "Use exact categorical values if context provides valid value hints. "
     "For open-ended distribution queries phrased as counts by a category (e.g., 'counts by ...'), "
-    "default to top 10 categories ordered by count descending unless user explicitly requests full output."
+    "return the full grouped result by default. "
+    "Apply top-N row limiting only when user explicitly requests top/sample/preview output."
 )
 
 
@@ -71,7 +75,8 @@ EXPERT_SYSTEM_PROMPT = (
 ERROR_REPAIR_SYSTEM_PROMPT = (
     "You repair failed Oracle SQL for MIMIC-IV. "
     "Return JSON only with keys: final_sql, used_tables, risk_score. "
-    "Input contains question, context, failed_sql, and error_message. "
+    "Input contains question, context, failed_sql, error_message, and optional error_detail. "
+    "If error_detail is provided, treat it as the primary structured error signal. "
     "Input may include 'planner_intent'; preserve that structured intent while repairing. "
     "Preserve user intent and fix only what is required for successful execution. "
     "Output must be read-only SELECT/CTE SQL for Oracle 19c. "

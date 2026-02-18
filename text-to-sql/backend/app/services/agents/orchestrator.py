@@ -39,9 +39,9 @@ def _load_demo_cache(path: str) -> dict[str, Any]:
 
 def _normalize_question(text: str) -> str:
     cleaned = text.lower()
-    cleaned = re.sub(r"[^a-z0-9\\s]", " ", cleaned)
-    cleaned = re.sub(r"[\\uac00-\\ud7a3]", " ", cleaned)
-    cleaned = re.sub(r"\\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", cleaned)
+    cleaned = re.sub(r"[가-힣]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
 
@@ -332,6 +332,8 @@ def _decide_planner_usage(
         return True, {"enabled": True, "mode": mode, "reason": "activation_mode_always"}
 
     # default: complex_only
+    # Intent normalization is safer than skipping planner on seemingly simple questions.
+    # Keep complexity signals for telemetry but run planner by default.
     mode = "complex_only"
     token_count = _count_question_tokens(question, question_en)
     signal_hits = _count_planner_complex_signals(question, question_en)
@@ -353,23 +355,10 @@ def _decide_planner_usage(
     if has_long_question:
         reasons.append("long_question")
 
-    if gate_count >= 2:
-        return True, {
-            "enabled": True,
-            "mode": mode,
-            "reason": ",".join(reasons),
-            "token_count": token_count,
-            "signal_hits": signal_hits,
-            "risk_complexity": complexity_score,
-            "complexity_threshold": complexity_threshold,
-            "effective_complexity_threshold": effective_complexity_threshold,
-            "min_question_tokens": min_question_tokens,
-            "gate_count": gate_count,
-        }
-    return False, {
-        "enabled": False,
+    return True, {
+        "enabled": True,
         "mode": mode,
-        "reason": "below_complexity_gate",
+        "reason": ",".join(reasons) if reasons else "intent_normalization_default",
         "token_count": token_count,
         "signal_hits": signal_hits,
         "risk_complexity": complexity_score,

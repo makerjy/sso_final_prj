@@ -23,13 +23,28 @@ class LLMClient:
             timeout=settings.llm_timeout_sec,
         )
 
-    def chat(self, messages: list[dict[str, str]], model: str, max_tokens: int) -> dict[str, Any]:
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=self._settings.llm_temperature,
-        )
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        max_tokens: int,
+        *,
+        expect_json: bool = False,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": self._settings.llm_temperature,
+        }
+        if expect_json:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except TypeError:
+            # Fallback for SDK/providers that do not support response_format.
+            kwargs.pop("response_format", None)
+            response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         usage = {
             "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),

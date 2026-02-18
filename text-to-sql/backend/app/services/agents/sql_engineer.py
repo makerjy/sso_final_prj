@@ -1,22 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from app.core.config import get_settings
+from app.services.agents.json_utils import extract_json_object
 from app.services.agents.llm_client import LLMClient
 from app.services.agents.prompts import ENGINEER_SYSTEM_PROMPT
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-    raise ValueError("LLM response is not valid JSON")
 
 
 def generate_sql(
@@ -44,7 +34,8 @@ def generate_sql(
         messages=messages,
         model=settings.engineer_model,
         max_tokens=max(200, int(getattr(settings, "llm_max_output_tokens_engineer", settings.llm_max_output_tokens))),
+        expect_json=True,
     )
-    payload = _extract_json(response["content"])
+    payload = extract_json_object(response["content"])
     payload["usage"] = response.get("usage", {})
     return payload

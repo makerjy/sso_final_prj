@@ -80,13 +80,38 @@ def _build_local_doc_cache() -> dict[str, list[dict[str, Any]]]:
     }
 
     schema_catalog = _load_json(base / "schema_catalog.json") or {"tables": {}}
+    join_graph = _load_json(base / "join_graph.json") or {"edges": []}
     tables = schema_catalog.get("tables", {}) if isinstance(schema_catalog, dict) else {}
+    edges = join_graph.get("edges", []) if isinstance(join_graph, dict) else []
+    fk_index: dict[str, list[str]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        src_table = str(edge.get("from_table") or "").strip().upper()
+        src_col = str(edge.get("from_column") or "").strip().upper()
+        dst_table = str(edge.get("to_table") or "").strip().upper()
+        dst_col = str(edge.get("to_column") or "").strip().upper()
+        if not (src_table and src_col and dst_table and dst_col):
+            continue
+        fk_index.setdefault(src_table, []).append(f"{src_col}->{dst_table}.{dst_col}")
     for table_name, entry in tables.items():
         columns = entry.get("columns", []) if isinstance(entry, dict) else []
         pk = entry.get("primary_keys", []) if isinstance(entry, dict) else []
-        col_text = ", ".join([f"{c.get('name')}:{c.get('type')}" for c in columns if isinstance(c, dict)])
+        col_text = ", ".join(
+            [
+                f"{c.get('name')}:{c.get('type')}:{'NULL' if c.get('nullable') else 'NOT NULL'}"
+                for c in columns
+                if isinstance(c, dict)
+            ]
+        )
         pk_text = ", ".join(str(name) for name in pk)
-        text = f"Table {table_name}. Columns: {col_text}. Primary keys: {pk_text}."
+        fk_text = ", ".join(fk_index.get(str(table_name).upper(), []))
+        text = (
+            f"Table {table_name}. "
+            f"Columns(name:type:nullability): {col_text or '-'}; "
+            f"Primary keys: {pk_text or '-'}; "
+            f"Foreign keys: {fk_text or '-'}."
+        )
         cache["schema"].append(
             {
                 "id": f"schema::{table_name}",

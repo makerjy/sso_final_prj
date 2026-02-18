@@ -8,3 +8,6 @@ venv/
 # Cache / artifacts
 text-to-sql/var/chroma/
 text-to-sql/var/chroma_cache/
+
+# Local oracle client directory (detected untracked)
+query-visualization/oracle/

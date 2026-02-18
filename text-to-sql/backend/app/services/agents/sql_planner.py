@@ -1,22 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from app.core.config import get_settings
+from app.services.agents.json_utils import extract_json_object
 from app.services.agents.llm_client import LLMClient
 from app.services.agents.prompts import PLANNER_SYSTEM_PROMPT
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-    raise ValueError("LLM response is not valid JSON")
 
 
 def plan_query_intent(
@@ -38,8 +28,9 @@ def plan_query_intent(
         messages=messages,
         model=settings.planner_model,
         max_tokens=max(150, int(getattr(settings, "llm_max_output_tokens_planner", settings.llm_max_output_tokens))),
+        expect_json=True,
     )
-    parsed = _extract_json(response["content"])
+    parsed = extract_json_object(response["content"])
     if not isinstance(parsed.get("intent"), dict):
         parsed["intent"] = {}
     assumptions = parsed.get("assumptions")

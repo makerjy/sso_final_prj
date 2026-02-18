@@ -12,7 +12,7 @@ _TABLE_NOT_EXIST_MARKERS = ("ORA-00942", "TABLE OR VIEW DOES NOT EXIST")
 _MISSING_KEYWORD_MARKERS = ("ORA-00905", "MISSING KEYWORD")
 
 _ERR_IDENT_RE = re.compile(
-    r'ORA-00904:\s*"(?:(?P<alias>[A-Za-z0-9_]+)"\.)?"(?P<column>[A-Za-z0-9_]+)"',
+    r'ORA-00904:\s*(?:"(?P<alias>[A-Za-z0-9_]+)"\."(?P<column>[A-Za-z0-9_]+)"|"(?P<column_only>[A-Za-z0-9_]+)")',
     re.IGNORECASE,
 )
 _TABLE_ALIAS_RE = re.compile(
@@ -223,12 +223,55 @@ def _repair_invalid_identifier(sql: str, error_message: str) -> tuple[str, list[
     # 7) generic identifier fallback from error payload.
     match = _ERR_IDENT_RE.search(error_message or "")
     if match:
-        err_col = str(match.group("column") or "").strip().upper()
+        err_alias = str(match.group("alias") or "").strip().upper()
+        err_col = str(match.group("column") or match.group("column_only") or "").strip().upper()
         if err_col == "MEDICATION" and "PRESCRIPTIONS" in upper and "template_00904_prescriptions_medication_to_drug" not in rules:
             rewritten = re.sub(r"\bMEDICATION\b", "DRUG", text, flags=re.IGNORECASE)
             if rewritten != text:
                 text = rewritten
                 rules.append("template_00904_generic_medication_to_drug")
+
+        # 8) Outer aggregate references missing alias while inner projection uses CNT.
+        if err_col in {"PROCEDURE_COUNT", "DIAGNOSIS_COUNT", "AVERAGE_VALUE"}:
+            if re.search(r"\bAS\s+CNT\b", text, re.IGNORECASE):
+                rewritten = re.sub(rf"\b{re.escape(err_col)}\b", "CNT", text, flags=re.IGNORECASE)
+                if rewritten != text:
+                    text = rewritten
+                    rules.append("template_00904_outer_alias_to_cnt")
+
+        # 9) Reverse case: outer uses CNT but inner uses explicit *_COUNT alias.
+        if err_col == "CNT":
+            alias_candidates = (
+                "PROCEDURE_COUNT",
+                "DIAGNOSIS_COUNT",
+                "ADMISSION_COUNT",
+                "EVENT_COUNT",
+                "RX_ORDER_CNT",
+            )
+            chosen_alias = None
+            for alias_name in alias_candidates:
+                if re.search(rf"\bAS\s+{alias_name}\b", text, re.IGNORECASE):
+                    chosen_alias = alias_name
+                    break
+            if chosen_alias:
+                rewritten = re.sub(r"\bCNT\b", chosen_alias, text, flags=re.IGNORECASE)
+                if rewritten != text:
+                    text = rewritten
+                    rules.append("template_00904_cnt_to_named_alias")
+
+        # 10) Alias scope mismatch fallback:
+        # ORA-00904 often occurs when an outer scope references an inner alias (e.g., dx.icd_code).
+        # Drop the alias qualifier and keep the column to preserve intent.
+        if err_alias:
+            rewritten = re.sub(
+                rf"\b{re.escape(err_alias)}\.{re.escape(err_col)}\b",
+                err_col,
+                text,
+                flags=re.IGNORECASE,
+            )
+            if rewritten != text:
+                text = rewritten
+                rules.append("template_00904_drop_alias_prefix")
 
     return text, rules
 
@@ -340,7 +383,8 @@ def _repair_timeout(question: str, sql: str) -> tuple[str, list[str]]:
             text = stripped
             rules.append("template_timeout_strip_order_by")
 
-    sample_cap = min(max(2000, int(get_settings().row_cap or 5000)), 10000)
+    # Timeout fallback should aggressively reduce scan volume.
+    sample_cap = min(max(500, int((get_settings().row_cap or 5000) / 5)), 1000)
     sampled, sampled_rules = _sample_heavy_tables_for_timeout(text, sample_cap)
     if sampled_rules:
         text = sampled
