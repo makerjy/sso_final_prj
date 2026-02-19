@@ -8,7 +8,9 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from app.core.config import get_settings
+from app.services.runtime.request_context import get_request_user_id
 from app.services.runtime.settings_store import load_connection_settings
+from app.services.runtime.user_scope import normalize_user_id
 
 try:
     import oracledb  # type: ignore
@@ -16,7 +18,7 @@ except Exception:  # pragma: no cover - optional dependency
     oracledb = None
 
 
-_POOL = None
+_POOLS: dict[str, Any] = {}
 _POOL_LOCK = threading.Lock()
 _CLIENT_INIT = False
 _CLIENT_LOCK = threading.Lock()
@@ -110,12 +112,40 @@ def _init_oracle_client() -> None:
         _CLIENT_INIT = True
 
 
-def get_pool():
-    global _POOL
-    if _POOL is not None:
-        return _POOL
+def _resolve_user_id(user_id: str | None = None) -> str:
+    explicit = normalize_user_id(user_id)
+    if explicit:
+        return explicit
+    return normalize_user_id(get_request_user_id())
+
+
+def _pool_key(user_id: str | None = None) -> str:
+    resolved_user = _resolve_user_id(user_id)
+    if resolved_user:
+        return f"user::{resolved_user}"
+    return "__global__"
+
+
+def _close_pool(pool: Any) -> None:
+    try:
+        pool.close()
+    except Exception:
+        pass
+
+
+def get_pool(user_id: str | None = None):
+    key = _pool_key(user_id)
+    with _POOL_LOCK:
+        pool = _POOLS.get(key)
+        if pool is not None:
+            return pool
+
     settings = get_settings()
-    overrides = load_connection_settings()
+    resolved_user = _resolve_user_id(user_id)
+    overrides = load_connection_settings(
+        resolved_user or None,
+        include_global_fallback=not bool(resolved_user),
+    )
     host = str(overrides.get("host") or "").strip()
     port = str(overrides.get("port") or "").strip()
     database = str(overrides.get("database") or "").strip()
@@ -134,65 +164,76 @@ def get_pool():
             tcp_fallback_dsn = dsn
     if not dsn:
         raise HTTPException(
-            status_code=500, detail="ORACLE_DSN is not configured")
+            status_code=503,
+            detail="Oracle connection is not configured. Save connection settings first.",
+        )
     _init_oracle_client()
     lib = _require_oracledb()
     with _POOL_LOCK:
-        if _POOL is None:
-            username = (overrides.get("username") or settings.oracle_user)
-            password = (overrides.get("password") or settings.oracle_password)
-            pool_kwargs = {
-                "user": username,
-                "password": password,
-                "dsn": dsn,
-                "min": settings.oracle_pool_min,
-                "max": settings.oracle_pool_max,
-                "increment": settings.oracle_pool_inc,
-                "timeout": settings.oracle_pool_timeout_sec,
-            }
-            try:
-                _POOL = lib.create_pool(**pool_kwargs)
-            except Exception as exc:
-                # When sslMode=require is set without a wallet/tns config,
-                # Oracle connections can fail during SSL negotiation; retry
-                # with plain TCP once for best-effort compatibility.
-                upper_msg = str(exc).upper()
-                if (
-                    str(dsn).lower().startswith("tcps://")
-                    and tcp_fallback_dsn
-                    and ssl_mode == "require"
-                    and any(marker in upper_msg for marker in _SSL_RETRY_ERROR_MARKERS)
-                    and not dsn_override
-                ):
-                    try:
-                        pool_kwargs["dsn"] = tcp_fallback_dsn
-                        _POOL = lib.create_pool(**pool_kwargs)
-                    except Exception as retry_exc:
-                        raise HTTPException(
-                            status_code=503,
-                            detail=f"Oracle pool create failed: {retry_exc}",
-                        ) from retry_exc
-                else:
+        existing = _POOLS.get(key)
+        if existing is not None:
+            return existing
+
+        username = (overrides.get("username") or settings.oracle_user)
+        password = (overrides.get("password") or settings.oracle_password)
+        pool_kwargs = {
+            "user": username,
+            "password": password,
+            "dsn": dsn,
+            "min": settings.oracle_pool_min,
+            "max": settings.oracle_pool_max,
+            "increment": settings.oracle_pool_inc,
+            "timeout": settings.oracle_pool_timeout_sec,
+        }
+        try:
+            created = lib.create_pool(**pool_kwargs)
+        except Exception as exc:
+            # When sslMode=require is set without a wallet/tns config,
+            # Oracle connections can fail during SSL negotiation; retry
+            # with plain TCP once for best-effort compatibility.
+            upper_msg = str(exc).upper()
+            if (
+                str(dsn).lower().startswith("tcps://")
+                and tcp_fallback_dsn
+                and ssl_mode == "require"
+                and any(marker in upper_msg for marker in _SSL_RETRY_ERROR_MARKERS)
+                and not dsn_override
+            ):
+                try:
+                    pool_kwargs["dsn"] = tcp_fallback_dsn
+                    created = lib.create_pool(**pool_kwargs)
+                except Exception as retry_exc:
                     raise HTTPException(
                         status_code=503,
-                        detail=f"Oracle pool create failed: {exc}",
-                    ) from exc
-    return _POOL
+                        detail=f"Oracle pool create failed: {retry_exc}",
+                    ) from retry_exc
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Oracle pool create failed: {exc}",
+                ) from exc
+        _POOLS[key] = created
+        return created
 
 
-def reset_pool() -> None:
-    global _POOL
+def reset_pool(user_id: str | None = None) -> None:
+    key = _pool_key(user_id)
     with _POOL_LOCK:
-        if _POOL is not None:
-            try:
-                _POOL.close()
-            except Exception:
-                pass
-        _POOL = None
+        pool = _POOLS.pop(key, None)
+        if pool is not None:
+            _close_pool(pool)
+            return
+
+        # Preserve legacy behavior for no-user contexts.
+        if key == "__global__":
+            pools = list(_POOLS.values())
+            _POOLS.clear()
+            for item in pools:
+                _close_pool(item)
 
 
-def acquire_connection():
-    pool = get_pool()
+def acquire_connection(user_id: str | None = None):
+    pool = get_pool(user_id)
     try:
         return pool.acquire()
     except Exception as exc:  # pragma: no cover - depends on driver
@@ -211,9 +252,9 @@ def acquire_connection():
         )
         if recoverable:
             # Recover stale/disconnected pools once before failing the request.
-            reset_pool()
+            reset_pool(user_id)
             try:
-                return get_pool().acquire()
+                return get_pool(user_id).acquire()
             except Exception as retry_exc:
                 raise HTTPException(
                     status_code=503,
@@ -223,8 +264,8 @@ def acquire_connection():
             status_code=503, detail=f"Oracle pool unavailable: {exc}") from exc
 
 
-def pool_status() -> dict[str, Any]:
-    pool = get_pool()
+def pool_status(user_id: str | None = None) -> dict[str, Any]:
+    pool = get_pool(user_id)
     try:
         conn = pool.acquire()
         cur = conn.cursor()

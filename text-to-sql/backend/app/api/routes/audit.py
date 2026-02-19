@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import get_settings
 from app.services.logging_store.store import read_events, write_events
+from app.services.runtime.user_scope import normalize_user_id
 
 
 router = APIRouter()
@@ -73,9 +74,24 @@ def _build_log_uid(event: dict[str, Any], line_no: int, fallback_id: int) -> str
     return f"{ts}:{line_no}:{base_id}"
 
 
+def _event_user_id(event: dict[str, Any]) -> str:
+    user = event.get("user") if isinstance(event.get("user"), dict) else {}
+    user_id = normalize_user_id(str(user.get("id") or ""))
+    if user_id:
+        return user_id
+    return normalize_user_id(str(user.get("name") or ""))
+
+
+def _event_matches_user(event: dict[str, Any], requested_user: str) -> bool:
+    if not requested_user:
+        return True
+    return _event_user_id(event) == requested_user
+
+
 def _event_to_log(event: dict[str, Any], fallback_id: int) -> dict[str, Any]:
     ts = _safe_int(event.get("ts") or 0)
     user = event.get("user") if isinstance(event.get("user"), dict) else {}
+    user_id = str(user.get("id") or "").strip()
     user_name = str(user.get("name") or "사용자")
     user_role = str(user.get("role") or "연구원")
     question = str(event.get("question") or "직접 SQL 실행")
@@ -94,7 +110,7 @@ def _event_to_log(event: dict[str, Any], fallback_id: int) -> dict[str, Any]:
         "baseId": base_id,
         "timestamp": _format_ts(ts),
         "ts": ts,
-        "user": {"name": user_name, "role": user_role},
+        "user": {"id": user_id or None, "name": user_name, "role": user_role},
         "query": {"original": question, "sql": sql},
         "appliedTerms": _normalize_terms(event.get("applied_terms")),
         "appliedMetrics": _normalize_metrics(event.get("applied_metrics")),
@@ -117,18 +133,22 @@ def _event_to_log(event: dict[str, Any], fallback_id: int) -> dict[str, Any]:
 
 
 @router.get("/logs")
-def audit_logs(limit: int = Query(200, ge=1, le=2000)):
+def audit_logs(limit: int = Query(200, ge=1, le=2000), user: str | None = Query(default=None)):
     settings = get_settings()
     events = read_events(settings.events_log_path)
+    requested_user = normalize_user_id(user)
     audit_events: list[dict[str, Any]] = []
     audit_no = 1
     for idx, event in enumerate(events):
-        if event.get("type") == "audit":
-            item = dict(event)
-            item["_line_no"] = idx
-            item["_audit_no"] = audit_no
-            audit_events.append(item)
-            audit_no += 1
+        if event.get("type") != "audit":
+            continue
+        if requested_user and not _event_matches_user(event, requested_user):
+            continue
+        item = dict(event)
+        item["_line_no"] = idx
+        item["_audit_no"] = audit_no
+        audit_events.append(item)
+        audit_no += 1
 
     audit_events.sort(key=lambda item: _safe_int(item.get("ts") or 0), reverse=True)
 
@@ -168,13 +188,16 @@ def audit_logs(limit: int = Query(200, ge=1, le=2000)):
 
 
 @router.delete("/logs/{log_id}")
-def delete_audit_log(log_id: str):
+def delete_audit_log(log_id: str, user: str | None = Query(default=None)):
     settings = get_settings()
     events = read_events(settings.events_log_path)
+    requested_user = normalize_user_id(user)
     target_line: int | None = None
     fallback_id = 1
     for line_no, event in enumerate(events):
         if event.get("type") != "audit":
+            continue
+        if requested_user and not _event_matches_user(event, requested_user):
             continue
         candidate_uid = _build_log_uid(event, line_no, fallback_id)
         if candidate_uid == log_id:

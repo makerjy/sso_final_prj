@@ -17,7 +17,7 @@ from app.services.agents.sql_error_templates import apply_sql_error_templates
 from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
 from app.services.budget_gate import ensure_budget_ok
 from app.services.cost_tracker import get_cost_tracker
-from app.services.logging_store.store import append_event
+from app.services.logging_store.store import append_event, read_events
 from app.services.oracle.executor import execute_sql
 from app.services.policy.gate import precheck_sql
 from app.services.runtime.sql_error_repair_store import (
@@ -25,6 +25,8 @@ from app.services.runtime.sql_error_repair_store import (
     mark_learned_sql_fix_used,
     upsert_learned_sql_fix,
 )
+from app.services.runtime.request_context import reset_request_user, set_request_user
+from app.services.runtime.user_scope import normalize_user_id
 from app.core.config import get_settings
 from app.core.paths import project_path
 
@@ -70,6 +72,7 @@ class OneShotRequest(BaseModel):
     translate: bool | None = None
     rag_multi: bool | None = None
     conversation: list[dict] | None = None
+    user_id: str | None = None
     user_name: str | None = None
     user_role: str | None = None
 
@@ -79,8 +82,16 @@ class RunRequest(BaseModel):
     sql: str | None = None
     question: str | None = None
     user_ack: bool = False
+    user_id: str | None = None
     user_name: str | None = None
     user_role: str | None = None
+
+
+def _resolve_user_id(user_id: str | None, user_name: str | None) -> str:
+    normalized = normalize_user_id(user_id)
+    if normalized:
+        return normalized
+    return normalize_user_id(user_name)
 
 
 def _add_llm_cost(usage: dict[str, Any], stage: str) -> None:
@@ -177,6 +188,8 @@ def _should_attempt_zero_result_repair(question: str, sql: str) -> bool:
 def oneshot(req: OneShotRequest):
     ensure_budget_ok()
     settings = get_settings()
+    user_id = _resolve_user_id(req.user_id, req.user_name)
+    user_token = set_request_user(user_id)
     start = time.perf_counter()
     payload: dict | None = None
     qid: str | None = None
@@ -230,6 +243,7 @@ def oneshot(req: OneShotRequest):
                 "duration_ms": duration_ms,
                 "mode": mode,
                 "user": {
+                    "id": user_id or None,
                     "name": req.user_name or "사용자",
                     "role": req.user_role or "연구원",
                 },
@@ -239,6 +253,8 @@ def oneshot(req: OneShotRequest):
             })
         except Exception:
             pass
+        finally:
+            reset_request_user(user_token)
 
 
 @router.get("/get")
@@ -296,6 +312,8 @@ def run_query(req: RunRequest):
 
     user_name = req.user_name or "사용자"
     user_role = req.user_role or "연구원"
+    user_id = _resolve_user_id(req.user_id, req.user_name)
+    user_token = set_request_user(user_id)
 
     status = "success"
     rows_returned = 0
@@ -613,13 +631,15 @@ def run_query(req: RunRequest):
                 "duration_ms": duration_ms,
                 "auto_repair_attempts": len(auto_repair_history),
                 "learned_rule_ids": persisted_rule_ids,
-                "user": {"name": user_name, "role": user_role},
+                "user": {"id": user_id or None, "name": user_name, "role": user_role},
                 "error": error_detail,
                 "applied_terms": [],
                 "applied_metrics": [],
             })
         except Exception:
             pass
+        finally:
+            reset_request_user(user_token)
 
 
 def _load_json(path: Path):
@@ -650,15 +670,143 @@ def _load_questions_jsonl(path: Path) -> list[str]:
     return questions
 
 
+def _normalize_demo_question(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if normalized.startswith(('"', "'")) and normalized.endswith(('"', "'")):
+        normalized = normalized[1:-1].strip()
+    return normalized
+
+
+def _is_valid_demo_question(text: str) -> bool:
+    q = _normalize_demo_question(text)
+    if not q:
+        return False
+    if len(q) < 6 or len(q) > 180:
+        return False
+    upper = q.upper()
+    if upper in {"직접 SQL 실행", "DIRECT SQL"}:
+        return False
+    lower = q.casefold()
+    if re.search(r"\b(debug|retry|fix|tmp|temp|smoke)\b", lower):
+        return False
+    if re.search(r"(디버그|재시도|임시|스모크)", q):
+        return False
+    if re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER)\b", upper):
+        return False
+    return True
+
+
+def _questions_from_audit_logs(limit: int = 3000, user_id: str | None = None) -> list[str]:
+    settings = get_settings()
+    events = read_events(settings.events_log_path, limit=limit)
+    if not events:
+        return []
+
+    requested_user = normalize_user_id(user_id)
+    stats_by_question: dict[str, dict[str, Any]] = {}
+    seen_per_qid: set[str] = set()
+    now_ts = int(time.time())
+
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "audit":
+            continue
+        if requested_user:
+            user = event.get("user") if isinstance(event.get("user"), dict) else {}
+            event_user_id = normalize_user_id(str(user.get("id") or ""))
+            if event_user_id != requested_user:
+                continue
+        raw_question = str(event.get("question") or "").strip()
+        question = _normalize_demo_question(raw_question)
+        if not _is_valid_demo_question(question):
+            continue
+
+        key = question.casefold()
+        qid = str(event.get("qid") or "").strip()
+        if qid:
+            pair_key = f"{qid}:{key}"
+            if pair_key in seen_per_qid:
+                continue
+            seen_per_qid.add(pair_key)
+
+        status = str(event.get("status") or "").strip().lower()
+        ts = 0
+        try:
+            ts = int(event.get("ts") or 0)
+        except Exception:
+            ts = 0
+
+        item = stats_by_question.get(key)
+        if item is None:
+            item = {
+                "question": question,
+                "count": 0,
+                "success": 0,
+                "latest_ts": 0,
+            }
+            stats_by_question[key] = item
+
+        item["count"] += 1
+        if status == "success":
+            item["success"] += 1
+        if ts >= int(item["latest_ts"]):
+            item["latest_ts"] = ts
+            item["question"] = question
+
+    if not stats_by_question:
+        return []
+
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for item in stats_by_question.values():
+        count = int(item.get("count") or 0)
+        success = int(item.get("success") or 0)
+        latest_ts = int(item.get("latest_ts") or 0)
+        success_ratio = (success / count) if count > 0 else 0.0
+        age_days = ((now_ts - latest_ts) / 86400) if latest_ts else 9999
+        recency_bonus = 3 if age_days <= 7 else 2 if age_days <= 30 else 1 if age_days <= 90 else 0
+        score = (success * 3.0) + (count * 1.0) + recency_bonus + success_ratio
+        ranked.append((score, item))
+
+    ranked.sort(
+        key=lambda pair: (
+            pair[0],
+            int(pair[1].get("success") or 0),
+            int(pair[1].get("count") or 0),
+            int(pair[1].get("latest_ts") or 0),
+        ),
+        reverse=True,
+    )
+
+    questions: list[str] = []
+    korean_questions: list[str] = []
+    for _, item in ranked:
+        question = str(item.get("question") or "").strip()
+        if not question:
+            continue
+        if question in questions:
+            continue
+        questions.append(question)
+        if re.search(r"[가-힣]", question):
+            korean_questions.append(question)
+        if len(questions) >= 12:
+            break
+    if len(korean_questions) >= 3:
+        return korean_questions[:12]
+    return questions
+
+
 @router.get("/demo/questions")
-def demo_questions():
+def demo_questions(user: str | None = None):
+    audit_questions = _questions_from_audit_logs(limit=3000, user_id=user)
+    if audit_questions:
+        return {"questions": audit_questions, "source": "audit"}
+
     settings = get_settings()
     cache = _load_json(Path(settings.demo_cache_path))
     if isinstance(cache, dict) and cache:
         aliases = cache.get("_aliases")
         if isinstance(aliases, dict) and aliases:
-            return {"questions": list(aliases.keys())}
-        return {"questions": [key for key in cache.keys() if key != "_aliases"]}
+            return {"questions": list(aliases.keys()), "source": "cache_aliases"}
+        return {"questions": [key for key in cache.keys() if key != "_aliases"], "source": "cache_keys"}
 
     questions = _load_questions_jsonl(project_path("var/metadata/demo_questions.jsonl"))
-    return {"questions": questions}
+    return {"questions": questions, "source": "file"}

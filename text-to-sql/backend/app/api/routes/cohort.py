@@ -16,7 +16,9 @@ from pydantic import BaseModel, Field
 from app.core.paths import project_path
 from app.services.oracle.executor import execute_sql
 from app.services.runtime.diagnosis_map_store import load_diagnosis_icd_map, map_prefixes_for_terms
+from app.services.runtime.request_context import use_request_user
 from app.services.runtime.state_store import get_state_store
+from app.services.runtime.user_scope import scoped_state_key
 
 
 router = APIRouter()
@@ -31,7 +33,7 @@ DEFAULT_PARAMS = {
     "outcome_filter": "all",
 }
 _SAVED_COHORTS_KEY = "cohort::saved"
-_FALLBACK_SAVED_COHORTS: list[dict[str, Any]] = []
+_FALLBACK_SAVED_COHORTS: dict[str, list[dict[str, Any]]] = {}
 _SURVIVAL_TIME_POINTS = [0, 7, 14, 21, 30, 45, 60, 75, 90, 120, 150, 180]
 _COHORT_COMORBIDITY_SPECS_PATH = project_path("var/metadata/cohort_comorbidity_specs.json")
 
@@ -47,15 +49,18 @@ class CohortParams(BaseModel):
 
 
 class SimulationRequest(BaseModel):
+    user: str | None = None
     params: CohortParams = Field(default_factory=CohortParams)
     include_baseline: bool = True
 
 
 class CohortSqlRequest(BaseModel):
+    user: str | None = None
     params: CohortParams = Field(default_factory=CohortParams)
 
 
 class SaveCohortRequest(BaseModel):
+    user: str | None = None
     name: str = Field(min_length=1, max_length=120)
     params: CohortParams = Field(default_factory=CohortParams)
     status: str = Field(default="active", pattern="^(active|archived)$")
@@ -901,61 +906,67 @@ def _build_survival_payload(
     ]
 
 
-def _get_saved_cohorts() -> list[dict[str, Any]]:
+def _saved_cohorts_key(user: str | None) -> str:
+    return scoped_state_key(_SAVED_COHORTS_KEY, user)
+
+
+def _get_saved_cohorts(user: str | None = None) -> list[dict[str, Any]]:
+    key = _saved_cohorts_key(user)
     store = get_state_store()
     if not store.enabled:
-        return list(_FALLBACK_SAVED_COHORTS)
-    payload = store.get(_SAVED_COHORTS_KEY) or {}
+        return list(_FALLBACK_SAVED_COHORTS.get(key, []))
+    payload = store.get(key) or {}
     cohorts = payload.get("cohorts", []) if isinstance(payload, dict) else []
     return cohorts if isinstance(cohorts, list) else []
 
 
-def _set_saved_cohorts(cohorts: list[dict[str, Any]]) -> None:
+def _set_saved_cohorts(cohorts: list[dict[str, Any]], user: str | None = None) -> None:
+    key = _saved_cohorts_key(user)
     store = get_state_store()
     if not store.enabled:
-        _FALLBACK_SAVED_COHORTS.clear()
-        _FALLBACK_SAVED_COHORTS.extend(cohorts)
+        _FALLBACK_SAVED_COHORTS[key] = list(cohorts)
         return
-    ok = store.set(_SAVED_COHORTS_KEY, {"cohorts": cohorts})
+    ok = store.set(key, {"cohorts": cohorts})
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to persist cohorts")
 
 
 @router.post("/simulate")
 def cohort_simulate(req: SimulationRequest):
-    simulated_params = req.params
-    simulated_metrics, simulated_stats = _simulate_metrics_and_stats(simulated_params)
-    simulated_subgroups = _simulate_subgroups(simulated_params)
+    with use_request_user(req.user):
+        simulated_params = req.params
+        simulated_metrics, simulated_stats = _simulate_metrics_and_stats(simulated_params)
+        simulated_subgroups = _simulate_subgroups(simulated_params)
 
-    if req.include_baseline:
-        baseline_params = CohortParams(**DEFAULT_PARAMS)
-        current_metrics, current_stats = _simulate_metrics_and_stats(baseline_params)
-        current_subgroups = _simulate_subgroups(baseline_params)
-    else:
-        baseline_params = simulated_params
-        current_metrics = simulated_metrics
-        current_stats = simulated_stats
-        current_subgroups = simulated_subgroups
+        if req.include_baseline:
+            baseline_params = CohortParams(**DEFAULT_PARAMS)
+            current_metrics, current_stats = _simulate_metrics_and_stats(baseline_params)
+            current_subgroups = _simulate_subgroups(baseline_params)
+        else:
+            baseline_params = simulated_params
+            current_metrics = simulated_metrics
+            current_stats = simulated_stats
+            current_subgroups = simulated_subgroups
 
-    survival = _build_survival_payload(baseline_params, simulated_params)
-    confidence = _build_confidence_payload(
-        current_metrics=current_metrics,
-        current_stats=current_stats,
-        simulated_metrics=simulated_metrics,
-        simulated_stats=simulated_stats,
-        baseline_params=baseline_params,
-        simulated_params=simulated_params,
-    )
-    subgroups = _build_subgroup_comparison(current_subgroups, simulated_subgroups)
-    return {
-        "params": simulated_params.model_dump(),
-        "baseline_params": baseline_params.model_dump(),
-        "current": current_metrics,
-        "simulated": simulated_metrics,
-        "survival": survival,
-        "confidence": confidence,
-        "subgroups": subgroups,
-    }
+        survival = _build_survival_payload(baseline_params, simulated_params)
+        confidence = _build_confidence_payload(
+            current_metrics=current_metrics,
+            current_stats=current_stats,
+            simulated_metrics=simulated_metrics,
+            simulated_stats=simulated_stats,
+            baseline_params=baseline_params,
+            simulated_params=simulated_params,
+        )
+        subgroups = _build_subgroup_comparison(current_subgroups, simulated_subgroups)
+        return {
+            "params": simulated_params.model_dump(),
+            "baseline_params": baseline_params.model_dump(),
+            "current": current_metrics,
+            "simulated": simulated_metrics,
+            "survival": survival,
+            "confidence": confidence,
+            "subgroups": subgroups,
+        }
 
 
 @router.post("/sql")
@@ -969,8 +980,8 @@ def cohort_sql(req: CohortSqlRequest):
 
 
 @router.get("/saved")
-def list_saved_cohorts():
-    cohorts = _get_saved_cohorts()
+def list_saved_cohorts(user: str | None = None):
+    cohorts = _get_saved_cohorts(user)
     cohorts.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     return {"cohorts": cohorts}
 
@@ -978,7 +989,8 @@ def list_saved_cohorts():
 @router.post("/saved")
 def save_cohort(req: SaveCohortRequest):
     params = req.params
-    metrics = _simulate_metrics(params)
+    with use_request_user(req.user):
+        metrics = _simulate_metrics(params)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     cohort = {
@@ -989,17 +1001,17 @@ def save_cohort(req: SaveCohortRequest):
         "params": params.model_dump(),
         "metrics": metrics,
     }
-    cohorts = _get_saved_cohorts()
+    cohorts = _get_saved_cohorts(req.user)
     cohorts.append(cohort)
-    _set_saved_cohorts(cohorts)
+    _set_saved_cohorts(cohorts, req.user)
     return {"ok": True, "cohort": cohort}
 
 
 @router.delete("/saved/{cohort_id}")
-def delete_saved_cohort(cohort_id: str):
-    cohorts = _get_saved_cohorts()
+def delete_saved_cohort(cohort_id: str, user: str | None = None):
+    cohorts = _get_saved_cohorts(user)
     next_cohorts = [item for item in cohorts if str(item.get("id")) != cohort_id]
     if len(next_cohorts) == len(cohorts):
         raise HTTPException(status_code=404, detail="Cohort not found")
-    _set_saved_cohorts(next_cohorts)
+    _set_saved_cohorts(next_cohorts, user)
     return {"ok": True, "count": len(next_cohorts)}

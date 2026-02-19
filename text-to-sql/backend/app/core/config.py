@@ -115,6 +115,7 @@ class Settings:
     oracle_pool_max: int
     oracle_pool_inc: int
     oracle_pool_timeout_sec: int
+    oracle_healthcheck_timeout_sec: int
     metadata_owner_fallback_enabled: bool
 
     rag_persist_dir: str
@@ -203,6 +204,7 @@ def load_settings() -> Settings:
         oracle_pool_max=_int(os.getenv("ORACLE_POOL_MAX"), 4),
         oracle_pool_inc=_int(os.getenv("ORACLE_POOL_INC"), 1),
         oracle_pool_timeout_sec=_int(os.getenv("ORACLE_POOL_TIMEOUT_SEC"), 10),
+        oracle_healthcheck_timeout_sec=_int(os.getenv("ORACLE_HEALTHCHECK_TIMEOUT_SEC"), 8),
         metadata_owner_fallback_enabled=_bool(os.getenv("METADATA_OWNER_FALLBACK_ENABLED"), False),
         rag_persist_dir=_str(os.getenv("RAG_PERSIST_DIR"), "var/rag"),
         rag_top_k=_int(os.getenv("RAG_TOP_K"), 8),

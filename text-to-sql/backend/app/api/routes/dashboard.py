@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from app.services.runtime.state_store import get_state_store
+from app.services.runtime.user_scope import scoped_state_key
 
 router = APIRouter()
 
@@ -46,22 +47,29 @@ class DashboardFolder(BaseModel):
 
 
 class DashboardPayload(BaseModel):
+    user: str | None = None
     queries: list[DashboardQuery] | None = None
     folders: list[DashboardFolder] | None = None
 
 
 class SaveQueryPayload(BaseModel):
+    user: str | None = None
     question: str
     sql: str
     metadata: dict[str, Any] | None = None
 
 
+def _dashboard_key(user: str | None) -> str:
+    return scoped_state_key("dashboard::queries", user)
+
+
 @router.get("/queries")
-def get_queries():
+def get_queries(user: str | None = Query(default=None)):
     store = get_state_store()
     if not store.enabled:
         return {"queries": [], "folders": [], "detail": "MongoDB is not configured"}
-    value = store.get("dashboard::queries") or {}
+    key = _dashboard_key(user)
+    value = store.get(key) or {}
     queries = value.get("queries", []) if isinstance(value, dict) else []
     folders = value.get("folders", []) if isinstance(value, dict) else []
     return {"queries": queries, "folders": folders}
@@ -72,7 +80,8 @@ def save_queries(payload: DashboardPayload):
     store = get_state_store()
     if not store.enabled:
         return {"ok": False, "detail": "MongoDB is not configured"}
-    existing = store.get("dashboard::queries") or {}
+    key = _dashboard_key(payload.user)
+    existing = store.get(key) or {}
     existing_queries = existing.get("queries", []) if isinstance(existing, dict) else []
     existing_folders = existing.get("folders", []) if isinstance(existing, dict) else []
 
@@ -92,7 +101,7 @@ def save_queries(payload: DashboardPayload):
 
     next_queries = queries if payload.queries is not None else existing_queries
     next_folders = folders if payload.folders is not None else existing_folders
-    store.set("dashboard::queries", {"queries": next_queries, "folders": next_folders})
+    store.set(key, {"queries": next_queries, "folders": next_folders})
     return {"ok": True, "count": len(next_queries), "folders": len(next_folders)}
 
 
@@ -102,7 +111,8 @@ def save_query(payload: SaveQueryPayload):
     if not store.enabled:
         return {"ok": False, "detail": "MongoDB is not configured"}
 
-    existing = store.get("dashboard::queries") or {}
+    key = _dashboard_key(payload.user)
+    existing = store.get(key) or {}
     existing_queries = existing.get("queries", []) if isinstance(existing, dict) else []
     existing_folders = existing.get("folders", []) if isinstance(existing, dict) else []
 
@@ -142,5 +152,5 @@ def save_query(payload: SaveQueryPayload):
                 )
 
     next_queries = [entry, *existing_queries]
-    store.set("dashboard::queries", {"queries": next_queries, "folders": next_folders})
+    store.set(key, {"queries": next_queries, "folders": next_folders})
     return {"ok": True, "count": len(next_queries), "folders": len(next_folders)}
