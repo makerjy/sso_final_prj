@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import Any
 import re
 
-from app.core.config import get_settings
-
 _TIMEOUT_MARKERS = ("DPY-4024", "DPI-1067", "ORA-03156", "TIMEOUT")
 _INVALID_IDENTIFIER_MARKERS = ("ORA-00904", "INVALID IDENTIFIER")
 _INVALID_NUMBER_MARKERS = ("ORA-01722", "INVALID NUMBER")
@@ -401,24 +399,8 @@ def _repair_timeout(question: str, sql: str) -> tuple[str, list[str]]:
             text = stripped
             rules.append("template_timeout_strip_order_by")
 
-    # Keep timeout fallback conservative: avoid broad FROM/JOIN regex rewrites
-    # because they can corrupt SQL structure and reduce semantic fidelity.
-    sampled_rules: list[str] = []
-
-    has_agg = bool(
-        re.search(r"\bGROUP\s+BY\b|\bCOUNT\s*\(|\bAVG\s*\(|\bSUM\s*\(|\bMIN\s*\(|\bMAX\s*\(", text, re.IGNORECASE)
-    )
-    has_rownum = bool(re.search(r"\bROWNUM\s*<=\s*\d+", text, re.IGNORECASE))
-    if not has_agg and not has_rownum:
-        cap = min(max(1000, int(get_settings().row_cap or 5000)), 10000)
-        text = f"SELECT * FROM ({text}) WHERE ROWNUM <= {cap}"
-        rules.append(f"template_timeout_apply_rownum_cap:{cap}")
-    elif has_agg and not has_rownum:
-        # Aggregate queries are wrapped instead of inlining predicates to avoid
-        # malformed SQL when nested GROUP BY/ORDER BY exists.
-        cap = min(max(1000, int(get_settings().row_cap or 5000)), 5000)
-        text = f"SELECT * FROM ({text}) WHERE ROWNUM <= {cap}"
-        rules.append(f"template_timeout_wrap_rownum_cap:{cap}")
+    # Do not inject automatic ROWNUM limits during timeout repair.
+    # Keep semantic shape unchanged except optional ORDER BY stripping above.
 
     return text, rules
 

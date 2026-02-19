@@ -184,6 +184,19 @@
       "last_used_at": 1771416940,
       "success_count": 1,
       "updated_at": 1771416940
+    },
+    {
+      "created_at": 1771462709,
+      "error_signature": "WHERE_REQUIRED",
+      "failed_sql_hash": "4576cc78bf96c408ba74683068a3eea0d0f17b35981a7e7025bb383847e113b1",
+      "failed_sql_sample": "SELECT * FROM SSO.PATIENTS",
+      "fixed_sql": "SELECT * FROM SSO.PATIENTS WHERE ROWNUM <= 10",
+      "fixed_sql_hash": "f3ff167a709e4477d145d8d27f8cbde51916c362d84fc97da305334c576864af",
+      "hit_count": 0,
+      "id": "c62e5cddfce947c18b15d801cee4a7bc",
+      "last_used_at": 1771462709,
+      "success_count": 1,
+      "updated_at": 1771462709
     }
   ]
 }

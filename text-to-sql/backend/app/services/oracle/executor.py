@@ -22,10 +22,6 @@ def _sanitize_sql(sql: str) -> str:
     return sql.strip().rstrip(";")
 
 
-def _apply_row_cap(sql: str, row_cap: int) -> str:
-    return f"SELECT * FROM ({sql}) WHERE ROWNUM <= :row_cap"
-
-
 def _load_metadata_owner() -> str:
     path: Path = project_path("var/metadata/schema_catalog.json")
     if not path.exists():
@@ -103,19 +99,37 @@ def execute_sql(sql: str) -> dict[str, Any]:
         fallback_schema = _load_metadata_owner()
 
         def _run_once(schema_name: str, sql_text: str) -> dict[str, Any]:
+            if schema_name and _valid_schema_name(schema_name):
+                schema_cur = conn.cursor()
+                try:
+                    schema_cur.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {schema_name}")
+                finally:
+                    schema_cur.close()
+
+            # Best-effort full result count for UI badges.
+            total_count: int | None = None
+            count_cur = conn.cursor()
+            try:
+                count_cur.execute(f"SELECT COUNT(*) FROM ({sql_text})")
+                count_row = count_cur.fetchone()
+                if count_row and len(count_row) > 0 and count_row[0] is not None:
+                    total_count = int(count_row[0])
+            except Exception:
+                total_count = None
+            finally:
+                count_cur.close()
+
             run_cur = conn.cursor()
             try:
-                if schema_name and _valid_schema_name(schema_name):
-                    run_cur.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {schema_name}")
-                capped_sql = _apply_row_cap(sql_text, settings.row_cap)
-                run_cur.execute(capped_sql, row_cap=settings.row_cap)
+                run_cur.execute(sql_text)
                 columns = [d[0] for d in run_cur.description] if run_cur.description else []
-                rows = run_cur.fetchmany(settings.row_cap)
+                rows = run_cur.fetchall()
                 return {
                     "columns": columns,
                     "rows": rows,
                     "row_count": len(rows),
-                    "row_cap": settings.row_cap,
+                    "row_cap": None,
+                    "total_count": total_count,
                 }
             finally:
                 run_cur.close()

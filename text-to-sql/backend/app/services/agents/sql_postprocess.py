@@ -5230,14 +5230,8 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     wrapped, wrap_rules = _wrap_top_n(q, avg_reordered)
     rules.extend(wrap_rules)
 
-    cap_value = get_settings().row_cap
-    if cap_value <= 0:
-        cap_value = 100000
+    # Disable automatic ROWNUM capping; preserve explicit Top-N only.
     capped = wrapped
-    cap_rules: list[str] = []
-    if _should_apply_rownum_cap_conservative(q, wrapped):
-        capped, cap_rules = _apply_rownum_cap(wrapped, cap=cap_value)
-    rules.extend(cap_rules)
 
     micro_cap_fixed, micro_cap_rules = _strip_rownum_cap_for_micro_topk(capped)
     rules.extend(micro_cap_rules)
