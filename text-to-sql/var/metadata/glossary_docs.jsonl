@@ -36,8 +36,10 @@
 {"term": "gender", "definition": "PATIENTS.GENDER (same as sex)"}
 {"term": "sex", "definition": "PATIENTS.GENDER (same as gender)"}
 {"term": "age", "definition": "PATIENTS.ANCHOR_AGE (approximate age)"}
+{"term": "age group", "definition": "For age-band questions, derive groups from PATIENTS.ANCHOR_AGE (not ANCHOR_YEAR_GROUP)."}
+{"term": "연령대", "definition": "연령대 질문은 PATIENTS.ANCHOR_AGE 기반 구간으로 계산하고, ANCHOR_YEAR_GROUP은 사용하지 않습니다."}
 {"term": "anchor year", "definition": "PATIENTS.ANCHOR_YEAR"}
-{"term": "anchor year group", "definition": "PATIENTS.ANCHOR_YEAR_GROUP (year bin/range)"}
+{"term": "anchor year group", "definition": "PATIENTS.ANCHOR_YEAR_GROUP (calendar year bin/range; not a patient age band)."}
 {"term": "chart time", "definition": "CHARTEVENTS.CHARTTIME or LABEVENTS.CHARTTIME"}
 {"term": "store time", "definition": "CHARTEVENTS.STORETIME or LABEVENTS.STORETIME"}
 {"term": "lab events", "definition": "LABEVENTS table (lab results)"}
@@ -233,7 +235,7 @@
 {"term": "CAREGIVER table", "definition": "caregiver_id is a deidentified integer representing the care provider who documented data; event tables store caregiver_id.", "source": "PhysioNet MIMIC-IV v3.0 data description"}
 {"term": "ICUSTAYS definition", "definition": "ICU stays are derived from transfers; consecutive ICU transfers are merged into a single stay_id, while non-consecutive ICU stays remain distinct.", "source": "PhysioNet MIMIC-IV v3.0 data description"}
 {"term": "ANCHOR_YEAR", "definition": "Deidentified year (2100-2200) for a subject; used with anchor_year_group to align dates.", "source": "PhysioNet MIMIC-IV v3.0 data description"}
-{"term": "ANCHOR_YEAR_GROUP", "definition": "Three-year group (e.g., 2011-2013) that aligns with anchor_year for approximate calendar mapping.", "source": "PhysioNet MIMIC-IV v3.0 data description"}
+{"term": "ANCHOR_YEAR_GROUP", "definition": "Three-year calendar group (e.g., 2011-2013) aligned with anchor_year for approximate time mapping; do not use this as an age group.", "source": "PhysioNet MIMIC-IV v3.0 data description"}
 {"term": "INPUTEVENTS", "definition": "ICU inputs including IV fluids and medications; documented as inputevents.", "source": "PhysioNet MIMIC-IV v3.0 data description"}
 {"term": "OUTPUTEVENTS", "definition": "ICU outputs (e.g., urine) recorded in outputevents.", "source": "PhysioNet MIMIC-IV v3.0 data description"}
 {"term": "DATETIMEEVENTS", "definition": "ICU events documented as a date/time value (datetimeevents).", "source": "PhysioNet MIMIC-IV v3.0 data description"}

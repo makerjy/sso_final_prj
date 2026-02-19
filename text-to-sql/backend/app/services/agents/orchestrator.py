@@ -340,6 +340,22 @@ _PLANNER_COMPLEX_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
 )
+_AGE_SEMANTIC_INTENT_RE = re.compile(
+    r"(연령대|나이대|연령|나이|나잇대|세\b|aged?\b|age\s*(group|band|range)?\b)",
+    re.IGNORECASE,
+)
+_AGE_GROUPING_INTENT_RE = re.compile(
+    r"(연령대|나이대|연령별|나이별|연령\s*구간|나이\s*구간|age\s*(group|band|bucket|range)|by\s+age|age[-\s]*stratif)",
+    re.IGNORECASE,
+)
+_YEAR_SEMANTIC_INTENT_RE = re.compile(
+    r"(연도|년도|연도별|년별|year|yearly|annual|anchor[_\s]*year|anchor[_\s]*year[_\s]*group)",
+    re.IGNORECASE,
+)
+_AGE_SEMANTIC_HINT = (
+    "Age semantics requested: use PATIENTS.ANCHOR_AGE or explicit age bands; "
+    "do not substitute ANCHOR_YEAR_GROUP unless year intent is explicit."
+)
 
 
 def _count_question_tokens(*texts: str | None) -> int:
@@ -356,6 +372,51 @@ def _count_planner_complex_signals(*texts: str | None) -> int:
     if not merged:
         return 0
     return sum(1 for pattern in _PLANNER_COMPLEX_SIGNAL_PATTERNS if pattern.search(merged))
+
+
+def _prefer_anchor_age_semantics(*texts: str | None) -> bool:
+    merged = " ".join(str(text or "").strip() for text in texts if str(text or "").strip())
+    if not merged:
+        return False
+    has_age_intent = bool(_AGE_SEMANTIC_INTENT_RE.search(merged))
+    has_year_intent = bool(_YEAR_SEMANTIC_INTENT_RE.search(merged))
+    return has_age_intent and not has_year_intent
+
+
+def _has_age_grouping_intent(*texts: str | None) -> bool:
+    merged = " ".join(str(text or "").strip() for text in texts if str(text or "").strip())
+    if not merged:
+        return False
+    return bool(_AGE_GROUPING_INTENT_RE.search(merged))
+
+
+def _apply_anchor_age_semantic_hint(
+    *,
+    question: str,
+    question_en: str | None,
+    planner_intent: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, bool]:
+    if not _prefer_anchor_age_semantics(question, question_en):
+        return planner_intent, False
+
+    # Ensure SQL generator receives a concrete semantic constraint even when planner is skipped.
+    intent = dict(planner_intent) if isinstance(planner_intent, dict) else {}
+    filters_raw = intent.get("filters")
+    filters: list[str] = list(filters_raw) if isinstance(filters_raw, list) else []
+    if _AGE_SEMANTIC_HINT not in filters:
+        filters.append(_AGE_SEMANTIC_HINT)
+    intent["filters"] = filters
+
+    # Do not force age-group grain for pure age-filter requests
+    # (e.g., "65세 이상 환자 수"). Only set grain when grouping intent is explicit.
+    if _has_age_grouping_intent(question, question_en):
+        grain = str(intent.get("grain") or "").strip()
+        if not grain or _YEAR_SEMANTIC_INTENT_RE.search(grain):
+            intent["grain"] = "age_group"
+    summary = str(intent.get("intent_summary") or "").strip()
+    if _AGE_SEMANTIC_HINT not in summary:
+        intent["intent_summary"] = f"{summary} {_AGE_SEMANTIC_HINT}".strip()
+    return intent, True
 
 
 def _decide_planner_usage(
@@ -1486,6 +1547,14 @@ def run_oneshot(
             planner_intent = None
             planner_decision = {**planner_decision, "fallback": "planner_failed"}
 
+    planner_intent, age_semantic_hint_applied = _apply_anchor_age_semantic_hint(
+        question=question,
+        question_en=translated_question,
+        planner_intent=planner_intent,
+    )
+    if age_semantic_hint_applied:
+        planner_decision = {**planner_decision, "age_semantic_hint": "anchor_age_preferred"}
+
     attempt = 0
     last_error: Exception | None = None
     while attempt <= settings.max_retry_attempts:
@@ -1553,11 +1622,12 @@ def run_oneshot(
                                     base_rules.append(rule)
                             final_payload["postprocess"] = base_rules
                 # Planner intent and SQL are inconsistent: run expert once as a targeted realignment pass.
+                age_semantic_mismatch = "age_intent_mapped_to_anchor_year_group" in unresolved_issues
                 if (
                     unresolved_issues
                     and planner_intent
-                    and not expert_applied
                     and oneshot_intent_realign_enabled
+                    and (not expert_applied or age_semantic_mismatch)
                 ):
                     try:
                         intent_realign = review_sql(
@@ -1571,17 +1641,29 @@ def run_oneshot(
                         _add_llm_cost(intent_realign.get("usage", {}), "oneshot_intent_realign")
                         realigned_sql = str(intent_realign.get("final_sql") or "").strip()
                         if realigned_sql:
+                            realign_profile, _ = recommend_postprocess_profile(
+                                question,
+                                realigned_sql,
+                                default_profile="auto",
+                            )
                             realigned_sql, realign_post_rules = postprocess_sql(
                                 question,
                                 realigned_sql,
-                                profile="aggressive",
+                                profile=realign_profile,
                             )
                             realigned_sql, realign_align_rules, unresolved_after_realign = enforce_intent_alignment(
                                 question,
                                 realigned_sql,
                                 planner_intent=planner_intent,
                             )
-                            if len(unresolved_after_realign) < len(unresolved_issues):
+                            before_issue_set = set(unresolved_issues)
+                            after_issue_set = set(unresolved_after_realign)
+                            no_regression = after_issue_set.issubset(before_issue_set)
+                            age_issue_resolved = (
+                                age_semantic_mismatch
+                                and "age_intent_mapped_to_anchor_year_group" not in unresolved_after_realign
+                            )
+                            if no_regression and (len(unresolved_after_realign) < len(unresolved_issues) or age_issue_resolved):
                                 final_payload = intent_realign
                                 final_payload["final_sql"] = realigned_sql
                                 final_sql = realigned_sql

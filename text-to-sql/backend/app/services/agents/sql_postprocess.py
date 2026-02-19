@@ -215,6 +215,13 @@ _TOP_N_EN_RE = re.compile(r"\btop\s+(\d+)\b", re.IGNORECASE)
 _TOP_N_KO_RE = re.compile(r"(?:상위|탑)\s*(\d+)")
 _COUNT_BY_GENDER_EN_RE = re.compile(r"\bcount\b.*\bby\s+gender\b", re.IGNORECASE)
 _COUNT_BY_GENDER_KO_RE = re.compile(r"성별.*(건수|건|수|카운트)|.*(건수|건|수|카운트).*성별")
+_AGE_GROUP_INTENT_RE = re.compile(r"(연령대|나이대|age\s*(group|band|range)|연령\s*구간)", re.IGNORECASE)
+_GENDER_INTENT_RE = re.compile(r"(성별|남성|여성|\bgender\b|\bsex\b)", re.IGNORECASE)
+_EXTREMA_INTENT_RE = re.compile(
+    r"(가장\s*(많|적)|최대|최소|최고|최저|most|least|highest|lowest|max|min|top\s*1|bottom\s*1)",
+    re.IGNORECASE,
+)
+_DIAGNOSIS_INTENT_RE = re.compile(r"(진단|diagnos)", re.IGNORECASE)
 _DEATHTIME_FROM_DISCHTIME_RE = re.compile(
     r"(?P<death>(?:[A-Za-z0-9_]+\.)?DEATHTIME)\s*<=\s*\(?\s*(?P<dis>(?:[A-Za-z0-9_]+\.)?DISCHTIME)\s*\+\s*INTERVAL\s*'(?P<days>\d+)'\s*DAY\s*\)?",
     re.IGNORECASE,
@@ -2851,6 +2858,97 @@ def _rewrite_count_by_gender_template(question: str, sql: str) -> tuple[str, lis
     return rewritten, rules
 
 
+def _rewrite_age_group_diagnosis_extrema_by_gender(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").strip()
+    if not q:
+        return sql, rules
+    if not (
+        _AGE_GROUP_INTENT_RE.search(q)
+        and _GENDER_INTENT_RE.search(q)
+        and _EXTREMA_INTENT_RE.search(q)
+        and _DIAGNOSIS_INTENT_RE.search(q)
+    ):
+        return sql, rules
+
+    text = str(sql or "").strip().rstrip(";")
+    upper = text.upper()
+    if "PATIENTS" not in upper or "DIAGNOSES_ICD" not in upper or "COUNT(" not in upper:
+        return sql, rules
+    if re.search(r"\bPARTITION\s+BY\b[^\n;]*\bAGE_GROUP\b", upper, re.IGNORECASE):
+        return sql, rules
+
+    span = _find_final_select_from_span(text)
+    if not span:
+        return sql, rules
+    core, select_idx, from_idx = span
+    select_clause = core[select_idx + len("SELECT"):from_idx].strip()
+
+    agg_match = re.search(
+        r"\b(?P<agg>MAX|MIN)\s*\(\s*(?P<metric>[A-Za-z_][A-Za-z0-9_$#\.]*)\s*\)",
+        select_clause,
+        re.IGNORECASE,
+    )
+    if not agg_match:
+        return sql, rules
+
+    metric = str(agg_match.group("metric") or "").split(".")[-1].strip()
+    if not _IDENT_RE.fullmatch(metric):
+        return sql, rules
+
+    source_start = from_idx + len("FROM")
+    while source_start < len(core) and core[source_start].isspace():
+        source_start += 1
+    if source_start >= len(core) or core[source_start] != "(":
+        return sql, rules
+    source_end = _find_matching_paren_index(core, source_start)
+    if source_end is None:
+        return sql, rules
+
+    inner_sql = core[source_start + 1:source_end].strip().rstrip(";")
+    if not inner_sql.upper().startswith("SELECT"):
+        return sql, rules
+    if not re.search(r"\bAS\s+AGE_GROUP\b", inner_sql, re.IGNORECASE):
+        return sql, rules
+    if not re.search(r"\bGENDER\b", inner_sql, re.IGNORECASE):
+        return sql, rules
+    if not re.search(
+        rf"\bAS\s+{re.escape(metric)}\b|\b{re.escape(metric)}\b",
+        inner_sql,
+        re.IGNORECASE,
+    ):
+        return sql, rules
+
+    outer_tail = core[source_end + 1:]
+    group_match = re.search(
+        r"\bGROUP\s+BY\b\s+(.+?)(?:\bORDER\s+BY\b|$)",
+        outer_tail,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if group_match:
+        group_clause = group_match.group(1)
+        if not re.search(r"\bGENDER\b", group_clause, re.IGNORECASE):
+            return sql, rules
+        if re.search(r"\bAGE_GROUP\b|\bANCHOR_AGE\b", group_clause, re.IGNORECASE):
+            return sql, rules
+
+    order_dir = "ASC" if agg_match.group("agg").upper() == "MIN" else "DESC"
+    rewritten = (
+        "WITH age_gender_counts AS ("
+        f"{inner_sql}"
+        "), ranked AS ("
+        f"SELECT age_group, gender, {metric} AS {metric}, "
+        f"DENSE_RANK() OVER (PARTITION BY age_group ORDER BY {metric} {order_dir}) AS age_group_rank "
+        "FROM age_gender_counts"
+        ") "
+        f"SELECT age_group, gender, {metric} FROM ranked "
+        "WHERE age_group_rank = 1 "
+        f"ORDER BY age_group, {metric} {order_dir}"
+    )
+    rules.append(f"age_group_diagnosis_extrema_by_gender:{order_dir.lower()}")
+    return rewritten, rules
+
+
 def _strip_for_update(sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
@@ -4895,7 +4993,13 @@ def _postprocess_sql_conservative(question: str, sql: str) -> tuple[str, list[st
     admissions_icd_grain_fixed, admissions_icd_grain_rules = _rewrite_admissions_icd_count_grain(q, window_fixed)
     rules.extend(admissions_icd_grain_rules)
 
-    return admissions_icd_grain_fixed, rules
+    age_gender_extrema_fixed, age_gender_extrema_rules = _rewrite_age_group_diagnosis_extrema_by_gender(
+        q,
+        admissions_icd_grain_fixed,
+    )
+    rules.extend(age_gender_extrema_rules)
+
+    return age_gender_extrema_fixed, rules
 
 
 def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tuple[str, list[str]]:
@@ -5144,7 +5248,13 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     birth_year_fixed, birth_year_rules = _rewrite_birth_year_age(birth_col_fixed)
     rules.extend(birth_year_rules)
 
-    icu_careunit_fixed, icu_careunit_rules = _rewrite_icustays_careunit(q, birth_year_fixed)
+    age_gender_extrema_fixed, age_gender_extrema_rules = _rewrite_age_group_diagnosis_extrema_by_gender(
+        q,
+        birth_year_fixed,
+    )
+    rules.extend(age_gender_extrema_rules)
+
+    icu_careunit_fixed, icu_careunit_rules = _rewrite_icustays_careunit(q, age_gender_extrema_fixed)
     rules.extend(icu_careunit_rules)
 
     icu_los_fixed, icu_los_rules = _rewrite_icustays_los(icu_careunit_fixed)

@@ -45,6 +45,8 @@ ENGINEER_SYSTEM_PROMPT = (
     "For microbiology antibiotic frequency intents, prefer MICROBIOLOGYEVENTS.AB_NAME over PRESCRIPTIONS drug name counts. "
     "For diagnosis rate by subgroup, keep numerator and denominator at the same admission grain. "
     "Use exact categorical values if context provides valid value hints. "
+    "When the question asks age bands/groups (연령대/나이대/xx세/age group) without explicit year terms, "
+    "use PATIENTS.ANCHOR_AGE (or CASE age bands), not ANCHOR_YEAR_GROUP. "
     "For open-ended distribution queries phrased as counts by a category (e.g., 'counts by ...'), "
     "return the full grouped result by default. "
     "Apply top-N row limiting only when user explicitly requests top/sample/preview output."
@@ -71,6 +73,7 @@ EXPERT_SYSTEM_PROMPT = (
     "Raise risk if microbiology antibiotic frequency intent is mapped to PRESCRIPTIONS instead of MICROBIOLOGYEVENTS.AB_NAME. "
     "Raise risk when SQL uses DISTINCT in simple counts without explicit uniqueness intent from the question. "
     "Raise risk when ICD prefix filtering misses ICD_VERSION in mixed alpha/numeric sets. "
+    "If age-group intent is present without explicit year intent, raise risk when SQL uses ANCHOR_YEAR_GROUP instead of ANCHOR_AGE/age bands. "
     "Ensure label joins are correct (D_ITEMS, D_LABITEMS) and medication columns are table-consistent. "
     "Treat ITEMID-to-ICD_CODE joins as invalid semantic joins and rewrite to proper concept dimensions. "
     "Prefer minimal SQL edits that preserve intent."
@@ -95,6 +98,7 @@ ERROR_REPAIR_SYSTEM_PROMPT = (
     "If one-to-many joins can inflate rates, use admission-grain logic (EXISTS or DISTINCT HADM_ID). "
     "If question asks ratio/rate/percentage, keep ratio output explicit (not counts-only) while preserving grouping intent. "
     "For timeout/resource errors, reduce scan cost with earlier selective filters, lighter joins, and avoiding unnecessary columns. "
+    "If question means age groups (연령대/나이대/age group) and does not request year grouping, repair toward ANCHOR_AGE/age bands instead of ANCHOR_YEAR_GROUP. "
     "Do not change the analytic goal (grouping/metric/cohort intent) unless required to fix an execution error."
 )
 

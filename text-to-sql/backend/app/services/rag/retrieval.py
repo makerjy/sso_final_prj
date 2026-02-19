@@ -314,6 +314,19 @@ _STRUCTURED_QUERY_RE = re.compile(
     r"(연도별|월별|주별|일별|분기별|추이|시계열|비교|대비|vs|versus|by\s+|according\s+to|quartile|q1|q2|q3|q4|사분위|ratio|rate|percentage|퍼센트|비율)",
     re.IGNORECASE,
 )
+_AGE_SEMANTIC_QUERY_RE = re.compile(
+    r"(연령대|나이대|연령|나이|나잇대|세\b|aged?\b|age\s*(group|band|range)?\b)",
+    re.IGNORECASE,
+)
+_YEAR_SEMANTIC_QUERY_RE = re.compile(
+    r"(연도|년도|연도별|년별|year|yearly|annual|anchor[_\s]*year|anchor[_\s]*year[_\s]*group)",
+    re.IGNORECASE,
+)
+_ANCHOR_YEAR_GROUP_TEXT_RE = re.compile(r"\banchor[_\s]*year[_\s]*group\b", re.IGNORECASE)
+_ANCHOR_AGE_TEXT_RE = re.compile(r"\banchor[_\s]*age\b", re.IGNORECASE)
+_AGE_INTENT_YEAR_GROUP_PENALTY = 0.55
+_AGE_INTENT_ANCHOR_AGE_BOOST = 1.15
+_AGE_INTENT_MIXED_ANCHOR_WEIGHT = 0.92
 
 
 def _tokenize_list(text: str) -> list[str]:
@@ -336,6 +349,72 @@ def _lexical_overlap(query: str, text: str) -> float:
     if not q_tokens or not d_tokens:
         return 0.0
     return len(q_tokens & d_tokens) / float(len(q_tokens))
+
+
+def _query_prefers_anchor_age(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    has_age = bool(_AGE_SEMANTIC_QUERY_RE.search(text))
+    has_year = bool(_YEAR_SEMANTIC_QUERY_RE.search(text))
+    return has_age and not has_year
+
+
+def _is_anchor_year_group_only_doc(*, text: str, metadata: dict[str, Any]) -> bool:
+    table = str(metadata.get("table") or "").strip().upper()
+    column = str(metadata.get("column") or "").strip().upper()
+    term = str(metadata.get("term") or "").strip()
+    merged = " ".join(part for part in [str(text or ""), table, column, term] if part)
+    has_year_group = bool(_ANCHOR_YEAR_GROUP_TEXT_RE.search(merged)) or column == "ANCHOR_YEAR_GROUP"
+    has_anchor_age = bool(_ANCHOR_AGE_TEXT_RE.search(merged)) or column == "ANCHOR_AGE"
+    return has_year_group and not has_anchor_age
+
+
+def _suppress_anchor_year_group_hits_for_age_intent(
+    question: str,
+    hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not hits or not _query_prefers_anchor_age(question):
+        return hits
+    filtered: list[dict[str, Any]] = []
+    for hit in hits:
+        metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+        text = str(hit.get("text") or "")
+        if _is_anchor_year_group_only_doc(text=text, metadata=metadata):
+            continue
+        filtered.append(hit)
+    # Keep original list as fallback when every candidate was filtered out.
+    return filtered or hits
+
+
+def _apply_age_semantic_retrieval_bias(
+    *,
+    score: float,
+    query: str,
+    text: str,
+    metadata: dict[str, Any],
+) -> float:
+    if not _query_prefers_anchor_age(query):
+        return score
+
+    source_type = str(metadata.get("type") or "").strip().lower()
+    if source_type not in {"schema", "example", "glossary", "table_profile"}:
+        return score
+
+    table = str(metadata.get("table") or "").strip().upper()
+    column = str(metadata.get("column") or "").strip().upper()
+    term = str(metadata.get("term") or "").strip()
+    merged = " ".join(part for part in [str(text or ""), table, column, term] if part)
+    has_year_group = bool(_ANCHOR_YEAR_GROUP_TEXT_RE.search(merged)) or column == "ANCHOR_YEAR_GROUP"
+    has_anchor_age = bool(_ANCHOR_AGE_TEXT_RE.search(merged)) or column == "ANCHOR_AGE"
+
+    if has_year_group and not has_anchor_age:
+        return score * _AGE_INTENT_YEAR_GROUP_PENALTY
+    if has_anchor_age and not has_year_group:
+        return score * _AGE_INTENT_ANCHOR_AGE_BOOST
+    if has_anchor_age and has_year_group:
+        return score * _AGE_INTENT_MIXED_ANCHOR_WEIGHT
+    return score
 
 
 def _normalize_scores(raw: dict[str, float]) -> dict[str, float]:
@@ -551,11 +630,18 @@ def _hybrid_search(
     for doc_id in merged_ids:
         base_hit = vec_by_id.get(doc_id) or bm25_by_id.get(doc_id) or {}
         text = str(base_hit.get("text") or "")
+        metadata = base_hit.get("metadata", {}) if isinstance(base_hit.get("metadata"), dict) else {}
         overlap = _lexical_overlap(query, text)
         score = (
             w_vec * float(vec_scores.get(doc_id, 0.0))
             + w_bm25 * float(bm25_scores.get(doc_id, 0.0))
             + w_overlap * overlap
+        )
+        score = _apply_age_semantic_retrieval_bias(
+            score=score,
+            query=query,
+            text=text,
+            metadata=metadata,
         )
         reranked.append(
             (
@@ -563,7 +649,7 @@ def _hybrid_search(
                 {
                     "id": doc_id,
                     "text": text,
-                    "metadata": base_hit.get("metadata", {}),
+                    "metadata": metadata,
                     "score": score,
                 },
             )
@@ -993,6 +1079,7 @@ def build_candidate_context(question: str) -> CandidateContext:
         min_lexical_overlap=0.10,
         allow_fallback=False,
     )
+    example_hits = _suppress_anchor_year_group_hits_for_age_intent(question, example_hits)
     if templates_limit > 0:
         template_hits = _hybrid_search(store, question, k=templates_limit, where={"type": "template"})
         template_hits = _dedupe_hits(template_hits, max_items=max(templates_limit * 2, templates_limit))
@@ -1011,10 +1098,12 @@ def build_candidate_context(question: str) -> CandidateContext:
         _hybrid_search(store, question, k=settings.rag_top_k, where={"type": "glossary"}),
         max_items=settings.rag_top_k,
     )
+    raw_glossary_hits = _suppress_anchor_year_group_hits_for_age_intent(question, raw_glossary_hits)
     table_profile_hits = _dedupe_hits(
         _hybrid_search(store, question, k=settings.rag_top_k, where={"type": "table_profile"}),
         max_items=settings.rag_top_k,
     )
+    table_profile_hits = _suppress_anchor_year_group_hits_for_age_intent(question, table_profile_hits)
     general_glossary_hits = _dedupe_hits(
         _merge_hits([raw_glossary_hits, table_profile_hits], k=max(settings.rag_top_k * 2, settings.rag_top_k)),
         max_items=max(settings.rag_top_k * 2, settings.rag_top_k),
@@ -1072,6 +1161,7 @@ def build_candidate_context(question: str) -> CandidateContext:
         local_column_hits=local_column_hits,
         local_label_hits=local_label_hits,
     )
+    glossary_hits = _suppress_anchor_year_group_hits_for_age_intent(question, glossary_hits)
 
     context = CandidateContext(
         schemas=schema_hits,
@@ -1165,6 +1255,7 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
         min_lexical_overlap=0.10,
         allow_fallback=False,
     )
+    example_hits = _suppress_anchor_year_group_hits_for_age_intent(merged_query, example_hits)
     if templates_limit > 0:
         template_hits = _merge_hits(
             [_hybrid_search(store, q, k=_per_query_k(templates_limit), where={"type": "template"}) for q in deduped],
@@ -1187,11 +1278,13 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
         k=settings.rag_top_k,
     )
     raw_glossary_hits = _dedupe_hits(raw_glossary_hits, max_items=settings.rag_top_k)
+    raw_glossary_hits = _suppress_anchor_year_group_hits_for_age_intent(merged_query, raw_glossary_hits)
     table_profile_hits = _merge_hits(
         [_hybrid_search(store, q, k=_per_query_k(settings.rag_top_k), where={"type": "table_profile"}) for q in deduped],
         k=settings.rag_top_k,
     )
     table_profile_hits = _dedupe_hits(table_profile_hits, max_items=settings.rag_top_k)
+    table_profile_hits = _suppress_anchor_year_group_hits_for_age_intent(merged_query, table_profile_hits)
     general_glossary_hits = _dedupe_hits(
         _merge_hits([raw_glossary_hits, table_profile_hits], k=max(settings.rag_top_k * 2, settings.rag_top_k)),
         max_items=max(settings.rag_top_k * 2, settings.rag_top_k),
@@ -1261,6 +1354,7 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
         local_column_hits=local_column_hits,
         local_label_hits=local_label_hits,
     )
+    glossary_hits = _suppress_anchor_year_group_hits_for_age_intent(merged_query, glossary_hits)
 
     context = CandidateContext(
         schemas=schema_hits,

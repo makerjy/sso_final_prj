@@ -86,6 +86,7 @@ interface PolicyResult {
 interface OneShotPayload {
   mode: "demo" | "advanced" | "clarify"
   question: string
+  assistant_message?: string
   result?: DemoResult
   risk?: { risk?: number; intent?: string }
   policy?: PolicyResult | null
@@ -108,6 +109,13 @@ interface RunResponse {
   sql: string
   result: PreviewData
   policy?: PolicyResult | null
+}
+
+interface QueryAnswerResponse {
+  answer?: string
+  source?: string
+  suggested_questions?: string[]
+  suggestions_source?: string
 }
 
 interface VisualizationChartSpec {
@@ -274,6 +282,7 @@ const sanitizeResponse = (response: OneShotResponse | null): OneShotResponse | n
     payload: {
       mode: payload.mode,
       question: payload.question,
+      assistant_message: payload.assistant_message ? String(payload.assistant_message) : undefined,
       result,
       risk: payload.risk,
       policy,
@@ -322,6 +331,13 @@ export function QueryView() {
   const pendingDashboardQueryKey = chatHistoryUser
     ? `ql_pending_dashboard_query:${chatHistoryUser}`
     : "ql_pending_dashboard_query"
+  const ONESHOT_TIMEOUT_MS = 90_000
+  const RUN_TIMEOUT_MS = 130_000
+  const VISUALIZE_TIMEOUT_MS = 120_000
+  const VISUALIZE_MAX_ROWS = 1200
+  const ANSWER_TIMEOUT_MS = 35_000
+  const ANSWER_MAX_ROWS = 120
+  const ANSWER_MAX_COLS = 20
   const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 45000) => {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -339,6 +355,77 @@ export function QueryView() {
       throw error
     } finally {
       clearTimeout(timeout)
+    }
+  }
+  const sampleRowsForVisualization = (rows: any[][], maxRows: number) => {
+    if (!Array.isArray(rows) || rows.length <= maxRows) return rows
+    const sampled: any[][] = []
+    const step = rows.length / maxRows
+    for (let i = 0; i < maxRows; i += 1) {
+      const idx = Math.min(rows.length - 1, Math.floor(i * step))
+      sampled.push(rows[idx])
+    }
+    return sampled
+  }
+  const buildResultSummaryMessage = (totalRows: number | null, fetchedRows: number) => {
+    return totalRows != null
+      ? `쿼리를 실행했어요. 전체 결과는 ${totalRows}행입니다.`
+      : `쿼리를 실행했어요. 미리보기로 ${fetchedRows}행을 가져왔습니다.`
+  }
+  const requestQueryAnswerMessage = async ({
+    questionText,
+    sqlText,
+    previewData,
+    totalRows,
+    fetchedRows,
+  }: {
+    questionText: string
+    sqlText: string
+    previewData: PreviewData | null
+    totalRows: number | null
+    fetchedRows: number
+  }): Promise<{ answerText: string; suggestedQuestions: string[] }> => {
+    const fallback = buildResultSummaryMessage(totalRows, fetchedRows)
+    const fallbackSuggestions = buildSuggestions(questionText, previewData?.columns)
+    const question = String(questionText || "").trim()
+    if (!question || !previewData?.columns?.length) {
+      return { answerText: fallback, suggestedQuestions: fallbackSuggestions }
+    }
+    const columns = previewData.columns.slice(0, ANSWER_MAX_COLS)
+    const sampledRows = sampleRowsForVisualization(previewData.rows || [], ANSWER_MAX_ROWS)
+    const rows = sampledRows.map((row) => columns.map((_, idx) => row?.[idx] ?? null))
+    try {
+      const res = await fetchWithTimeout(apiUrl("/query/answer"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          sql: sqlText,
+          columns,
+          rows,
+          total_rows: totalRows,
+          fetched_rows: fetchedRows,
+        }),
+      }, ANSWER_TIMEOUT_MS)
+      if (!res.ok) return { answerText: fallback, suggestedQuestions: fallbackSuggestions }
+      const data: QueryAnswerResponse = await res.json()
+      const answer = String(data?.answer || "").trim()
+      const suggestedQuestions = Array.isArray(data?.suggested_questions)
+        ? Array.from(
+            new Set(
+              data.suggested_questions
+                .map((item) => String(item || "").trim())
+                .filter(Boolean)
+            )
+          ).slice(0, 3)
+        : []
+      return {
+        answerText: answer || fallback,
+        suggestedQuestions:
+          suggestedQuestions.length > 0 ? suggestedQuestions : fallbackSuggestions,
+      }
+    } catch {
+      return { answerText: fallback, suggestedQuestions: fallbackSuggestions }
     }
   }
   const [query, setQuery] = useState("")
@@ -379,10 +466,14 @@ export function QueryView() {
   const [isDesktopLayout, setIsDesktopLayout] = useState(false)
   const [resultsPanelWidth, setResultsPanelWidth] = useState(55)
   const [isPanelResizing, setIsPanelResizing] = useState(false)
+  const [visibleTabLimit, setVisibleTabLimit] = useState(3)
   const [selectedStatsBoxColumn, setSelectedStatsBoxColumn] = useState<string>("")
   const [showStatsBoxPlot, setShowStatsBoxPlot] = useState(false)
   const saveTimerRef = useRef<number | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
+  const chatScrollRef = useRef<HTMLDivElement | null>(null)
+  const lastAutoScrolledMessageIdRef = useRef<string>("")
+  const tabHeaderRef = useRef<HTMLDivElement | null>(null)
   const sqlScrollRef = useRef<HTMLDivElement | null>(null)
   const sqlDragRef = useRef({
     active: false,
@@ -836,6 +927,7 @@ export function QueryView() {
     const pushPoint = (value: string) => {
       const cleaned = value.replace(/\s+/g, " ").trim()
       if (!cleaned) return
+      if (/^[\)\]\}\.,;:!?]+$/.test(cleaned)) return
       const key = cleaned.toLowerCase()
       if (seen.has(key)) return
       seen.add(key)
@@ -887,8 +979,20 @@ export function QueryView() {
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
-  const latestVisibleTabs = useMemo(() => resultTabs.slice(0, 3), [resultTabs])
-  const pastQueryTabs = useMemo(() => resultTabs.slice(3), [resultTabs])
+  const latestVisibleTabs = useMemo(
+    () => resultTabs.slice(0, visibleTabLimit),
+    [resultTabs, visibleTabLimit]
+  )
+  const pastQueryTabs = useMemo(
+    () => resultTabs.slice(visibleTabLimit),
+    [resultTabs, visibleTabLimit]
+  )
+  const compactTabLabel = (text: string, maxChars = 10) => {
+    const normalized = String(text || "").trim() || "새 질문"
+    const chars = Array.from(normalized)
+    if (chars.length <= maxChars) return normalized
+    return `${chars.slice(0, maxChars).join("")}...`
+  }
   const hasConversation =
     messages.length > 0 || Boolean(response) || Boolean(runResult) || query.trim().length > 0
   const shouldShowResizablePanels = showResults && isDesktopLayout
@@ -949,6 +1053,10 @@ export function QueryView() {
       const records = previewData.rows.map((row) =>
         Object.fromEntries(previewData.columns.map((col, idx) => [col, row?.[idx]]))
       )
+      const sampledRows = sampleRowsForVisualization(previewData.rows, VISUALIZE_MAX_ROWS)
+      const sampledRecords = sampledRows.map((row) =>
+        Object.fromEntries(previewData.columns.map((col, idx) => [col, row?.[idx]]))
+      )
       const res = await fetchWithTimeout(
         vizUrl("/visualize"),
         {
@@ -957,10 +1065,10 @@ export function QueryView() {
           body: JSON.stringify({
             user_query: questionText || lastQuestion || "",
             sql: sqlText,
-            rows: records,
+            rows: sampledRecords.length ? sampledRecords : records,
           }),
         },
-        90000
+        VISUALIZE_TIMEOUT_MS
       )
       if (!res.ok) throw new Error(await readError(res))
       const data: VisualizationResponsePayload = await res.json()
@@ -968,7 +1076,7 @@ export function QueryView() {
         setVisualizationResult(data)
       }
       if (targetTabId) {
-        updateTab(targetTabId, { visualization: data })
+        updateTab(targetTabId, { visualization: data, insight: normalizeInsightText(String(data?.insight || "")) })
       }
       return data
     } catch (err: any) {
@@ -1072,6 +1180,56 @@ export function QueryView() {
     window.addEventListener("resize", syncDesktopLayout)
     return () => window.removeEventListener("resize", syncDesktopLayout)
   }, [])
+
+  useEffect(() => {
+    if (!messages.length) return
+    const container = chatScrollRef.current
+    if (!container) return
+
+    const last = messages[messages.length - 1]
+    const isNewMessage = last.id !== lastAutoScrolledMessageIdRef.current
+    const shouldScroll = isNewMessage && (last.role === "assistant" || isLoading)
+    if (!shouldScroll) return
+
+    lastAutoScrolledMessageIdRef.current = last.id
+    const rafId = window.requestAnimationFrame(() => {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" })
+    })
+    return () => window.cancelAnimationFrame(rafId)
+  }, [messages, isLoading])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const target = tabHeaderRef.current
+    if (!target) return
+
+    const recalcVisibleTabLimit = () => {
+      const width = target.clientWidth || 0
+      if (width <= 0) return
+      const tabWidthEstimate = 118
+      const historyButtonReserve = 112
+      let next = Math.floor(width / tabWidthEstimate)
+      next = Math.max(1, Math.min(8, next))
+      if (resultTabs.length > next) {
+        next = Math.floor((width - historyButtonReserve) / tabWidthEstimate)
+        next = Math.max(1, Math.min(8, next))
+      }
+      setVisibleTabLimit(next)
+    }
+
+    recalcVisibleTabLimit()
+    window.addEventListener("resize", recalcVisibleTabLimit)
+
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(() => recalcVisibleTabLimit())
+      observer.observe(target)
+    }
+    return () => {
+      window.removeEventListener("resize", recalcVisibleTabLimit)
+      observer?.disconnect()
+    }
+  }, [resultTabs.length])
 
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
@@ -1205,7 +1363,7 @@ export function QueryView() {
       ? payload.clarification.example_inputs.map((item) => String(item).trim()).filter(Boolean)
       : []
     const merged = [...options, ...examples]
-    return Array.from(new Set(merged)).slice(0, 5)
+    return Array.from(new Set(merged)).slice(0, 3)
   }
 
   const readError = async (res: Response) => {
@@ -1218,6 +1376,10 @@ export function QueryView() {
   }
 
   const buildAssistantMessage = (data: OneShotResponse) => {
+    const llmAssistantMessage = String(data.payload.assistant_message || "").trim()
+    if (llmAssistantMessage) {
+      return llmAssistantMessage
+    }
     if (data.payload.mode === "clarify") {
       const clarify = data.payload.clarification
       const prompt = clarify?.question?.trim() || "질문 범위를 조금 더 좁혀주세요."
@@ -1412,7 +1574,7 @@ export function QueryView() {
           user_name: chatUser,
           user_role: chatUserRole,
         })
-      })
+      }, ONESHOT_TIMEOUT_MS)
       if (!res.ok) {
         throw new Error(await readError(res))
       }
@@ -1456,10 +1618,7 @@ export function QueryView() {
         generatedSql
       )
       setIsEditing(false)
-      const suggestions =
-        data.payload.mode === "demo"
-          ? buildSuggestions(trimmed, data.payload.result?.preview?.columns)
-          : []
+      const suggestions: string[] = []
       setSuggestedQuestions(suggestions)
       updateTab(tab.id, {
         question: trimmed,
@@ -1469,13 +1628,6 @@ export function QueryView() {
         editedSql: generatedSql,
         status: "success",
       })
-      const responseMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: appendSuggestions(buildAssistantMessage(data), suggestions),
-        timestamp: new Date()
-      }
-      setMessages(prev => [...prev, responseMessage])
 
       // Advanced 모드에서는 SQL 생성 직후 자동 실행
       if (data.payload.mode === "advanced" && generatedSql.trim()) {
@@ -1487,17 +1639,51 @@ export function QueryView() {
           tabId: tab.id,
         })
       } else if (data.payload.mode === "demo" && generatedSql.trim()) {
-        const viz = await fetchVisualizationPlan(
+        const preview = data.payload.result?.preview || null
+        const fetchedRows = Number(preview?.row_count ?? 0)
+        const totalRows =
+          typeof preview?.total_count === "number" && Number.isFinite(preview.total_count)
+            ? preview.total_count
+            : null
+        const answerPayload = await requestQueryAnswerMessage({
+          questionText: trimmed,
+          sqlText: generatedSql.trim(),
+          previewData: preview,
+          totalRows,
+          fetchedRows,
+        })
+        const llmSuggestions = answerPayload.suggestedQuestions
+        setSuggestedQuestions(llmSuggestions)
+        updateTab(tab.id, {
+          resultData: preview,
+          suggestedQuestions: llmSuggestions,
+          visualization: null,
+          insight: "",
+        })
+        void fetchVisualizationPlan(
           generatedSql.trim(),
           trimmed,
-          data.payload.result?.preview || null,
+          preview,
           tab.id
         )
-        updateTab(tab.id, {
-          resultData: data.payload.result?.preview || null,
-          visualization: viz,
-          insight: normalizeInsightText(viz?.insight || ""),
-        })
+          const responseMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: appendSuggestions(
+            answerPayload.answerText,
+            llmSuggestions
+          ),
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, responseMessage])
+      } else {
+        const responseMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: appendSuggestions(buildAssistantMessage(data), suggestions),
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, responseMessage])
       }
     } catch (err: any) {
       const message =
@@ -1745,7 +1931,7 @@ export function QueryView() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
-    })
+    }, RUN_TIMEOUT_MS)
     if (!res.ok) {
       throw new Error(await readError(res))
     }
@@ -1755,45 +1941,56 @@ export function QueryView() {
     setShowResults(true)
     setIsEditing(false)
     const targetTabId = tabId || activeTabId
-    const viz = await fetchVisualizationPlan(
+    const fetchedRows = Number(data.result?.row_count ?? 0)
+    const totalRows =
+      typeof data.result?.total_count === "number" && Number.isFinite(data.result.total_count)
+        ? data.result.total_count
+        : null
+    const answerPromise = requestQueryAnswerMessage({
+      questionText: questionForSuggestions || lastQuestion || "",
+      sqlText: (data.sql || sql || "").trim(),
+      previewData: data.result || null,
+      totalRows,
+      fetchedRows,
+    })
+    void fetchVisualizationPlan(
       (data.sql || sql || "").trim(),
       questionForSuggestions || lastQuestion || "",
       data.result || null,
       targetTabId
     )
 
-    const suggestions = buildSuggestions(questionForSuggestions || lastQuestion, data.result?.columns)
-    setSuggestedQuestions(suggestions)
+    setSuggestedQuestions([])
     if (targetTabId) {
       updateTab(targetTabId, {
         sql: data.sql || sql || "",
         runResult: data,
         resultData: data.result || null,
-        visualization: viz,
-        suggestedQuestions: suggestions,
-        insight: normalizeInsightText(viz?.insight || ""),
+        visualization: null,
+        suggestedQuestions: [],
+        insight: "",
         status: "success",
         error: null,
       })
     }
 
+    const answerPayload = await answerPromise
+    const suggestions = answerPayload.suggestedQuestions
+    setSuggestedQuestions(suggestions)
+    if (targetTabId) {
+      updateTab(targetTabId, {
+        suggestedQuestions: suggestions,
+      })
+    }
+
     if (addAssistantMessage) {
-      const fetchedRows = Number(data.result?.row_count ?? 0)
-      const totalRows =
-        typeof data.result?.total_count === "number" && Number.isFinite(data.result.total_count)
-          ? data.result.total_count
-          : null
-      const resultSummaryText =
-        totalRows != null
-          ? `쿼리를 실행했어요. 전체 결과는 ${totalRows}행입니다.`
-          : `쿼리를 실행했어요. 미리보기로 ${fetchedRows}행을 가져왔습니다.`
       setMessages(prev => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
           content: appendSuggestions(
-            resultSummaryText,
+            answerPayload.answerText,
             suggestions
           ),
           timestamp: new Date()
@@ -2003,7 +2200,7 @@ export function QueryView() {
           style={chatPanelStyle}
         >
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center">
                 <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center mb-4">
@@ -2058,7 +2255,7 @@ export function QueryView() {
                           추천 질문
                         </div>
                         <div className="flex flex-wrap gap-2">
-                          {suggestedQuestions.map((item) => (
+                          {suggestedQuestions.slice(0, 3).map((item) => (
                             <Button
                               key={item}
                               variant="outline"
@@ -2142,18 +2339,19 @@ export function QueryView() {
           >
             <div className="flex-1 overflow-y-auto p-4 pb-6 space-y-4">
               {resultTabs.length > 0 && (
-                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                <div ref={tabHeaderRef} className="flex items-center gap-2 overflow-hidden pb-1">
                   {latestVisibleTabs.map((tab) => (
                     <button
                       key={tab.id}
                       type="button"
                       onClick={() => handleActivateTab(tab.id)}
+                      title={tab.question || "새 질문"}
                       className={cn(
-                        "inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs whitespace-nowrap",
+                        "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]",
                         activeTabId === tab.id ? "bg-secondary border-primary/30" : "bg-background"
                       )}
                     >
-                      <span className="max-w-[180px] truncate">{tab.question || "새 질문"}</span>
+                      <span className="max-w-[110px] truncate">{compactTabLabel(tab.question, 10)}</span>
                       <span
                         className={cn(
                           "inline-block h-2 w-2 rounded-full",
@@ -2467,17 +2665,35 @@ export function QueryView() {
 
                       {statsBoxPlotFigures.length ? (
                         <div className="space-y-3">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="text-xs text-muted-foreground">박스플롯 (컬럼별 개별 분포)</div>
-                            <div className="flex items-center gap-2">
+                          <div
+                            className={cn(
+                              "gap-2",
+                              isDesktopLayout
+                                ? "grid min-h-8 grid-cols-[auto_1fr_auto] items-center"
+                                : "flex flex-col"
+                            )}
+                          >
+                            <div className="text-xs text-muted-foreground">
+                              박스플롯 (컬럼별 개별 분포)
+                            </div>
+                            <div
+                              className={cn(
+                                isDesktopLayout
+                                  ? "w-full max-w-[260px] justify-self-center"
+                                  : "mx-auto w-full max-w-[260px]"
+                              )}
+                            >
                               {showStatsBoxPlot && statsBoxPlotFigures.length > 1 ? (
-                                <div className="w-[220px]">
+                                <div className="w-full">
                                   <Select
                                     value={selectedStatsBoxPlot?.column || undefined}
                                     onValueChange={setSelectedStatsBoxColumn}
                                   >
-                                    <SelectTrigger className="h-8">
-                                      <SelectValue placeholder="박스플롯 컬럼 선택" />
+                                    <SelectTrigger className="relative h-8 w-full justify-end pr-8 [&_svg]:absolute [&_svg]:right-3">
+                                      <SelectValue
+                                        className="pointer-events-none absolute left-1/2 max-w-[calc(100%-2.5rem)] -translate-x-1/2 truncate text-center"
+                                        placeholder="박스플롯 컬럼 선택"
+                                      />
                                     </SelectTrigger>
                                     <SelectContent>
                                       {statsBoxPlotFigures.map((item) => (
@@ -2488,7 +2704,11 @@ export function QueryView() {
                                     </SelectContent>
                                   </Select>
                                 </div>
-                              ) : null}
+                              ) : (
+                                <div className={cn(isDesktopLayout ? "h-8 w-full" : "hidden")} />
+                              )}
+                            </div>
+                            <div className={cn(isDesktopLayout ? "justify-self-end" : "self-end")}>
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -2748,7 +2968,7 @@ export function QueryView() {
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>이전 쿼리 목록</DialogTitle>
-            <DialogDescription>최근 3개를 제외한 이전 쿼리입니다. 선택하면 상단 탭으로 이동합니다.</DialogDescription>
+            <DialogDescription> 최근 쿼리를 제외한 이전 쿼리입니다. 선택하면 상단 탭으로 이동합니다.</DialogDescription>
           </DialogHeader>
 
           <div className="max-h-[55vh] space-y-2 overflow-y-auto">

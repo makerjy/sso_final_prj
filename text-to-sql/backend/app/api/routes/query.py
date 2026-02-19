@@ -10,6 +10,8 @@ import time
 import re
 
 from app.services.agents.orchestrator import run_oneshot
+from app.services.agents.llm_client import LLMClient
+from app.services.agents.json_utils import extract_json_object
 from app.services.agents.intent_guard import enforce_intent_alignment
 from app.services.agents.sql_error_parser import parse_sql_error
 from app.services.agents.sql_expert import repair_sql_after_error
@@ -25,6 +27,7 @@ from app.services.runtime.sql_error_repair_store import (
     mark_learned_sql_fix_used,
     upsert_learned_sql_fix,
 )
+from app.services.runtime.settings_store import load_table_scope
 from app.services.runtime.request_context import reset_request_user, set_request_user
 from app.services.runtime.user_scope import normalize_user_id
 from app.core.config import get_settings
@@ -65,6 +68,10 @@ _TEMPLATE_REPAIR_ERROR_MARKERS = (
     "ORA-00979",
     "ORA-01722",
 )
+_IN_SCOPE_CLINICAL_TOKEN_RE = re.compile(
+    r"(환자|입원|퇴원|중환자|icu|진단|질환|약물|처방|검사|재입원|사망률|코호트|admission|patient|diagnos|disease|medication|prescription|lab|readmission|mortality)",
+    re.IGNORECASE,
+)
 
 
 class OneShotRequest(BaseModel):
@@ -87,11 +94,507 @@ class RunRequest(BaseModel):
     user_role: str | None = None
 
 
+class QueryAnswerRequest(BaseModel):
+    question: str
+    sql: str = ""
+    columns: list[str] = []
+    rows: list[list[Any]] = []
+    total_rows: int | None = None
+    fetched_rows: int | None = None
+
+
+def _normalize_table_name(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text.lower()
+
+
+def _load_available_table_names(user_id: str | None = None) -> list[str]:
+    names: list[str] = []
+    try:
+        selected = load_table_scope(user_id, include_global_fallback=True)
+    except Exception:
+        selected = []
+    for item in selected:
+        name = _normalize_table_name(str(item))
+        if name:
+            names.append(name)
+    if names:
+        return sorted(list(dict.fromkeys(names)))
+
+    path = project_path("var/metadata/schema_catalog.json")
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    tables = data.get("tables", {}) if isinstance(data, dict) else {}
+    if not isinstance(tables, dict):
+        return []
+    for table_name in tables.keys():
+        name = _normalize_table_name(str(table_name))
+        if name:
+            names.append(name)
+    return sorted(list(dict.fromkeys(names)))
+
+
+def _looks_like_in_scope_clinical_question(question: str, tables: list[str]) -> bool:
+    q = str(question or "").strip().lower()
+    if not q:
+        return False
+    if _IN_SCOPE_CLINICAL_TOKEN_RE.search(q):
+        return True
+    # Avoid false out-of-scope blocks when user explicitly references connected tables.
+    for table_name in tables[:64]:
+        token = str(table_name or "").strip().lower()
+        if token and token in q:
+            return True
+    return False
+
+
+def _normalize_text_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text in items:
+            continue
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _with_answer_opening(text: str, *, kind: str = "default") -> str:
+    body = str(text or "").strip()
+    opening = "요청하신 내용을 반영해 먼저 핵심부터 정리해드릴게요."
+    if kind == "scope":
+        opening = "요청해주신 질문 기준으로 현재 조회 가능 범위를 먼저 안내드릴게요."
+    elif kind == "result":
+        opening = "요청하신 질문과 조회 결과를 바탕으로 핵심부터 정리해드릴게요."
+    if not body:
+        return opening
+    if body.startswith(("요청하신", "요청해주신", "말씀해주신", "아래는")):
+        return body
+    return f"{opening}\n{body}"
+
+
+def _llm_scope_guidance(question: str, user_id: str | None) -> dict[str, Any] | None:
+    q = str(question or "").strip()
+    if not q:
+        return None
+    settings = get_settings()
+    tables = _load_available_table_names(user_id)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a scope-gate for a clinical text-to-sql/sql-to-plot assistant. "
+                "Decide whether the user's question is in scope for currently connected clinical tables. "
+                "Return JSON only with keys: in_scope, reason, guidance, options, example_inputs. "
+                "If out of scope (non-clinical topic or asks data not present in connected tables), "
+                "set in_scope=false and provide concise Korean guidance. "
+                "options must be 2-4 short alternative questions. "
+                "example_inputs must be 1-3 concrete Korean examples. "
+                "If in_scope=true, keep reason short and guidance/options/example_inputs empty."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "service_scope": "임상연구용 text-to-sql/sql-to-plot",
+                    "question": q,
+                    "available_tables": tables[:24],
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        client = LLMClient()
+        response = client.chat(
+            messages=messages,
+            model=settings.planner_model or settings.expert_model,
+            max_tokens=max(180, min(420, int(getattr(settings, "llm_max_output_tokens_clarifier", settings.llm_max_output_tokens)))),
+            expect_json=True,
+        )
+        _add_llm_cost(response.get("usage", {}), "scope_guard")
+        parsed = extract_json_object(str(response.get("content") or ""))
+    except Exception:
+        return None
+
+    if bool(parsed.get("in_scope")):
+        return None
+    # LLM scope gating can occasionally over-block in-scope clinical questions.
+    # If question clearly looks clinical or references connected tables, keep pipeline running.
+    if _looks_like_in_scope_clinical_question(q, tables):
+        return None
+    reason = str(parsed.get("reason") or "").strip()
+    guidance = str(parsed.get("guidance") or "").strip()
+    options = _normalize_text_list(parsed.get("options"), limit=4)
+    example_inputs = _normalize_text_list(parsed.get("example_inputs"), limit=3)
+    table_preview = ", ".join(tables[:8])
+    if table_preview and table_preview not in reason:
+        reason = (
+            f"{reason} 현재 연결된 테이블 예시: {table_preview}."
+            if reason
+            else f"현재 연결된 테이블 예시: {table_preview}."
+        )
+    if not guidance:
+        guidance = "현재 연결된 임상 데이터 범위에서 다시 질문해 주세요."
+    if not options:
+        if tables:
+            options = [f"{name} 기준으로 건수 추이를 보여줘" for name in tables[:3]]
+        else:
+            options = ["현재 연결된 임상 데이터 기준으로 다시 질문할게요."]
+    if not example_inputs:
+        if tables:
+            example_inputs = [f"{tables[0]} 테이블에서 최근 1년 추이를 보여줘"]
+        else:
+            example_inputs = ["현재 연결된 임상 데이터에서 조회 가능한 질문 예시를 알려줘"]
+    return {
+        "mode": "clarify",
+        "question": question,
+        "clarification": {
+            "reason": reason,
+            "question": guidance,
+            "options": options,
+            "example_inputs": example_inputs,
+        },
+    }
+
+
+def _fallback_oneshot_assistant_message(question: str, payload: dict[str, Any]) -> str:
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode == "clarify":
+        clarification = payload.get("clarification") if isinstance(payload.get("clarification"), dict) else {}
+        prompt = str(clarification.get("question") or "").strip() or "질문 범위를 조금 더 좁혀주세요."
+        reason = str(clarification.get("reason") or "").strip()
+        lines = [prompt]
+        if reason:
+            lines.append(f"이유: {reason}")
+        options = _normalize_text_list(clarification.get("options"), limit=4)
+        if options:
+            lines.append(f"선택 예시: {', '.join(options)}")
+        examples = _normalize_text_list(clarification.get("example_inputs"), limit=2)
+        if examples:
+            lines.append(f"입력 예: {' / '.join(examples)}")
+        return "\n".join(lines)
+    if mode == "demo":
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        parts: list[str] = []
+        summary_text = str(result.get("summary") or "").strip()
+        if summary_text:
+            parts.append(summary_text if summary_text.endswith(".") else f"{summary_text}.")
+        else:
+            parts.append("데모 캐시 결과를 가져왔어요.")
+        preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+        row_count = preview.get("row_count")
+        if isinstance(row_count, int):
+            parts.append(f"미리보기로 {row_count}행을 보여드렸어요.")
+        source = str(result.get("source") or "").strip()
+        if source:
+            parts.append(f"데모 캐시(source: {source}) 기반입니다.")
+        return " ".join(parts).strip()
+    base = "요청하신 내용을 바탕으로 SQL을 준비했어요. 실행하면 결과를 가져올게요."
+    final = payload.get("final") if isinstance(payload.get("final"), dict) else {}
+    risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
+    local_risk_score = final.get("risk_score")
+    if local_risk_score is None:
+        local_risk_score = risk.get("risk")
+    local_risk_intent = str(risk.get("intent") or "read").strip()
+    risk_label = (
+        f"위험도 {local_risk_score}({local_risk_intent})로 평가되었어요."
+        if local_risk_score is not None
+        else ""
+    )
+    return " ".join([base, risk_label]).strip()
+
+
+def _llm_oneshot_assistant_message(question: str, payload: dict[str, Any]) -> str | None:
+    mode = str(payload.get("mode") or "").strip().lower()
+    context: dict[str, Any] = {
+        "mode": mode,
+        "question": str(question or "").strip(),
+    }
+    if mode == "clarify":
+        clarification = payload.get("clarification") if isinstance(payload.get("clarification"), dict) else {}
+        context["clarification"] = {
+            "reason": str(clarification.get("reason") or "").strip(),
+            "question": str(clarification.get("question") or "").strip(),
+            "options": _normalize_text_list(clarification.get("options"), limit=4),
+            "example_inputs": _normalize_text_list(clarification.get("example_inputs"), limit=3),
+        }
+    elif mode == "demo":
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+        context["result"] = {
+            "summary": str(result.get("summary") or "").strip(),
+            "source": str(result.get("source") or "").strip(),
+            "row_count": preview.get("row_count"),
+            "columns": (preview.get("columns") or [])[:10] if isinstance(preview.get("columns"), list) else [],
+        }
+    else:
+        final = payload.get("final") if isinstance(payload.get("final"), dict) else {}
+        risk = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
+        context["sql"] = str(final.get("final_sql") or payload.get("sql") or "").strip()[:1200]
+        context["risk_score"] = final.get("risk_score") if final.get("risk_score") is not None else risk.get("risk")
+        context["risk_intent"] = str(risk.get("intent") or "read").strip()
+        used_tables = final.get("used_tables")
+        context["used_tables"] = used_tables[:8] if isinstance(used_tables, list) else []
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "너는 임상연구용 text-to-sql 서비스의 채팅 응답 작성기다. "
+                "JSON으로 들어온 mode/question/context를 읽고 사용자에게 보여줄 최종 문장만 작성하라. "
+                "질문 언어를 따라라. "
+                "mode=clarify면 현재 서비스 범위를 짧게 설명하고, 왜 조회가 어려운지, 어떻게 다시 질문하면 좋은지 안내하라. "
+                "mode=advanced/demo면 현재 단계(예: SQL 생성 완료, 실행 필요)를 자연스럽게 알려라. "
+                "과장/추측 금지. "
+                "출력은 평문 2~4문장만 작성하고 Markdown/번호/불릿/JSON은 금지한다."
+            ),
+        },
+        {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+    ]
+    try:
+        settings = get_settings()
+        client = LLMClient()
+        response = client.chat(
+            messages=messages,
+            model=settings.planner_model or settings.expert_model,
+            max_tokens=max(
+                140,
+                min(320, int(getattr(settings, "llm_max_output_tokens_clarifier", settings.llm_max_output_tokens))),
+            ),
+            expect_json=False,
+        )
+        _add_llm_cost(response.get("usage", {}), "oneshot_message")
+        text = re.sub(r"\n{3,}", "\n\n", str(response.get("content") or "").strip())
+        return text or None
+    except Exception:
+        return None
+
+
+def _attach_oneshot_assistant_message(question: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    text = _llm_oneshot_assistant_message(question, payload)
+    if not text:
+        text = _fallback_oneshot_assistant_message(question, payload)
+    mode = str(payload.get("mode") or "").strip().lower()
+    payload["assistant_message"] = _with_answer_opening(
+        text,
+        kind="scope" if mode == "clarify" else "default",
+    )
+    return payload
+
+
 def _resolve_user_id(user_id: str | None, user_name: str | None) -> str:
     normalized = normalize_user_id(user_id)
     if normalized:
         return normalized
     return normalize_user_id(user_name)
+
+
+def _fallback_query_answer(*, total_rows: int | None, fetched_rows: int) -> str:
+    if total_rows is not None:
+        return f"쿼리를 실행했고 전체 결과는 {total_rows}행입니다. 필요한 조건을 추가해 범위를 좁혀 보세요."
+    return f"쿼리를 실행했고 미리보기 {fetched_rows}행을 확인했습니다. 필요한 경우 COUNT(*)로 전체 건수를 확인하세요."
+
+
+_RESULT_OPENING_CLAUSE = "요청하신 질문 기준으로 핵심만 먼저 말씀드리면,"
+_RESULT_CLOSING_MENT = "더 궁금한 점이 있다면 추가 질문을 남겨 주세요."
+_OPENING_NOISE_PREFIXES = (
+    "요청하신 질문과 조회 결과를 바탕으로 핵심부터 정리해드릴게요.",
+    "요청하신 내용을 반영해 먼저 핵심부터 정리해드릴게요.",
+    "요청하신 내용을 바탕으로 핵심부터 정리해드릴게요.",
+    "요청해주신 질문 기준으로 현재 조회 가능 범위를 먼저 안내드릴게요.",
+    "요청하신 질문 기준으로 핵심만 먼저 말씀드릴게요.",
+    "요청하신 질문 기준으로 핵심만 먼저 말씀드리면,",
+)
+
+
+def _extract_core_summary_line(text: str) -> str:
+    body = re.sub(r"\s+", " ", str(text or "").strip())
+    if not body:
+        return ""
+
+    for prefix in _OPENING_NOISE_PREFIXES:
+        if body.startswith(prefix):
+            body = body[len(prefix):].strip()
+            break
+
+    body = re.sub(r"^\s*(요약|핵심 결과)\s*:\s*", "", body, flags=re.IGNORECASE)
+    body = body.lstrip("-• ").strip()
+    if not body:
+        return ""
+
+    first = re.split(r"(?<=[.!?])\s+", body, maxsplit=1)[0].strip()
+    if not first:
+        return ""
+    if first[-1] not in ".!?":
+        first = f"{first}."
+    return first
+
+
+def _compose_result_answer(text: str) -> str:
+    summary = _extract_core_summary_line(text)
+    if not summary:
+        summary = "결과 요약을 생성하지 못했습니다."
+    if summary.startswith(_RESULT_OPENING_CLAUSE):
+        summary = summary[len(_RESULT_OPENING_CLAUSE):].strip()
+    if summary.endswith(_RESULT_CLOSING_MENT):
+        summary = summary[: -len(_RESULT_CLOSING_MENT)].strip()
+    return f"{_RESULT_OPENING_CLAUSE} {summary} {_RESULT_CLOSING_MENT}"
+
+
+def _fallback_followup_suggestions(question: str, columns: list[str]) -> list[str]:
+    suggestions: list[str] = []
+    q = str(question or "").lower()
+    cols = [str(col or "").lower() for col in (columns or [])]
+
+    def push(text: str) -> None:
+        value = str(text or "").strip()
+        if not value or value in suggestions:
+            return
+        suggestions.append(value)
+
+    if "진단" in q or "diagnos" in q or any("icd" in col for col in cols):
+        push("상위 10개 진단을 보여줘")
+        push("진단별 환자 수를 성별로 나눠 보여줘")
+        push("진단 추이를 월별로 보여줘")
+    elif "icu" in q or "재원" in q or any("stay" in col for col in cols):
+        push("ICU 재원일수 분포를 구간별로 보여줘")
+        push("ICU 재원 상위 10명을 보여줘")
+        push("연령대별 ICU 평균 재원일수를 보여줘")
+    elif "입원" in q or "admission" in q:
+        push("입원 건수를 월별 추이로 보여줘")
+        push("입원 환자의 평균 재원기간을 보여줘")
+        push("입원 유형별 환자 수를 보여줘")
+
+    if any("date" in col or "time" in col for col in cols):
+        push("기간별 추이를 보여줘")
+    if any("gender" in col for col in cols):
+        push("성별 분포를 보여줘")
+    if any("age" in col for col in cols):
+        push("연령대별 분포를 보여줘")
+
+    if not suggestions:
+        push("같은 조건에서 상위 10개를 보여줘")
+        push("같은 조건을 월별 추이로 보여줘")
+        push("성별로 나눠서 다시 보여줘")
+    return suggestions[:3]
+
+
+def _normalize_answer_preview(
+    *,
+    columns: list[str],
+    rows: list[list[Any]],
+    max_rows: int = 120,
+    max_cols: int = 20,
+) -> list[dict[str, Any]]:
+    safe_cols = [str(col).strip() for col in columns if str(col).strip()][:max_cols]
+    out: list[dict[str, Any]] = []
+    for raw in rows[:max_rows]:
+        if not isinstance(raw, list):
+            continue
+        item: dict[str, Any] = {}
+        for idx, col in enumerate(safe_cols):
+            value = raw[idx] if idx < len(raw) else None
+            if isinstance(value, (dict, list, tuple, set)):
+                item[col] = str(value)
+            else:
+                item[col] = value
+        out.append(item)
+    return out
+
+
+@router.post("/answer")
+def answer_query(req: QueryAnswerRequest):
+    ensure_budget_ok()
+    fetched_rows = int(req.fetched_rows or 0)
+    total_rows = int(req.total_rows) if req.total_rows is not None else None
+    fallback = _fallback_query_answer(total_rows=total_rows, fetched_rows=fetched_rows)
+    fallback_suggestions = _fallback_followup_suggestions(req.question, req.columns)
+    question = str(req.question or "").strip()
+    if not question:
+        return {
+            "answer": _compose_result_answer(fallback),
+            "source": "fallback",
+            "suggested_questions": fallback_suggestions,
+            "suggestions_source": "fallback",
+        }
+
+    preview_rows = _normalize_answer_preview(columns=req.columns, rows=req.rows)
+    payload = {
+        "question": question,
+        "sql": str(req.sql or "").strip()[:4000],
+        "total_rows": total_rows,
+        "fetched_rows": fetched_rows,
+        "columns": [str(col).strip() for col in req.columns[:20]],
+        "preview_rows": preview_rows,
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "너는 임상 SQL 결과 해석 및 후속 질문 추천 도우미다. "
+                "출력은 JSON만 허용되며 키는 answer, suggested_questions만 사용하라. "
+                "answer는 질문 언어를 따라 핵심 한 줄 요약 1문장으로만 작성한다. "
+                "한국어 answer는 반드시 '-습니다/입니다' 종결형 존댓말로 작성한다. "
+                "시작 멘트/마무리 멘트/불릿/번호/줄바꿈은 answer에 넣지 마라. "
+                "데이터에 없는 사실은 추측하지 말고 과장하지 마라. "
+                "suggested_questions는 자연어 후속 질문 정확히 3개 배열이다. "
+                "후속 질문은 현재 결과를 바탕으로 바로 분석 가능한 형태로 짧고 구체적으로 작성하라."
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    try:
+        settings = get_settings()
+        client = LLMClient()
+        response = client.chat(
+            messages=messages,
+            model=settings.expert_model,
+            max_tokens=max(180, min(420, int(getattr(settings, "llm_max_output_tokens_expert", settings.llm_max_output_tokens)))),
+            expect_json=True,
+        )
+        _add_llm_cost(response.get("usage", {}), "answer")
+        parsed = extract_json_object(str(response.get("content") or ""))
+        answer = re.sub(r"\n{3,}", "\n\n", str(parsed.get("answer") or "").strip())
+        suggested_questions = _normalize_text_list(parsed.get("suggested_questions"), limit=3)
+        if not suggested_questions:
+            suggested_questions = fallback_suggestions
+        if not answer:
+            return {
+                "answer": _compose_result_answer(fallback),
+                "source": "fallback",
+                "suggested_questions": suggested_questions,
+                "suggestions_source": "fallback",
+            }
+        return {
+            "answer": _compose_result_answer(answer),
+            "source": "llm",
+            "suggested_questions": suggested_questions,
+            "suggestions_source": "llm" if suggested_questions else "fallback",
+        }
+    except Exception:
+        return {
+            "answer": _compose_result_answer(fallback),
+            "source": "fallback",
+            "suggested_questions": fallback_suggestions,
+            "suggestions_source": "fallback",
+        }
 
 
 def _add_llm_cost(usage: dict[str, Any], stage: str) -> None:
@@ -196,6 +699,12 @@ def oneshot(req: OneShotRequest):
     status = "success"
     error_detail = None
     try:
+        scope_guidance = _llm_scope_guidance(req.question, user_id)
+        if scope_guidance:
+            payload = _attach_oneshot_assistant_message(req.question, scope_guidance)
+            qid = str(uuid.uuid4())
+            _QUERY_STORE[qid] = payload
+            return {"qid": qid, "payload": payload}
         payload = run_oneshot(
             req.question,
             translate=req.translate,
@@ -203,6 +712,7 @@ def oneshot(req: OneShotRequest):
             conversation=req.conversation,
             enable_clarification=settings.clarifier_enabled,
         )
+        payload = _attach_oneshot_assistant_message(req.question, payload)
         qid = str(uuid.uuid4())
         _QUERY_STORE[qid] = payload
         return {"qid": qid, "payload": payload}

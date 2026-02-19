@@ -249,6 +249,19 @@
       "last_used_at": 1771479470,
       "success_count": 1,
       "updated_at": 1771479470
+    },
+    {
+      "created_at": 1771509756,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "0e66ef1f787ae628c9dfa5cd3d3639cf92813637ec5ac022c452a4ce2d4bf956",
+      "failed_sql_sample": "SELECT age_group, COUNT(DISTINCT CASE WHEN icd.ICD_CODE LIKE 'I10%' AND icd.ICD_VERSION = 10 THEN icd.HADM_ID END) AS hypertension_count, COUNT(DISTINCT CASE WHEN icd.ICD_CODE LIKE 'I50%' AND icd.ICD_VERSION = 10 THEN icd.HADM_ID END) AS heart_disease_count FROM (SELECT SUBJECT_ID, HADM_ID, CASE WHEN ANCHOR_AGE < 20 THEN '0-19' WHEN ANCHOR_AGE BETWEEN 20 AND 39 THEN '20-39' WHEN ANCHOR_AGE BETWEEN 40 AND 59 THEN '40-59' WHEN ANCHOR_AGE BETWEEN 60 AND 79 THEN '60-79' ELSE '80+' END AS age_group F",
+      "fixed_sql": "SELECT age_group, COUNT(DISTINCT CASE WHEN icd.ICD_CODE LIKE 'I10%' AND icd.ICD_VERSION = 10 THEN icd.SUBJECT_ID END) AS hypertension_count, COUNT(DISTINCT CASE WHEN icd.ICD_CODE LIKE 'I50%' AND icd.ICD_VERSION = 10 THEN icd.SUBJECT_ID END) AS heart_disease_count FROM (SELECT SUBJECT_ID, CASE WHEN ANCHOR_AGE < 20 THEN '0-19' WHEN ANCHOR_AGE BETWEEN 20 AND 39 THEN '20-39' WHEN ANCHOR_AGE BETWEEN 40 AND 59 THEN '40-59' WHEN ANCHOR_AGE BETWEEN 60 AND 79 THEN '60-79' ELSE '80+' END AS age_group FROM PATIENTS) p JOIN DIAGNOSES_ICD icd ON p.SUBJECT_ID = icd.SUBJECT_ID GROUP BY age_group",
+      "fixed_sql_hash": "556289325c613196b3e54850064afe14da2e0dd2c266aa13d7ccb6034d5eadc2",
+      "hit_count": 0,
+      "id": "74b3dfad5f2d402e8573cd3988a3df03",
+      "last_used_at": 1771509756,
+      "success_count": 1,
+      "updated_at": 1771509756
     }
   ]
 }
