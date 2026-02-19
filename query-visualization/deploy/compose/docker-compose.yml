@@ -1,3 +1,5 @@
+name: query_visualization
+
 services:
   api:
     build:

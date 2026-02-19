@@ -1,4 +1,4 @@
-version: '3.8'
+name: text2sql
 
 services:
   api:
