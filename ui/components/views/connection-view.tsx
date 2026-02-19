@@ -20,6 +20,7 @@ import {
   Eye
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { useAuth } from "@/components/auth-provider"
 
 interface TableScope {
   id: string
@@ -51,14 +52,6 @@ interface TableScopeSettings {
   selected_ids: string[]
 }
 
-interface SaveConnectionResponse {
-  ok: boolean
-  metadata_synced?: boolean
-  owner?: string | null
-  tables?: number
-  reason?: string
-}
-
 interface TableCatalogResponse {
   owner?: string
   tables?: { name: string; schema?: string; columns?: number; primary_keys?: string[] }[]
@@ -76,8 +69,16 @@ const DEFAULT_TABLE_SCOPES: TableScope[] = [
 ]
 
 export function ConnectionView() {
+  const { user } = useAuth()
   const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const stateUser = (user?.id || user?.username || user?.name || "").trim()
+  const apiUrlWithUser = (path: string) => {
+    const base = apiUrl(path)
+    if (!stateUser) return base
+    const separator = base.includes("?") ? "&" : "?"
+    return `${base}${separator}user=${encodeURIComponent(stateUser)}`
+  }
   const getTableColumns = (width: number) => {
     if (width >= 1536) return 4
     if (width >= 1024) return 3
@@ -89,19 +90,22 @@ export function ConnectionView() {
   const [isTesting, setIsTesting] = useState(false)
   const [poolStatus, setPoolStatus] = useState<PoolStatus | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
-  const [isSaving, setIsSaving] = useState(false)
-  const [saveMessage, setSaveMessage] = useState<string | null>(null)
-  const [saveError, setSaveError] = useState<string | null>(null)
+  const [isConnectionSaving, setIsConnectionSaving] = useState(false)
+  const [connectionSaveMessage, setConnectionSaveMessage] = useState<string | null>(null)
+  const [connectionSaveError, setConnectionSaveError] = useState<string | null>(null)
+  const [isTableScopeSaving, setIsTableScopeSaving] = useState(false)
+  const [tableScopeSaveMessage, setTableScopeSaveMessage] = useState<string | null>(null)
+  const [tableScopeSaveError, setTableScopeSaveError] = useState<string | null>(null)
   const [tableColumns, setTableColumns] = useState(() =>
     typeof window === "undefined" ? 1 : getTableColumns(window.innerWidth)
   )
   const [tablePage, setTablePage] = useState(1)
   const [lastChecked, setLastChecked] = useState<Date | null>(null)
   const [connectionConfig, setConnectionConfig] = useState({
-    host: "mimic-iv.hospital.edu",
-    port: "5432",
-    database: "mimiciv",
-    username: "researcher_01",
+    host: "",
+    port: "1521",
+    database: "",
+    username: "",
     password: "",
     sslMode: "disable",
     defaultSchema: ""
@@ -122,7 +126,7 @@ export function ConnectionView() {
     setIsTesting(true)
     setStatusError(null)
     try {
-      const res = await fetch(apiUrl("/admin/oracle/pool/status"))
+      const res = await fetch(apiUrlWithUser("/admin/oracle/pool/status"))
       if (!res.ok) {
         throw new Error(await readError(res))
       }
@@ -146,8 +150,8 @@ export function ConnectionView() {
   const loadSettings = async () => {
     try {
       const [connectionRes, scopeRes, tablesRes] = await Promise.all([
-        fetch(apiUrl("/admin/settings/connection")),
-        fetch(apiUrl("/admin/settings/table-scope")),
+        fetch(apiUrlWithUser("/admin/settings/connection")),
+        fetch(apiUrlWithUser("/admin/settings/table-scope")),
         fetch(apiUrl("/admin/metadata/tables")),
       ])
       const fallbackSelected = new Set(
@@ -209,10 +213,28 @@ export function ConnectionView() {
     } catch {}
   }
 
-  const handleSaveSettings = async () => {
-    setIsSaving(true)
-    setSaveMessage(null)
-    setSaveError(null)
+  const handleSaveConnectionSettings = async () => {
+    const host = connectionConfig.host.trim()
+    const port = connectionConfig.port.trim()
+    const database = connectionConfig.database.trim()
+    const username = connectionConfig.username.trim()
+
+    if (!host || !port || !database || !username) {
+      setConnectionSaveError("호스트/포트/데이터베이스/사용자명은 필수 입력입니다.")
+      setConnectionSaveMessage(null)
+      return
+    }
+    if (host.toLowerCase() === "mimic-iv.hospital.edu") {
+      setConnectionSaveError("mimic-iv.hospital.edu 는 예시값입니다. 실제 Oracle 호스트를 입력해 주세요.")
+      setConnectionSaveMessage(null)
+      return
+    }
+
+    setIsConnectionSaving(true)
+    setConnectionSaveMessage(null)
+    setConnectionSaveError(null)
+    setTableScopeSaveMessage(null)
+    setTableScopeSaveError(null)
     try {
       const connectionPayload: ConnectionSettings = {
         host: connectionConfig.host,
@@ -223,52 +245,46 @@ export function ConnectionView() {
         sslMode: connectionConfig.sslMode,
         defaultSchema: connectionConfig.defaultSchema?.trim() || undefined,
       }
-      const tablePayload: TableScopeSettings = {
-        selected_ids: tableScopes.filter(t => t.selected).map(t => t.id),
-      }
-      const [connectionRes, scopeRes] = await Promise.all([
-        fetch(apiUrl("/admin/settings/connection"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(connectionPayload),
-        }),
-        fetch(apiUrl("/admin/settings/table-scope"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(tablePayload),
-        }),
-      ])
+      const connectionRes = await fetch(apiUrlWithUser("/admin/settings/connection"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(connectionPayload),
+      })
       if (!connectionRes.ok) {
         throw new Error(await readError(connectionRes))
       }
-      if (!scopeRes.ok) {
-        throw new Error(await readError(scopeRes))
-      }
-      let message = "설정이 저장되었습니다."
-      const connectionInfo: SaveConnectionResponse | null = await connectionRes.json().catch(() => null)
-      if (connectionInfo?.metadata_synced) {
-        const tableCount = typeof connectionInfo.tables === "number" ? connectionInfo.tables : null
-        const ownerLabel = connectionInfo.owner ? ` (${connectionInfo.owner})` : ""
-        message = tableCount !== null
-          ? `설정 저장 및 테이블 동기화 완료${ownerLabel}: ${tableCount}개`
-          : `설정 저장 및 테이블 동기화 완료${ownerLabel}`
-      } else if (connectionInfo?.metadata_synced === false) {
-        const reason = connectionInfo.reason ? ` - ${connectionInfo.reason}` : ""
-        message = `설정은 저장되었지만 테이블 동기화는 완료되지 않았습니다${reason}`
-      }
-      setSaveMessage(message)
+      setConnectionSaveMessage("연결 설정이 저장되었습니다.")
       await Promise.all([fetchPoolStatus(), loadSettings()])
     } catch (err: any) {
-      setSaveError(err?.message || "설정 저장에 실패했습니다.")
+      setConnectionSaveError(err?.message || "연결 설정 저장에 실패했습니다.")
     } finally {
-      setIsSaving(false)
+      setIsConnectionSaving(false)
     }
   }
 
-  const handleResetSettings = async () => {
-    setSaveMessage(null)
-    setSaveError(null)
-    await loadSettings()
+  const handleSaveTableScope = async () => {
+    setIsTableScopeSaving(true)
+    setTableScopeSaveMessage(null)
+    setTableScopeSaveError(null)
+    try {
+      const tablePayload: TableScopeSettings = {
+        selected_ids: tableScopes.filter(t => t.selected).map(t => t.id),
+      }
+      const scopeRes = await fetch(apiUrlWithUser("/admin/settings/table-scope"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(tablePayload),
+      })
+      if (!scopeRes.ok) {
+        throw new Error(await readError(scopeRes))
+      }
+      setTableScopeSaveMessage("테이블 스코프가 저장되었습니다.")
+      await loadSettings()
+    } catch (err: any) {
+      setTableScopeSaveError(err?.message || "테이블 스코프 저장에 실패했습니다.")
+    } finally {
+      setIsTableScopeSaving(false)
+    }
   }
 
   const toggleTable = (id: string) => {
@@ -290,7 +306,7 @@ export function ConnectionView() {
   useEffect(() => {
     fetchPoolStatus()
     loadSettings()
-  }, [])
+  }, [stateUser])
 
   useEffect(() => {
     const handleResize = () => {
@@ -390,7 +406,7 @@ export function ConnectionView() {
                   id="host" 
                   value={connectionConfig.host}
                   onChange={(e) => setConnectionConfig(prev => ({ ...prev, host: e.target.value }))}
-                  placeholder="localhost"
+                  placeholder="예: 152.70.37.240"
                 />
               </div>
               <div className="space-y-2">
@@ -399,7 +415,7 @@ export function ConnectionView() {
                   id="port" 
                   value={connectionConfig.port}
                   onChange={(e) => setConnectionConfig(prev => ({ ...prev, port: e.target.value }))}
-                  placeholder="5432"
+                  placeholder="1521"
                 />
               </div>
             </div>
@@ -409,7 +425,7 @@ export function ConnectionView() {
                 id="database" 
                 value={connectionConfig.database}
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, database: e.target.value }))}
-                placeholder="mimiciv"
+                placeholder="예: pdb1.subxxxx.oraclevcn.com"
               />
             </div>
             <div className="space-y-2">
@@ -418,7 +434,7 @@ export function ConnectionView() {
                 id="username" 
                 value={connectionConfig.username}
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, username: e.target.value }))}
-                placeholder="username"
+                placeholder="예: team9_user"
               />
             </div>
             <div className="space-y-2">
@@ -430,6 +446,16 @@ export function ConnectionView() {
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, password: e.target.value }))}
                 placeholder="••••••••"
               />
+            </div>
+            <div className="pt-2 flex items-center justify-end gap-3">
+              {(connectionSaveMessage || connectionSaveError) && (
+                <p className={cn("text-xs", connectionSaveError ? "text-destructive" : "text-primary")}>
+                  {connectionSaveError ?? connectionSaveMessage}
+                </p>
+              )}
+              <Button onClick={handleSaveConnectionSettings} disabled={isConnectionSaving || isTableScopeSaving}>
+                {isConnectionSaving ? "저장 중..." : "설정 저장"}
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -452,7 +478,7 @@ export function ConnectionView() {
                 </div>
                 <div>
                   <div className="font-medium text-foreground">Read-Only 모드</div>
-                  <div className="text-xs text-muted-foreground">SELECT 쿼리만 허용 (필수)</div>
+                  <div className="text-xs text-muted-foreground">SELECT/CTE 조회 쿼리만 허용 (항상 적용)</div>
                 </div>
               </div>
               <Switch 
@@ -468,21 +494,21 @@ export function ConnectionView() {
                 <CheckCircle2 className="w-4 h-4 text-primary mt-0.5" />
                 <div>
                   <div className="text-sm font-medium text-foreground">SQL Injection 방지</div>
-                  <div className="text-xs text-muted-foreground">파라미터화된 쿼리 강제 적용</div>
+                  <div className="text-xs text-muted-foreground">쓰기 키워드 및 비조회 SQL 실행 차단</div>
                 </div>
               </div>
               <div className="flex items-start gap-3 p-3 rounded-lg border border-border">
                 <CheckCircle2 className="w-4 h-4 text-primary mt-0.5" />
                 <div>
-                  <div className="text-sm font-medium text-foreground">쿼리 결과 제한</div>
-                  <div className="text-xs text-muted-foreground">최대 10,000개 행 반환</div>
+                  <div className="text-sm font-medium text-foreground">테이블 스코프 강제</div>
+                  <div className="text-xs text-muted-foreground">선택한 테이블 외 조회 차단</div>
                 </div>
               </div>
               <div className="flex items-start gap-3 p-3 rounded-lg border border-border">
                 <CheckCircle2 className="w-4 h-4 text-primary mt-0.5" />
                 <div>
                   <div className="text-sm font-medium text-foreground">타임아웃 설정</div>
-                  <div className="text-xs text-muted-foreground">쿼리 실행 30초 제한</div>
+                  <div className="text-xs text-muted-foreground">쿼리 실행 30초 제한 (서버 설정값 적용)</div>
                 </div>
               </div>
             </div>
@@ -558,43 +584,46 @@ export function ConnectionView() {
               </div>
             ))}
           </div>
-          {totalPages > 1 && (
-            <div className="mt-4 flex items-center justify-end gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setTablePage(prev => Math.max(1, prev - 1))}
-                disabled={tablePage <= 1}
-              >
-                이전
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setTablePage(prev => Math.min(totalPages, prev + 1))}
-                disabled={tablePage >= totalPages}
-              >
-                다음
-              </Button>
+          <div className="mt-4 border-t pt-4">
+            <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3">
+              <div className="min-w-0">
+                {(tableScopeSaveMessage || tableScopeSaveError) && (
+                  <span className={cn("text-xs", tableScopeSaveError ? "text-destructive" : "text-primary")}>
+                    {tableScopeSaveError ?? tableScopeSaveMessage}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center justify-center gap-2">
+                {totalPages > 1 && (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setTablePage(prev => Math.max(1, prev - 1))}
+                      disabled={tablePage <= 1}
+                    >
+                      이전
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setTablePage(prev => Math.min(totalPages, prev + 1))}
+                      disabled={tablePage >= totalPages}
+                    >
+                      다음
+                    </Button>
+                  </>
+                )}
+              </div>
+              <div className="flex items-center justify-end">
+                <Button onClick={handleSaveTableScope} disabled={isConnectionSaving || isTableScopeSaving}>
+                  {isTableScopeSaving ? "저장 중..." : "설정 저장"}
+                </Button>
+              </div>
             </div>
-          )}
+          </div>
         </CardContent>
       </Card>
-
-      {/* Save Button */}
-      <div className="flex items-center justify-end gap-3">
-        {(saveMessage || saveError) && (
-          <span className={cn("text-xs mr-auto", saveError ? "text-destructive" : "text-primary")}>
-            {saveError ?? saveMessage}
-          </span>
-        )}
-        <Button variant="outline" onClick={handleResetSettings} disabled={isSaving}>
-          취소
-        </Button>
-        <Button onClick={handleSaveSettings} disabled={isSaving}>
-          {isSaving ? "저장 중..." : "설정 저장"}
-        </Button>
-      </div>
     </div>
   )
 }

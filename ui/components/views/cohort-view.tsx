@@ -37,6 +37,7 @@ import {
   ChevronRight,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { useAuth } from "@/components/auth-provider"
 
 type TabType = "whatif" | "cohorts"
 
@@ -299,6 +300,16 @@ function buildCohortName(params: CohortParams) {
 }
 
 export function CohortView() {
+  const { user } = useAuth()
+  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
+  const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const cohortUser = (user?.id || user?.username || user?.name || "").trim()
+  const apiUrlWithUser = (path: string) => {
+    const base = apiUrl(path)
+    if (!cohortUser) return base
+    const separator = base.includes("?") ? "&" : "?"
+    return `${base}${separator}user=${encodeURIComponent(cohortUser)}`
+  }
   const [activeTab, setActiveTab] = useState<TabType>("whatif")
   const [isLoading, setIsLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -340,10 +351,11 @@ export function CohortView() {
     setError(null)
     setMessage(null)
     try {
-      const res = await fetch("/cohort/simulate", {
+      const res = await fetch(apiUrl("/cohort/simulate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          user: cohortUser || null,
           params: toApiParams(params),
           include_baseline: true,
         }),
@@ -373,11 +385,11 @@ export function CohortView() {
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [apiBaseUrl, cohortUser])
 
   const loadSavedCohorts = useCallback(async () => {
     try {
-      const res = await fetch("/cohort/saved")
+      const res = await fetch(apiUrlWithUser("/cohort/saved"))
       if (!res.ok) {
         return
       }
@@ -387,12 +399,12 @@ export function CohortView() {
     } catch {
       // Keep UI usable even when saved cohort loading fails.
     }
-  }, [])
+  }, [apiBaseUrl, cohortUser])
 
   useEffect(() => {
     void runSimulation(DEFAULT_PARAMS)
     void loadSavedCohorts()
-  }, [runSimulation, loadSavedCohorts])
+  }, [runSimulation, loadSavedCohorts, cohortUser])
 
   const handleRunSimulation = async () => {
     await runSimulation(currentParams)
@@ -418,10 +430,11 @@ export function CohortView() {
     setIsSqlLoading(true)
     setError(null)
     try {
-      const res = await fetch("/cohort/sql", {
+      const res = await fetch(apiUrl("/cohort/sql"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          user: cohortUser || null,
           params: toApiParams(currentParams),
         }),
       })
@@ -474,10 +487,11 @@ export function CohortView() {
     setError(null)
     setMessage(null)
     try {
-      const res = await fetch("/cohort/saved", {
+      const res = await fetch(apiUrl("/cohort/saved"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          user: cohortUser || null,
           name,
           params: toApiParams(currentParams),
           status: "active",
@@ -502,7 +516,7 @@ export function CohortView() {
     setError(null)
     setMessage(null)
     try {
-      const res = await fetch(`/cohort/saved/${cohortId}`, {
+      const res = await fetch(apiUrlWithUser(`/cohort/saved/${cohortId}`), {
         method: "DELETE",
       })
       if (!res.ok) {

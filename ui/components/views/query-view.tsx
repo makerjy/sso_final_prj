@@ -62,6 +62,7 @@ interface PreviewData {
   rows: any[][]
   row_count: number
   row_cap: number
+  total_count?: number | null
 }
 
 interface DemoResult {
@@ -208,10 +209,14 @@ const trimPreview = (preview?: PreviewData): PreviewData | undefined => {
   if (!preview) return preview
   const rows = Array.isArray(preview.rows) ? preview.rows : []
   const trimmedRows = rows.slice(0, MAX_PERSIST_ROWS)
+  const preservedRowCount =
+    typeof preview.row_count === "number" && Number.isFinite(preview.row_count)
+      ? preview.row_count
+      : trimmedRows.length
   return {
     ...preview,
     rows: trimmedRows,
-    row_count: trimmedRows.length,
+    row_count: preservedRowCount,
   }
 }
 
@@ -303,6 +308,15 @@ export function QueryView() {
   const chatUser = (user?.name || "김연구원").trim() || "김연구원"
   const chatUserRole = (user?.role || "연구원").trim() || "연구원"
   const chatHistoryUser = (user?.id || chatUser).trim() || chatUser
+  const apiUrlWithUser = (path: string) => {
+    const base = apiUrl(path)
+    if (!chatHistoryUser) return base
+    const separator = base.includes("?") ? "&" : "?"
+    return `${base}${separator}user=${encodeURIComponent(chatHistoryUser)}`
+  }
+  const pendingDashboardQueryKey = chatHistoryUser
+    ? `ql_pending_dashboard_query:${chatHistoryUser}`
+    : "ql_pending_dashboard_query"
   const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 45000) => {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -341,6 +355,7 @@ export function QueryView() {
   const [boardSaving, setBoardSaving] = useState(false)
   const [boardMessage, setBoardMessage] = useState<string | null>(null)
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false)
+  const [isPastQueriesDialogOpen, setIsPastQueriesDialogOpen] = useState(false)
   const [saveTitle, setSaveTitle] = useState("")
   const [saveFolderMode, setSaveFolderMode] = useState<"existing" | "new">("existing")
   const [saveFolderId, setSaveFolderId] = useState<string>("")
@@ -393,6 +408,11 @@ export function QueryView() {
   const previewRows = preview?.rows ?? []
   const previewRowCount = preview?.row_count ?? previewRows.length
   const previewRowCap = preview?.row_cap
+  const previewTotalCount =
+    typeof preview?.total_count === "number" && Number.isFinite(preview.total_count)
+      ? preview.total_count
+      : null
+  const effectiveTotalRows = previewTotalCount ?? previewRowCount
   const survivalChartData = buildSurvivalFromPreview(previewColumns, previewRows)
   const totalPatients = survivalChartData?.length
     ? Math.max(...survivalChartData.map((item) => item.atRisk)) || previewRowCount
@@ -862,6 +882,8 @@ export function QueryView() {
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
+  const latestVisibleTabs = useMemo(() => resultTabs.slice(0, 3), [resultTabs])
+  const pastQueryTabs = useMemo(() => resultTabs.slice(3), [resultTabs])
   const hasConversation =
     messages.length > 0 || Boolean(response) || Boolean(runResult) || query.trim().length > 0
   const shouldShowResizablePanels = showResults && isDesktopLayout
@@ -1325,7 +1347,7 @@ export function QueryView() {
   useEffect(() => {
     const loadQuestions = async () => {
       try {
-        const res = await fetchWithTimeout(apiUrl("/query/demo/questions"), {}, 15000)
+        const res = await fetchWithTimeout(apiUrlWithUser("/query/demo/questions"), {}, 15000)
         if (!res.ok) return
         const data = await res.json()
         if (Array.isArray(data?.questions) && data.questions.length) {
@@ -1334,7 +1356,7 @@ export function QueryView() {
       } catch {}
     }
     loadQuestions()
-  }, [])
+  }, [chatHistoryUser])
 
   const runQuery = async (questionText: string) => {
     const trimmed = questionText.trim()
@@ -1381,6 +1403,7 @@ export function QueryView() {
         body: JSON.stringify({
           question: trimmed,
           conversation,
+          user_id: chatHistoryUser,
           user_name: chatUser,
           user_role: chatUserRole,
         })
@@ -1516,7 +1539,7 @@ export function QueryView() {
   const loadDashboardFolders = async () => {
     setSaveFoldersLoading(true)
     try {
-      const res = await fetchWithTimeout(apiUrl("/dashboard/queries"), {}, 12000)
+      const res = await fetchWithTimeout(apiUrlWithUser("/dashboard/queries"), {}, 12000)
       if (!res.ok) throw new Error("failed to load folders")
       const data = await res.json()
       const folders = Array.isArray(data?.folders) ? data.folders : []
@@ -1609,7 +1632,8 @@ export function QueryView() {
 
     const category = folderName || deriveDashboardCategory(finalTitle)
     const metrics = [
-      { label: "행 수", value: String(previewRowCount ?? 0) },
+      { label: "행 수", value: String(effectiveTotalRows ?? 0) },
+      { label: "전체 행 수", value: previewTotalCount != null ? String(previewTotalCount) : "-" },
       { label: "컬럼 수", value: String(previewColumns.length) },
       { label: "ROW CAP", value: previewRowCap != null ? String(previewRowCap) : "-" },
     ]
@@ -1620,6 +1644,7 @@ export function QueryView() {
             rows: previewRows.slice(0, 50),
             row_count: previewRowCount ?? previewRows.length,
             row_cap: previewRowCap ?? null,
+            total_count: previewTotalCount,
           }
         : undefined
     const resolvedChartType: "line" | "bar" | "pie" = (() => {
@@ -1649,12 +1674,14 @@ export function QueryView() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          user: chatHistoryUser || null,
           question: finalTitle,
           sql: displaySql || currentSql,
           metadata: {
-            row_count: previewRowCount ?? 0,
+            row_count: effectiveTotalRows ?? 0,
             column_count: previewColumns.length,
             row_cap: previewRowCap ?? null,
+            total_count: previewTotalCount,
             summary: summary || "",
             mode: mode || "",
             entry: newEntry,
@@ -1698,6 +1725,7 @@ export function QueryView() {
   }) => {
     const body: Record<string, any> = {
       user_ack: true,
+      user_id: chatHistoryUser,
       user_name: chatUser,
       user_role: chatUserRole,
     }
@@ -1745,13 +1773,22 @@ export function QueryView() {
     }
 
     if (addAssistantMessage) {
+      const fetchedRows = Number(data.result?.row_count ?? 0)
+      const totalRows =
+        typeof data.result?.total_count === "number" && Number.isFinite(data.result.total_count)
+          ? data.result.total_count
+          : null
+      const resultSummaryText =
+        totalRows != null
+          ? `쿼리를 실행했어요. 전체 결과는 ${totalRows}행입니다.`
+          : `쿼리를 실행했어요. 미리보기로 ${fetchedRows}행을 가져왔습니다.`
       setMessages(prev => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
           content: appendSuggestions(
-            `쿼리를 실행했어요. 미리보기로 ${data.result?.row_count ?? 0}행을 가져왔습니다.`,
+            resultSummaryText,
             suggestions
           ),
           timestamp: new Date()
@@ -1799,8 +1836,11 @@ export function QueryView() {
   useEffect(() => {
     const runPendingDashboardQuery = async () => {
       if (typeof window === "undefined") return
-      const raw = localStorage.getItem("ql_pending_dashboard_query")
+      const raw =
+        localStorage.getItem(pendingDashboardQueryKey) ||
+        localStorage.getItem("ql_pending_dashboard_query")
       if (!raw) return
+      localStorage.removeItem(pendingDashboardQueryKey)
       localStorage.removeItem("ql_pending_dashboard_query")
 
       let parsed: { question?: string; sql?: string; chartType?: "line" | "bar" | "pie" } | null = null
@@ -1860,7 +1900,7 @@ export function QueryView() {
     return () => {
       window.removeEventListener("ql-open-query-view", onOpenQueryView)
     }
-  }, [])
+  }, [pendingDashboardQueryKey])
 
   const handleCopySql = async () => {
     if (!displaySql) return
@@ -1885,8 +1925,9 @@ export function QueryView() {
           })
           .join(",")
       )
-      .join("\\n")
-    const blob = new Blob([`${header}\\n${body}`], { type: "text/csv;charset=utf-8;" })
+      .join("\r\n")
+    // Use UTF-8 BOM + CRLF so Excel opens Korean text and row breaks correctly.
+    const blob = new Blob([`\uFEFF${header}\r\n${body}`], { type: "text/csv;charset=utf-8;" })
     const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
     a.href = url
@@ -1930,6 +1971,17 @@ export function QueryView() {
         }
       }
       return next
+    })
+  }
+
+  const handleActivateTab = (tabId: string, promote = false) => {
+    setActiveTabId(tabId)
+    if (!promote) return
+    setResultTabs((prev) => {
+      const idx = prev.findIndex((item) => item.id === tabId)
+      if (idx <= 0) return prev
+      const target = prev[idx]
+      return [target, ...prev.slice(0, idx), ...prev.slice(idx + 1)]
     })
   }
 
@@ -2086,11 +2138,11 @@ export function QueryView() {
             <div className="flex-1 overflow-y-auto p-4 pb-6 space-y-4">
               {resultTabs.length > 0 && (
                 <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                  {resultTabs.map((tab) => (
+                  {latestVisibleTabs.map((tab) => (
                     <button
                       key={tab.id}
                       type="button"
-                      onClick={() => setActiveTabId(tab.id)}
+                      onClick={() => handleActivateTab(tab.id)}
                       className={cn(
                         "inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs whitespace-nowrap",
                         activeTabId === tab.id ? "bg-secondary border-primary/30" : "bg-background"
@@ -2118,6 +2170,16 @@ export function QueryView() {
                       </span>
                     </button>
                   ))}
+                  {pastQueryTabs.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0"
+                      onClick={() => setIsPastQueriesDialogOpen(true)}
+                    >
+                      이전 쿼리 {pastQueryTabs.length}개
+                    </Button>
+                  )}
                 </div>
               )}
               <div className="flex flex-wrap items-center gap-2">
@@ -2275,13 +2337,8 @@ export function QueryView() {
                     </div>
                     <div className="flex items-center gap-2">
                       <Badge variant="secondary" className="text-xs">
-                        {previewColumns.length ? `${previewRowCount} rows` : "no results"}
+                        {previewColumns.length ? `${effectiveTotalRows} total` : "no results"}
                       </Badge>
-                      {previewRowCap != null && (
-                        <Badge variant="outline" className="text-[10px]">
-                          cap {previewRowCap}
-                        </Badge>
-                      )}
                       <Button
                         variant="outline"
                         size="sm"
@@ -2677,6 +2734,51 @@ export function QueryView() {
             <Button onClick={handleSaveToDashboard} disabled={boardSaving}>
               {boardSaving ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
               저장
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isPastQueriesDialogOpen} onOpenChange={setIsPastQueriesDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>이전 쿼리 목록</DialogTitle>
+            <DialogDescription>최근 3개를 제외한 이전 쿼리입니다. 선택하면 상단 탭으로 이동합니다.</DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-[55vh] space-y-2 overflow-y-auto">
+            {pastQueryTabs.length > 0 ? (
+              pastQueryTabs.map((tab) => (
+                <button
+                  key={`past-${tab.id}`}
+                  type="button"
+                  onClick={() => {
+                    handleActivateTab(tab.id, true)
+                    setIsPastQueriesDialogOpen(false)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm hover:bg-secondary/40"
+                >
+                  <span
+                    className={cn(
+                      "inline-block h-2 w-2 rounded-full shrink-0",
+                      tab.status === "pending" && "bg-yellow-500",
+                      tab.status === "success" && "bg-primary",
+                      tab.status === "error" && "bg-destructive"
+                    )}
+                  />
+                  <span className="truncate">{tab.question || "새 질문"}</span>
+                </button>
+              ))
+            ) : (
+              <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+                표시할 이전 쿼리가 없습니다.
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setIsPastQueriesDialogOpen(false)}>
+              닫기
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -51,6 +51,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useAuth } from "@/components/auth-provider"
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
@@ -167,6 +168,13 @@ const seedFolders: SavedFolder[] = [
   { id: "folder-icu", name: "ICU", tone: "amber" },
   { id: "folder-er", name: "응급실", tone: "rose" },
 ]
+
+const isLegacyDemoSeedQuery = (item: any) => {
+  const id = String(item?.id || "").trim()
+  const sql = String(item?.query || "").trim()
+  if (!id || !sql) return false
+  return ["1", "2", "3", "4"].includes(id) && /SELECT\s+\.\.\.\s+FROM/i.test(sql)
+}
 
 const makeFolderId = () => `folder-${Date.now()}`
 
@@ -312,6 +320,19 @@ function normalizeDashboardData(rawQueries: SavedQuery[], rawFolders: SavedFolde
 }
 
 export function DashboardView() {
+  const { user } = useAuth()
+  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
+  const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const dashboardUser = (user?.id || user?.username || user?.name || "").trim()
+  const apiUrlWithUser = (path: string) => {
+    const base = apiUrl(path)
+    if (!dashboardUser) return base
+    const separator = base.includes("?") ? "&" : "?"
+    return `${base}${separator}user=${encodeURIComponent(dashboardUser)}`
+  }
+  const pendingDashboardQueryKey = dashboardUser
+    ? `ql_pending_dashboard_query:${dashboardUser}`
+    : "ql_pending_dashboard_query"
   const [queries, setQueries] = useState<SavedQuery[]>([])
   const [folders, setFolders] = useState<SavedFolder[]>([])
   const [searchTerm, setSearchTerm] = useState("")
@@ -347,10 +368,10 @@ export function DashboardView() {
       setSaving(true)
     }
     try {
-      const res = await fetch("/dashboard/queries", {
+      const res = await fetch(apiUrlWithUser("/dashboard/queries"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queries: nextQueries, folders: nextFolders }),
+        body: JSON.stringify({ user: dashboardUser || null, queries: nextQueries, folders: nextFolders }),
       })
       if (!res.ok && !silent) {
         setError("결과 보드 저장에 실패했습니다.")
@@ -379,23 +400,42 @@ export function DashboardView() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch("/dashboard/queries")
+      const res = await fetch(apiUrlWithUser("/dashboard/queries"))
       if (!res.ok) {
         throw new Error("Failed to fetch dashboard queries.")
       }
       const payload = await res.json()
       const remoteQueries = Array.isArray(payload?.queries) ? payload.queries : []
       const remoteFolders = Array.isArray(payload?.folders) ? payload.folders : []
+      const cleanedRemoteQueries = remoteQueries.filter((item: any) => !isLegacyDemoSeedQuery(item))
+      const removedLegacyDemo = cleanedRemoteQueries.length !== remoteQueries.length
 
-      const usingFallback = remoteQueries.length === 0
-      const baseQueries = usingFallback ? savedQueries : remoteQueries
-      const baseFolders = usingFallback ? seedFolders : remoteFolders
+      const cleanedRemoteFolders = (() => {
+        if (!removedLegacyDemo) return remoteFolders
+        const usedFolderIds = new Set(
+          cleanedRemoteQueries
+            .map((item: any) => String(item?.folderId || "").trim())
+            .filter(Boolean)
+        )
+        return remoteFolders.filter((item: any) => {
+          const id = String(item?.id || "").trim()
+          const name = String(item?.name || "").trim()
+          if (!id) return false
+          if (usedFolderIds.has(id)) return true
+          const isSeedFolder = seedFolders.some((seed) => seed.id === id || seed.name === name)
+          return !isSeedFolder
+        })
+      })()
+
+      const useDemoFallback = cleanedRemoteQueries.length === 0 && Boolean(payload?.detail)
+      const baseQueries = useDemoFallback ? savedQueries : cleanedRemoteQueries
+      const baseFolders = useDemoFallback ? seedFolders : cleanedRemoteFolders
 
       const normalized = normalizeDashboardData(baseQueries, baseFolders)
       setQueries(normalized.queries)
       setFolders(normalized.folders)
 
-      if ((usingFallback && !payload?.detail) || normalized.changed) {
+      if (!useDemoFallback && (normalized.changed || removedLegacyDemo)) {
         persistDashboard(normalized.queries, normalized.folders, true)
       }
     } catch {
@@ -415,7 +455,7 @@ export function DashboardView() {
         window.clearTimeout(saveTimer.current)
       }
     }
-  }, [])
+  }, [dashboardUser])
 
   useEffect(() => {
     const existsActive =
@@ -922,7 +962,7 @@ export function DashboardView() {
       chartType: query.chartType,
       ts: Date.now(),
     }
-    localStorage.setItem("ql_pending_dashboard_query", JSON.stringify(payload))
+    localStorage.setItem(pendingDashboardQueryKey, JSON.stringify(payload))
     window.dispatchEvent(new Event("ql-open-query-view"))
   }
 

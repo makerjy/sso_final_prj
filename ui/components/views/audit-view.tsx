@@ -49,12 +49,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useAuth } from "@/components/auth-provider"
 
 interface AuditLog {
   id: string
   timestamp: string
   ts?: number
   user: {
+    id?: string | null
     name: string
     role: string
   }
@@ -78,13 +80,20 @@ interface AuditLog {
 interface AuditStats {
   total: number
   today: number
-  active_users: number
   success_rate: number
 }
 
 export function AuditView() {
+  const { user } = useAuth()
   const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
+  const auditUser = (user?.id || user?.username || user?.name || "").trim()
+  const apiUrlWithUser = (path: string) => {
+    const base = apiUrl(path)
+    if (!auditUser) return base
+    const separator = base.includes("?") ? "&" : "?"
+    return `${base}${separator}user=${encodeURIComponent(auditUser)}`
+  }
   const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 15000) => {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -102,7 +111,6 @@ export function AuditView() {
   const [searchTerm, setSearchTerm] = useState("")
   const [expandedLogs, setExpandedLogs] = useState<string[]>([])
   const [dateFilter, setDateFilter] = useState("all")
-  const [userFilter, setUserFilter] = useState("all")
   const [deletingLogId, setDeletingLogId] = useState<string | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [pendingDeleteLogId, setPendingDeleteLogId] = useState<string | null>(null)
@@ -120,7 +128,7 @@ export function AuditView() {
     setIsLoading(true)
     setLoadError(null)
     try {
-      const res = await fetchWithTimeout(apiUrl("/audit/logs?limit=500"))
+      const res = await fetchWithTimeout(apiUrlWithUser("/audit/logs?limit=500"))
       if (!res.ok) {
         throw new Error(await readError(res))
       }
@@ -138,7 +146,7 @@ export function AuditView() {
 
   useEffect(() => {
     fetchLogs()
-  }, [])
+  }, [auditUser])
 
   const toggleExpand = (id: string) => {
     setExpandedLogs(prev => 
@@ -170,13 +178,7 @@ export function AuditView() {
     const search = searchTerm.trim().toLowerCase()
     const matchesSearch = !search ||
       log.query.original.toLowerCase().includes(search) ||
-      log.query.sql.toLowerCase().includes(search) ||
-      log.user.name.toLowerCase().includes(search)
-
-    const role = (log.user.role || "").toLowerCase()
-    const matchesUser = userFilter === "all" ||
-      (userFilter === "researcher" && (role.includes("연구원") || role.includes("researcher"))) ||
-      (userFilter === "admin" && (role.includes("관리자") || role.includes("admin")))
+      log.query.sql.toLowerCase().includes(search)
 
     const tsMs = resolveTimestampMs(log)
     const now = Date.now()
@@ -197,7 +199,7 @@ export function AuditView() {
       return true
     })()
 
-    return matchesSearch && matchesUser && matchesDate
+    return matchesSearch && matchesDate
   })
 
   const derivedStats = (() => {
@@ -206,7 +208,6 @@ export function AuditView() {
     const todayDate = new Date().toDateString()
     let today = 0
     let success = 0
-    const users = new Set<string>()
     for (const log of logs) {
       const tsMs = resolveTimestampMs(log)
       if (tsMs && new Date(tsMs).toDateString() === todayDate) {
@@ -215,14 +216,10 @@ export function AuditView() {
       if (log.execution.status === "success") {
         success += 1
       }
-      if (log.user?.name) {
-        users.add(log.user.name)
-      }
     }
     return {
       total,
       today,
-      active_users: users.size,
       success_rate: total ? Math.round((success / total) * 1000) / 10 : 0,
     }
   })()
@@ -297,7 +294,7 @@ export function AuditView() {
     if (!logId || deletingLogId) return
     setDeletingLogId(logId)
     try {
-      const res = await fetchWithTimeout(apiUrl(`/audit/logs/${encodeURIComponent(logId)}`), {
+      const res = await fetchWithTimeout(apiUrlWithUser(`/audit/logs/${encodeURIComponent(logId)}`), {
         method: "DELETE",
       })
       if (!res.ok) {
@@ -356,13 +353,13 @@ export function AuditView() {
             <div className="relative flex-1 sm:max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input 
-                placeholder="질문 또는 사용자 검색..." 
+                placeholder="질문 또는 SQL 검색..." 
                 className="pl-9"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 sm:ml-auto">
               <Select value={dateFilter} onValueChange={setDateFilter}>
                 <SelectTrigger className="w-full sm:w-[140px]">
                   <Calendar className="w-4 h-4 mr-2" />
@@ -375,28 +372,16 @@ export function AuditView() {
                   <SelectItem value="month">최근 30일</SelectItem>
                 </SelectContent>
               </Select>
-              <Select value={userFilter} onValueChange={setUserFilter}>
-                <SelectTrigger className="w-full sm:w-[140px]">
-                  <User className="w-4 h-4 mr-2" />
-                  <SelectValue placeholder="사용자" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">전체 사용자</SelectItem>
-                  <SelectItem value="researcher">연구원</SelectItem>
-                  <SelectItem value="admin">관리자</SelectItem>
-                </SelectContent>
-              </Select>
             </div>
           </div>
         </CardContent>
       </Card>
 
       {/* Summary Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
         {[
           { label: "총 쿼리 수", value: derivedStats.total.toLocaleString(), icon: Database },
           { label: "오늘 실행", value: derivedStats.today.toLocaleString(), icon: Clock },
-          { label: "활성 사용자", value: derivedStats.active_users.toLocaleString(), icon: User },
           { label: "성공률", value: `${derivedStats.success_rate.toFixed(1)}%`, icon: CheckCircle2 },
         ].map((stat) => (
           <Card key={stat.label}>
