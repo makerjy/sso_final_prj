@@ -197,6 +197,58 @@
       "last_used_at": 1771462709,
       "success_count": 1,
       "updated_at": 1771462709
+    },
+    {
+      "created_at": 1771478736,
+      "error_signature": "ORA-03156",
+      "failed_sql_hash": "4a39ba0612b7d4ea104967e5f61803ab6d049abc538354094a35caebf9f4589b",
+      "failed_sql_sample": "SELECT EXTRACT(YEAR FROM a1.admittime) AS admit_year, \n       COUNT(DISTINCT a1.hadm_id) AS total_admissions, \n       COUNT(DISTINCT CASE WHEN EXISTS ( \n           SELECT 1 \n           FROM ADMISSIONS a2 \n           WHERE a2.subject_id = a1.subject_id \n             AND a2.admittime BETWEEN a1.dischtime AND a1.dischtime + INTERVAL '30' DAY \n             AND a2.hadm_id <> a1.hadm_id) \n           THEN a1.hadm_id END) AS readmissions_30d, \n       COUNT(DISTINCT CASE WHEN EXISTS ( \n           SELECT ",
+      "fixed_sql": "WITH aki_admissions AS (\n    SELECT a1.hadm_id, a1.subject_id, a1.admittime, a1.dischtime\n    FROM ADMISSIONS a1\n    JOIN DIAGNOSES_ICD d ON a1.hadm_id = d.hadm_id\n    WHERE d.icd_code LIKE 'N17%' AND d.icd_version = 10\n),\nreadmissions AS (\n    SELECT a1.hadm_id, a1.subject_id\n    FROM aki_admissions a1\n    WHERE EXISTS (\n        SELECT 1\n        FROM ADMISSIONS a2\n        WHERE a2.subject_id = a1.subject_id\n          AND a2.admittime BETWEEN a1.dischtime AND a1.dischtime + INTERVAL '30' DAY\n          AND a2.hadm_id <> a1.hadm_id\n    )\n)\nSELECT EXTRACT(YEAR FROM a1.admittime) AS admit_year,\n       COUNT(DISTINCT a1.hadm_id) AS total_admissions,\n       COUNT(DISTINCT r.hadm_id) AS readmissions_30d,\n       COUNT(DISTINCT r.hadm_id) / COUNT(DISTINCT a1.hadm_id) AS readmission_rate_30d\nFROM aki_admissions a1\nLEFT JOIN readmissions r ON a1.hadm_id = r.hadm_id\nGROUP BY EXTRACT(YEAR FROM a1.admittime)",
+      "fixed_sql_hash": "3e25761cb485a46a8458013bdd1eadded315881c00ff5899610cfd3f2428c6f8",
+      "hit_count": 0,
+      "id": "34dc133740da416cb72d6c9f00a5af51",
+      "last_used_at": 1771478736,
+      "success_count": 1,
+      "updated_at": 1771478736
+    },
+    {
+      "created_at": 1771478938,
+      "error_signature": "WHERE_REQUIRED",
+      "failed_sql_hash": "6f2e782e27233b8e19fbe9a53e0a7fb600d042682cc291ae7ddf4272216c48a8",
+      "failed_sql_sample": "SELECT * FROM SSO.__NOT_A_TABLE__",
+      "fixed_sql": "SELECT 1 FROM DUAL WHERE 1=0",
+      "fixed_sql_hash": "f5e5d15488c16aa508ed08ecfc6450c3faf21e869bbfcd9d7c0a876a92822934",
+      "hit_count": 0,
+      "id": "3330e27cb32a4f8e963ef407f3810ea6",
+      "last_used_at": 1771478938,
+      "success_count": 1,
+      "updated_at": 1771478938
+    },
+    {
+      "created_at": 1771479114,
+      "error_signature": "ORA-03156",
+      "failed_sql_hash": "cd5b34ce623a1f28cc6799b532f2ebfc5f7ea1aa1a886f0d5e7b3bf822fe0ce5",
+      "failed_sql_sample": "SELECT EXTRACT(YEAR FROM a1.dischtime) AS discharge_year, \n       COUNT(DISTINCT a1.hadm_id) AS total_aki_discharges, \n       COUNT(DISTINCT CASE WHEN EXISTS ( \n           SELECT 1 \n           FROM ADMISSIONS a2 \n           WHERE a2.subject_id = a1.subject_id \n             AND a2.admittime BETWEEN a1.dischtime AND a1.dischtime + INTERVAL '30' DAY \n             AND a2.hadm_id <> a1.hadm_id \n       ) THEN a1.hadm_id END) AS readmissions_within_30_days, \n       COUNT(DISTINCT CASE WHEN EXISTS ( \n  ",
+      "fixed_sql": "WITH aki_discharges AS (\n    SELECT a1.hadm_id, a1.subject_id, EXTRACT(YEAR FROM a1.dischtime) AS discharge_year\n    FROM ADMISSIONS a1\n    JOIN DIAGNOSES_ICD d ON a1.hadm_id = d.hadm_id\n    WHERE d.ICD_CODE LIKE 'N17%' AND d.ICD_VERSION = 10\n), readmissions AS (\n    SELECT a1.hadm_id, a1.subject_id\n    FROM ADMISSIONS a1\n    WHERE EXISTS (\n        SELECT 1\n        FROM ADMISSIONS a2\n        WHERE a2.subject_id = a1.subject_id\n          AND a2.admittime BETWEEN a1.dischtime AND a1.dischtime + INTERVAL '30' DAY\n          AND a2.hadm_id <> a1.hadm_id\n    )\n)\nSELECT ad.discharge_year,\n       COUNT(DISTINCT ad.hadm_id) AS total_aki_discharges,\n       COUNT(DISTINCT r.hadm_id) AS readmissions_within_30_days,\n       COUNT(DISTINCT r.hadm_id) / COUNT(DISTINCT ad.hadm_id) AS readmission_rate\nFROM aki_discharges ad\nLEFT JOIN readmissions r ON ad.hadm_id = r.hadm_id\nGROUP BY ad.discharge_year\nORDER BY ad.discharge_year",
+      "fixed_sql_hash": "64128a5728a343f06f37c599258ac863e214c967d5fd8e5b0708ea8ec46e7e38",
+      "hit_count": 0,
+      "id": "0a124d816b004646b0b153cfa38149c5",
+      "last_used_at": 1771479114,
+      "success_count": 1,
+      "updated_at": 1771479114
+    },
+    {
+      "created_at": 1771479470,
+      "error_signature": "ORA-03156",
+      "failed_sql_hash": "3101550b1a47bd6883911add482852907d83e9d893b0ef4679597b7889ff6994",
+      "failed_sql_sample": "SELECT EXTRACT(YEAR FROM a1.admittime) AS admit_year, \n       COUNT(DISTINCT a1.hadm_id) AS total_admissions, \n       COUNT(DISTINCT CASE WHEN EXISTS ( \n           SELECT 1 \n           FROM ADMISSIONS a2 \n           WHERE a2.subject_id = a1.subject_id \n             AND a2.admittime BETWEEN a1.dischtime AND a1.dischtime + INTERVAL '30' DAY \n             AND a2.hadm_id <> a1.hadm_id \n       ) THEN a1.hadm_id END) AS readmissions_30d, \n       COUNT(DISTINCT CASE WHEN EXISTS ( \n           SELECT 1 \n",
+      "fixed_sql": "WITH aki_admissions AS (\n    SELECT a1.hadm_id, a1.subject_id, a1.admittime, a1.dischtime\n    FROM ADMISSIONS a1\n    JOIN DIAGNOSES_ICD d ON a1.hadm_id = d.hadm_id\n    WHERE d.icd_code LIKE 'N17%' AND d.icd_version = 10\n),\nreadmissions AS (\n    SELECT a1.hadm_id, a1.subject_id\n    FROM aki_admissions a1\n    WHERE EXISTS (\n        SELECT 1\n        FROM ADMISSIONS a2\n        WHERE a2.subject_id = a1.subject_id\n          AND a2.admittime BETWEEN a1.dischtime AND a1.dischtime + INTERVAL '30' DAY\n          AND a2.hadm_id <> a1.hadm_id\n    )\n)\nSELECT EXTRACT(YEAR FROM a1.admittime) AS admit_year,\n       COUNT(DISTINCT a1.hadm_id) AS total_admissions,\n       COUNT(DISTINCT r.hadm_id) AS readmissions_30d,\n       COUNT(DISTINCT r.hadm_id) / COUNT(DISTINCT a1.hadm_id) AS readmission_rate_30d\nFROM aki_admissions a1\nLEFT JOIN readmissions r ON a1.hadm_id = r.hadm_id\nGROUP BY EXTRACT(YEAR FROM a1.admittime)\nORDER BY admit_year",
+      "fixed_sql_hash": "2a9042b5ed124461ae378dcefe46ad54578029be34f1a98dc6bcce7faa163fdf",
+      "hit_count": 0,
+      "id": "2da5501328ea40f7a73ae657d3976c41",
+      "last_used_at": 1771479470,
+      "success_count": 1,
+      "updated_at": 1771479470
     }
   ]
 }

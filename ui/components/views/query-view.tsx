@@ -301,7 +301,12 @@ const deserializeMessages = (messages: PersistedChatMessage[]): ChatMessage[] =>
 
 export function QueryView() {
   const { user, isHydrated: isAuthHydrated } = useAuth()
-  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
+  const runtimeLocalApiFallback =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+      ? "http://localhost:8001"
+      : ""
+  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || runtimeLocalApiFallback).replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
   // Keep visualization on same-origin rewrite path to avoid bypassing /visualize proxy.
   const vizUrl = (path: string) => path

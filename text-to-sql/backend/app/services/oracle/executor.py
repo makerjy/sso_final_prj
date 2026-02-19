@@ -22,6 +22,17 @@ def _sanitize_sql(sql: str) -> str:
     return sql.strip().rstrip(";")
 
 
+def _safe_close(resource: Any) -> None:
+    if resource is None:
+        return
+    try:
+        resource.close()
+    except Exception:
+        # A broken Oracle handle can raise during close(). Do not mask
+        # the original execution error with cleanup failures.
+        pass
+
+
 def _load_metadata_owner() -> str:
     path: Path = project_path("var/metadata/schema_catalog.json")
     if not path.exists():
@@ -104,7 +115,7 @@ def execute_sql(sql: str) -> dict[str, Any]:
                 try:
                     schema_cur.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {schema_name}")
                 finally:
-                    schema_cur.close()
+                    _safe_close(schema_cur)
 
             # Best-effort full result count for UI badges.
             total_count: int | None = None
@@ -117,7 +128,7 @@ def execute_sql(sql: str) -> dict[str, Any]:
             except Exception:
                 total_count = None
             finally:
-                count_cur.close()
+                _safe_close(count_cur)
 
             run_cur = conn.cursor()
             try:
@@ -132,7 +143,7 @@ def execute_sql(sql: str) -> dict[str, Any]:
                     "total_count": total_count,
                 }
             finally:
-                run_cur.close()
+                _safe_close(run_cur)
 
         try:
             return _run_once(session_schema, text)
@@ -167,4 +178,4 @@ def execute_sql(sql: str) -> dict[str, Any]:
             raise
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        conn.close()
+        _safe_close(conn)
