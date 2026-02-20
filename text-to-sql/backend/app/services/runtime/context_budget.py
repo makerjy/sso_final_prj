@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from typing import Any
+import json
 
 try:
     import tiktoken  # type: ignore
 except Exception:  # pragma: no cover
     tiktoken = None
+
+from app.core.paths import project_path
+
+
+_SCHEMA_TABLE_COUNT_CACHE: int | None = None
 
 
 def _active_table_scope_size() -> int:
@@ -22,6 +28,24 @@ def _active_table_scope_size() -> int:
         return len(selected)
     except Exception:
         return 0
+
+
+def _schema_table_count() -> int:
+    global _SCHEMA_TABLE_COUNT_CACHE
+    if _SCHEMA_TABLE_COUNT_CACHE is not None:
+        return _SCHEMA_TABLE_COUNT_CACHE
+    path = project_path("var/metadata/schema_catalog.json")
+    if not path.exists():
+        _SCHEMA_TABLE_COUNT_CACHE = 0
+        return 0
+    try:
+        schema_catalog = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        _SCHEMA_TABLE_COUNT_CACHE = 0
+        return 0
+    tables = schema_catalog.get("tables", {}) if isinstance(schema_catalog, dict) else {}
+    _SCHEMA_TABLE_COUNT_CACHE = len(tables) if isinstance(tables, dict) else 0
+    return _SCHEMA_TABLE_COUNT_CACHE
 
 
 def _count_tokens(text: str) -> int:
@@ -78,11 +102,24 @@ def trim_context_to_budget(context: Any, budget: int) -> Any:
     glossary = _rank_items(list(getattr(context, "glossary", [])))
 
     scope_size = _active_table_scope_size()
-    if scope_size > 0:
-        schema_ratio = 0.70 if scope_size >= 8 else 0.60
+    total_schema_tables = _schema_table_count()
+    broad_scope = (
+        scope_size > 0
+        and total_schema_tables > 0
+        and (scope_size / float(total_schema_tables)) >= 0.80
+    )
+    if broad_scope:
+        # If scope is effectively "all tables", allocate less to schema to reduce context bias.
+        quotas = {
+            "schemas": int(budget * 0.50),
+            "examples": int(budget * 0.28),
+            "glossary": int(budget * 0.14),
+        }
+    elif scope_size > 0:
+        schema_ratio = 0.62 if scope_size >= 8 else 0.58
         quotas = {
             "schemas": int(budget * schema_ratio),
-            "examples": int(budget * 0.18),
+            "examples": int(budget * 0.20),
             "glossary": int(budget * 0.10),
         }
     else:

@@ -13,8 +13,9 @@ TRANSLATE_SYSTEM_PROMPT = (
     "Translate Korean to concise English. Preserve medical terms, acronyms, "
     "table/column names, and code values as-is. "
     "Do not normalize or substitute categorical meanings. "
-    "For admission type semantics, preserve exact mapping: "
-    "응급->EMERGENCY, 긴급->URGENT, 예약/선택->ELECTIVE. "
+    "For explicit admission-type category semantics, preserve exact mapping: "
+    "응급->EMERGENCY, 긴급->URGENT, 예약/선택 입원->ELECTIVE. "
+    "Do not force this mapping when the source does not ask about admission type categories. "
     "If the source uses one category, never replace it with another. "
     "Return only the translation."
 )
@@ -34,13 +35,16 @@ def _enforce_admission_type_fidelity(source_ko: str, translated_en: str) -> str:
     if not source or not text:
         return text
 
-    # Only apply this guard for admission-related questions.
-    if "입원" not in source and "admission" not in source.lower():
-        return text
+    source_lower = source.lower()
+    source_compact = re.sub(r"\s+", "", source_lower)
 
     has_emergency_ko = "응급" in source
     has_urgent_ko = "긴급" in source
-    has_elective_ko = ("예약" in source) or ("선택" in source)
+    has_elective_ko = ("예약" in source) or ("선택입원" in source_compact)
+    has_admission_type_phrase = ("입원유형" in source_compact) or ("admissiontype" in source_compact)
+    has_admission_type_category = ("입원" in source) and (has_emergency_ko or has_urgent_ko or has_elective_ko)
+    if not (has_admission_type_phrase or has_admission_type_category):
+        return text
 
     # Preserve distinction between "응급(EMERGENCY)" and "긴급(URGENT)".
     if has_urgent_ko and not has_emergency_ko:

@@ -17,8 +17,6 @@ from app.services.agents.sql_error_parser import parse_sql_error
 from app.services.agents.sql_expert import repair_sql_after_error
 from app.services.agents.sql_error_templates import apply_sql_error_templates
 from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
-from app.services.budget_gate import ensure_budget_ok
-from app.services.cost_tracker import get_cost_tracker
 from app.services.logging_store.store import append_event, read_events
 from app.services.oracle.executor import execute_sql
 from app.services.policy.gate import precheck_sql
@@ -521,7 +519,6 @@ def _normalize_answer_preview(
 
 @router.post("/answer")
 def answer_query(req: QueryAnswerRequest):
-    ensure_budget_ok()
     fetched_rows = int(req.fetched_rows or 0)
     total_rows = int(req.total_rows) if req.total_rows is not None else None
     fallback = _fallback_query_answer(total_rows=total_rows, fetched_rows=fetched_rows)
@@ -598,13 +595,8 @@ def answer_query(req: QueryAnswerRequest):
 
 
 def _add_llm_cost(usage: dict[str, Any], stage: str) -> None:
-    settings = get_settings()
-    total_tokens = int(usage.get("total_tokens") or 0)
-    if settings.llm_cost_per_1k_tokens_krw > 0 and total_tokens > 0:
-        cost = int((total_tokens / 1000) * settings.llm_cost_per_1k_tokens_krw)
-        if cost <= 0:
-            cost = 1
-        get_cost_tracker().add_cost(cost, {"usage": usage, "stage": stage, "source": "llm"})
+    # Cost tracking is intentionally detached from the LLM execution path.
+    return None
 
 
 def _is_template_repair_candidate(
@@ -689,7 +681,6 @@ def _should_attempt_zero_result_repair(question: str, sql: str) -> bool:
 
 @router.post("/oneshot")
 def oneshot(req: OneShotRequest):
-    ensure_budget_ok()
     settings = get_settings()
     user_id = _resolve_user_id(req.user_id, req.user_name)
     user_token = set_request_user(user_id)
@@ -777,7 +768,6 @@ def get_query(qid: str):
 
 @router.post("/run")
 def run_query(req: RunRequest):
-    ensure_budget_ok()
     if not req.user_ack:
         raise HTTPException(status_code=400, detail="user_ack is required")
 
@@ -1004,8 +994,6 @@ def run_query(req: RunRequest):
                             pass
                 if row_cap and rows_returned >= row_cap:
                     status = "warning"
-                if settings.sql_run_cost_krw > 0:
-                    get_cost_tracker().add_cost(settings.sql_run_cost_krw, {"stage": "run"})
                 for pair in llm_repair_pairs:
                     saved_rule = upsert_learned_sql_fix(
                         failed_sql=pair.get("failed_sql") or "",

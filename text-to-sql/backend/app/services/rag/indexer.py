@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import Any
 import json
 
+from app.core.config import get_settings
 from app.services.rag.mongo_store import MongoStore
 from app.services.runtime.column_value_store import load_column_value_rows
+from app.services.runtime.diagnosis_map_store import load_diagnosis_icd_map
 
 
 def _load_json(path: Path) -> Any:
@@ -319,26 +321,29 @@ def _label_intent_docs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
     base = Path(metadata_dir)
+    settings = get_settings()
     schema_catalog = _load_json(base / "schema_catalog.json") or {"tables": {}}
     join_graph = _load_json(base / "join_graph.json") or {"edges": []}
     glossary_items = _load_jsonl(base / "glossary_docs.jsonl")
     glossary_items.extend(_load_jsonl(base / "external_rag_docs.jsonl"))
     example_items = _load_jsonl(base / "sql_examples.jsonl")
-    augmented_example_items = _load_jsonl(base / "sql_examples_augmented.jsonl")
-    if augmented_example_items:
-        seen_questions = {str(item.get("question") or "").strip() for item in example_items if isinstance(item, dict)}
-        for item in augmented_example_items:
-            if not isinstance(item, dict):
-                continue
-            question = str(item.get("question") or "").strip()
-            sql = str(item.get("sql") or "").strip()
-            if not question or not sql or question in seen_questions:
-                continue
-            example_items.append({"question": question, "sql": sql})
-            seen_questions.add(question)
+    if bool(getattr(settings, "sql_examples_include_augmented", False)):
+        augmented_path = Path(str(getattr(settings, "sql_examples_augmented_path", "")).strip() or "var/metadata/sql_examples_augmented.jsonl")
+        augmented_example_items = _load_jsonl(augmented_path)
+        if augmented_example_items:
+            seen_questions = {str(item.get("question") or "").strip() for item in example_items if isinstance(item, dict)}
+            for item in augmented_example_items:
+                if not isinstance(item, dict):
+                    continue
+                question = str(item.get("question") or "").strip()
+                sql = str(item.get("sql") or "").strip()
+                if not question or not sql or question in seen_questions:
+                    continue
+                example_items.append({"question": question, "sql": sql})
+                seen_questions.add(question)
     join_template_items = _load_jsonl(base / "join_templates.jsonl")
     sql_template_items = _load_jsonl(base / "sql_templates.jsonl")
-    diagnosis_map_items = _load_jsonl(base / "diagnosis_icd_map.jsonl")
+    diagnosis_map_items = load_diagnosis_icd_map()
     procedure_map_items = _load_jsonl(base / "procedure_icd_map.jsonl")
     label_intent_items = _load_jsonl(base / "label_intent_profiles.jsonl")
     column_value_items = load_column_value_rows()
@@ -370,3 +375,4 @@ def reindex(metadata_dir: str = "var/metadata") -> dict[str, int]:
         "sql_examples_docs": len(example_items),
         "join_templates_docs": len(join_template_items) + len(sql_template_items),
     }
+   

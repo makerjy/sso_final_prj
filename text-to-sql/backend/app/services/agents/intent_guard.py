@@ -44,6 +44,25 @@ _EXTREMA_INTENT_RE = re.compile(
     r"(가장\s*(많|적)|최대|최소|최고|최저|most|least|highest|lowest|max|min|top\s*1|bottom\s*1)",
     re.IGNORECASE,
 )
+_SERVICE_INTENT_RE = re.compile(
+    r"(진료과|서비스|과별|부서|department|service|curr_service|prev_service)",
+    re.IGNORECASE,
+)
+_ADMISSION_TYPE_INTENT_RE = re.compile(
+    r"(입원\s*유형|입원유형|admission\s*type|admission_type|emergency|urgent|elective)",
+    re.IGNORECASE,
+)
+_DIAGNOSIS_PROCEDURE_INTENT_RE = re.compile(
+    r"(진단|질환|병명|코드|icd|diagnos|procedure|시술|수술)",
+    re.IGNORECASE,
+)
+_MORTALITY_INTENT_RE = re.compile(r"(사망|mortality|death|deceased|expire)", re.IGNORECASE)
+_ICU_INTENT_RE = re.compile(r"(중환자실|\bicu\b)", re.IGNORECASE)
+_FIRST_ICU_INTENT_RE = re.compile(
+    r"(first\s+icu|first[-\s]*stay|initial\s+icu|index\s+icu|"
+    r"첫\s*icu|첫번째\s*icu|최초\s*icu|처음\s*icu|첫\s*중환자실|최초\s*중환자실|처음\s*중환자실)",
+    re.IGNORECASE,
+)
 
 
 def _intent_text_from_planner(planner_intent: dict[str, Any] | None) -> str:
@@ -194,6 +213,12 @@ def detect_intent_alignment_issues(
     monthly_intent = bool(_INTENT_MONTHLY_RE.search(intent_text))
     window_intent = bool(_WINDOW_INTENT_RE.search(intent_text))
     age_semantic_intent = _prefer_anchor_age_semantics(intent_text)
+    service_intent = bool(_SERVICE_INTENT_RE.search(intent_text))
+    admission_type_intent = bool(_ADMISSION_TYPE_INTENT_RE.search(intent_text))
+    diagnosis_or_procedure_intent = bool(_DIAGNOSIS_PROCEDURE_INTENT_RE.search(intent_text))
+    mortality_intent = bool(_MORTALITY_INTENT_RE.search(intent_text))
+    icu_intent = bool(_ICU_INTENT_RE.search(intent_text))
+    first_icu_intent = bool(_FIRST_ICU_INTENT_RE.search(intent_text))
     age_gender_extrema_intent = bool(
         _AGE_GROUP_INTENT_RE.search(intent_text)
         and _GENDER_INTENT_RE.search(intent_text)
@@ -242,6 +267,46 @@ def detect_intent_alignment_issues(
         )
         if not has_age_projection:
             issues.append("age_group_extrema_missing_age_projection")
+
+    if service_intent and not admission_type_intent and not diagnosis_or_procedure_intent:
+        has_services_ref = bool(re.search(r"\b(SERVICES|CURR_SERVICE|PREV_SERVICE)\b", upper, re.IGNORECASE))
+        if not has_services_ref:
+            issues.append("service_intent_without_services_reference")
+        has_diag_proc_ref = bool(re.search(r"\b(DIAGNOSES_ICD|PROCEDURES_ICD)\b", upper, re.IGNORECASE))
+        if has_diag_proc_ref and not has_services_ref:
+            issues.append("service_intent_mapped_to_diagnosis_or_procedure")
+
+    if admission_type_intent:
+        has_admission_type_ref = bool(re.search(r"\bADMISSION_TYPE\b", upper, re.IGNORECASE))
+        if not has_admission_type_ref:
+            issues.append("admission_type_intent_without_admission_type_reference")
+
+    if icu_intent and mortality_intent:
+        has_icustays_ref = bool(re.search(r"\bICUSTAYS\b", upper, re.IGNORECASE))
+        if not has_icustays_ref:
+            issues.append("icu_mortality_intent_without_icustays_reference")
+        has_hospital_expire_ref = bool(re.search(r"\bHOSPITAL_EXPIRE_FLAG\b", upper, re.IGNORECASE))
+        has_death_alignment = bool(
+            re.search(r"\bDEATHTIME\b", upper, re.IGNORECASE)
+            and re.search(r"\bINTIME\b", upper, re.IGNORECASE)
+            and re.search(r"\bOUTTIME\b", upper, re.IGNORECASE)
+        )
+        if has_hospital_expire_ref and not has_death_alignment:
+            issues.append("icu_mortality_mapped_to_hospital_expire_flag_only")
+
+    if icu_intent and not first_icu_intent:
+        has_first_icu_window = bool(
+            re.search(
+                r"ROW_NUMBER\s*\(\s*\)\s*OVER\s*\(\s*PARTITION\s+BY\s+[A-Za-z0-9_\.]*SUBJECT_ID\s+ORDER\s+BY\s+[A-Za-z0-9_\.]*INTIME",
+                upper,
+                re.IGNORECASE,
+            )
+        )
+        has_first_icu_ref = bool(re.search(r"\b(FIRST_ICU|RN_FIRST_ICU)\b", upper, re.IGNORECASE))
+        has_first_row_filter = bool(re.search(r"\bRN_FIRST_ICU\s*=\s*1\b", upper, re.IGNORECASE))
+        has_generic_rn_filter = bool(re.search(r"\bRN\s*=\s*1\b", upper, re.IGNORECASE))
+        if has_first_icu_window or has_first_icu_ref or has_first_row_filter or (has_generic_rn_filter and has_first_icu_window):
+            issues.append("first_icu_forced_without_intent")
 
     return issues
 

@@ -262,6 +262,23 @@
       "last_used_at": 1771509756,
       "success_count": 1,
       "updated_at": 1771509756
+    },
+    {
+      "created_at": 1771558874,
+      "error_signature": "ORA-03156",
+      "failed_sql_hash": "1c4082b778cc08f65e2ae90d0f62ef735445fc264b60b1c9d9e39cda194ff0e2",
+      "failed_sql_sample": "SELECT * FROM (SELECT d.LABEL, COUNT(*) AS cnt FROM LABEVENTS l JOIN D_LABITEMS d ON l.ITEMID = d.ITEMID WHERE d.LABEL IS NOT NULL GROUP BY d.LABEL ORDER BY cnt DESC) WHERE ROWNUM <= 10",
+      "fixed_sql": "SELECT * FROM (SELECT LABEL, cnt FROM (SELECT d.LABEL, COUNT(*) AS cnt FROM LABEVENTS l JOIN D_LABITEMS d ON l.ITEMID = d.ITEMID WHERE d.LABEL IS NOT NULL GROUP BY d.LABEL ORDER BY cnt DESC)) WHERE ROWNUM <= 10",
+      "fixed_sql_hash": "43c14d122597dccd8ae6aa76b1b11f6ac6077c862b987af9ff275edd29764d7b",
+      "hit_count": 3,
+      "id": "8d1b1e1be0054c27b0371e8d42c65f07",
+      "last_used_at": 1771559241,
+      "resolution_notes": [
+        "strip_rownum_before_top_n",
+        "wrap_top_n_rownum:10"
+      ],
+      "success_count": 1,
+      "updated_at": 1771558874
     }
   ]
 }

@@ -89,6 +89,7 @@ class Settings:
     planner_activation_mode: str
     planner_complexity_threshold: int
     planner_min_question_tokens: int
+    planner_required_gate_count: int
     translate_ko_to_en: bool
     demo_cache_always: bool
     oneshot_postprocess_enabled: bool
@@ -164,7 +165,7 @@ def load_settings() -> Settings:
             os.getenv("SQL_EXAMPLES_AUGMENTED_PATH"),
             "var/metadata/sql_examples_augmented.jsonl",
         ),
-        sql_examples_include_augmented=_bool(os.getenv("SQL_EXAMPLES_INCLUDE_AUGMENTED"), True),
+        sql_examples_include_augmented=_bool(os.getenv("SQL_EXAMPLES_INCLUDE_AUGMENTED"), False),
         sql_examples_exact_match_enabled=_bool(os.getenv("SQL_EXAMPLES_EXACT_MATCH_ENABLED"), False),
         sql_examples_exact_match_mode=_str(os.getenv("SQL_EXAMPLES_EXACT_MATCH_MODE"), "off"),
         llm_max_output_tokens=_int(os.getenv("LLM_MAX_OUTPUT_TOKENS"), 500),
@@ -181,6 +182,7 @@ def load_settings() -> Settings:
         planner_activation_mode=_str(os.getenv("PLANNER_ACTIVATION_MODE"), "complex_only"),
         planner_complexity_threshold=_int(os.getenv("PLANNER_COMPLEXITY_THRESHOLD"), 2),
         planner_min_question_tokens=_int(os.getenv("PLANNER_MIN_QUESTION_TOKENS"), 20),
+        planner_required_gate_count=_int(os.getenv("PLANNER_REQUIRED_GATE_COUNT"), 2),
         translate_ko_to_en=_bool(os.getenv("TRANSLATE_KO_TO_EN"), True),
         demo_cache_always=_bool(os.getenv("DEMO_CACHE_ALWAYS"), False),
         oneshot_postprocess_enabled=_bool(os.getenv("ONESHOT_POSTPROCESS_ENABLED"), True),
@@ -218,7 +220,7 @@ def load_settings() -> Settings:
         rag_hybrid_candidates=_int(os.getenv("RAG_HYBRID_CANDIDATES"), 20),
         rag_bm25_candidates=_int(os.getenv("RAG_BM25_CANDIDATES"), 50),
         rag_dense_candidates=_int(os.getenv("RAG_DENSE_CANDIDATES"), 50),
-        rag_bm25_max_docs=_int(os.getenv("RAG_BM25_MAX_DOCS"), 1500),
+        rag_bm25_max_docs=_int(os.getenv("RAG_BM25_MAX_DOCS"), 2500),
         mongo_uri=_str(os.getenv("MONGO_URI"), ""),
         mongo_db=_str(os.getenv("MONGO_DB"), "text_to_sql"),
         mongo_collection=_str(os.getenv("MONGO_COLLECTION"), "rag_docs"),

@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY text-to-sql/backend /app/backend
 COPY text-to-sql/var /app/var
+COPY text-to-sql/docs/query_visualization_eval_aside.jsonl /app/docs/query_visualization_eval_aside.jsonl
 
 ENV PYTHONPATH=/app/backend
 ENV LD_LIBRARY_PATH=/opt/oracle/instantclient

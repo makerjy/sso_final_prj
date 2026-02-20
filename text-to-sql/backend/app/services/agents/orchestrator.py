@@ -18,7 +18,6 @@ from app.services.agents.intent_guard import enforce_intent_alignment
 from app.services.agents.sql_planner import plan_query_intent
 from app.services.agents.sql_postprocess import postprocess_sql, recommend_postprocess_profile
 from app.services.agents.translator import contains_korean, translate_to_english
-from app.services.cost_tracker import get_cost_tracker
 from app.services.policy.gate import precheck_sql
 from app.services.runtime.context_builder import build_context_payload, build_context_payload_multi
 from app.services.runtime.context_budget import trim_context_to_budget
@@ -61,7 +60,7 @@ def _load_sql_examples_cache(path: str) -> dict[str, Any]:
     global _SQL_EXAMPLES_CACHE, _SQL_EXAMPLES_CACHE_PATH
     settings = get_settings()
     files: list[Path] = [Path(path)]
-    if bool(getattr(settings, "sql_examples_include_augmented", True)):
+    if bool(getattr(settings, "sql_examples_include_augmented", False)):
         augmented_path = Path(str(getattr(settings, "sql_examples_augmented_path", "var/metadata/sql_examples_augmented.jsonl")))
         if str(augmented_path) not in {str(item) for item in files}:
             files.append(augmented_path)
@@ -176,11 +175,8 @@ def _lookup_demo_cache(cache: dict[str, Any], question: str) -> dict[str, Any] |
 
 
 def _add_llm_cost(usage: dict[str, Any], stage: str) -> None:
-    settings = get_settings()
-    total_tokens = int(usage.get("total_tokens") or 0)
-    if settings.llm_cost_per_1k_tokens_krw > 0 and total_tokens > 0:
-        cost = int(math.ceil((total_tokens / 1000) * settings.llm_cost_per_1k_tokens_krw))
-        get_cost_tracker().add_cost(cost, {"usage": usage, "stage": stage, "source": "llm"})
+    # Cost tracking is intentionally detached from the LLM execution path.
+    return None
 
 
 def _is_deferred_table_scope_error(exc: HTTPException) -> bool:
@@ -458,7 +454,7 @@ def _decide_planner_usage(
     if has_long_question:
         reasons.append("long_question")
 
-    required_gate_count = 1
+    required_gate_count = max(1, min(3, int(getattr(settings, "planner_required_gate_count", 2))))
     should_run_planner = gate_count >= required_gate_count
     return should_run_planner, {
         "enabled": should_run_planner,

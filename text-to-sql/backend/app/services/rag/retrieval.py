@@ -29,6 +29,7 @@ class CandidateContext:
 
 _RAG_STORE_HAS_DOCS: bool | None = None
 _LOCAL_DOC_CACHE: dict[str, list[dict[str, Any]]] | None = None
+_SCHEMA_TABLE_SET_CACHE: set[str] | None = None
 
 
 def _store_has_docs(store: MongoStore) -> bool:
@@ -187,8 +188,12 @@ def _build_local_doc_cache() -> dict[str, list[dict[str, Any]]]:
 
     settings = get_settings()
     example_items = _load_jsonl(base / "sql_examples.jsonl")
-    if bool(getattr(settings, "sql_examples_include_augmented", True)):
-        example_items.extend(_load_jsonl(base / "sql_examples_augmented.jsonl"))
+    if bool(getattr(settings, "sql_examples_include_augmented", False)):
+        augmented_path = Path(
+            str(getattr(settings, "sql_examples_augmented_path", "")).strip()
+            or str(base / "sql_examples_augmented.jsonl")
+        )
+        example_items.extend(_load_jsonl(augmented_path))
     for idx, item in enumerate(example_items):
         question = str(item.get("question") or "").strip()
         sql = str(item.get("sql") or "").strip()
@@ -324,6 +329,22 @@ _YEAR_SEMANTIC_QUERY_RE = re.compile(
 )
 _ANCHOR_YEAR_GROUP_TEXT_RE = re.compile(r"\banchor[_\s]*year[_\s]*group\b", re.IGNORECASE)
 _ANCHOR_AGE_TEXT_RE = re.compile(r"\banchor[_\s]*age\b", re.IGNORECASE)
+_LACTATE_SEMANTIC_TEXT_RE = re.compile(r"(?:lactate|lactic\s*acid|젖산|락테이트)", re.IGNORECASE)
+_ICU_SEMANTIC_TEXT_RE = re.compile(r"(?:\bicu\b|중환자실)", re.IGNORECASE)
+_MORTALITY_SEMANTIC_TEXT_RE = re.compile(r"(?:mortality|death|deceased|expire|사망|사망률)", re.IGNORECASE)
+_FIRST_ICU_QUERY_RE = re.compile(
+    r"(first\s+icu|first[-\s]*stay|initial\s+icu|index\s+icu|"
+    r"first[_\s]*careunit|"
+    r"첫\s*icu|첫번째\s*icu|최초\s*icu|처음\s*icu|첫\s*중환자실|최초\s*중환자실|처음\s*중환자실|"
+    r"첫\s*careunit|최초\s*careunit|처음\s*careunit)",
+    re.IGNORECASE,
+)
+_FIRST_ICU_DOC_RE = re.compile(
+    r"(first_icu|rn_first_icu|row_number\s*\(\s*\)\s*over\s*\(\s*partition\s+by\s+[a-z0-9_\.]*subject_id\s+order\s+by\s+[a-z0-9_\.]*intime|"
+    r"first\s+icu|first[-\s]*stay|first_careunit|"
+    r"첫\s*icu|첫\s*중환자실|최초\s*icu|최초\s*중환자실|처음\s*icu|처음\s*중환자실)",
+    re.IGNORECASE,
+)
 _AGE_INTENT_YEAR_GROUP_PENALTY = 0.55
 _AGE_INTENT_ANCHOR_AGE_BOOST = 1.15
 _AGE_INTENT_MIXED_ANCHOR_WEIGHT = 0.92
@@ -385,6 +406,149 @@ def _suppress_anchor_year_group_hits_for_age_intent(
         filtered.append(hit)
     # Keep original list as fallback when every candidate was filtered out.
     return filtered or hits
+
+
+def _query_mentions_lactate(question: str) -> bool:
+    return bool(_LACTATE_SEMANTIC_TEXT_RE.search(str(question or "")))
+
+
+def _query_mentions_first_icu(question: str) -> bool:
+    return bool(_FIRST_ICU_QUERY_RE.search(str(question or "")))
+
+
+def _query_is_icu_mortality_intent(question: str) -> bool:
+    text = str(question or "")
+    if not text:
+        return False
+    return bool(_ICU_SEMANTIC_TEXT_RE.search(text) and _MORTALITY_SEMANTIC_TEXT_RE.search(text))
+
+
+def _is_lactate_example_doc(*, text: str, metadata: dict[str, Any]) -> bool:
+    source_type = str(metadata.get("type") or "").strip().lower()
+    if source_type != "example":
+        return False
+    return bool(_LACTATE_SEMANTIC_TEXT_RE.search(str(text or "")))
+
+
+def _is_first_icu_example_doc(*, text: str, metadata: dict[str, Any]) -> bool:
+    source_type = str(metadata.get("type") or "").strip().lower()
+    if source_type != "example":
+        return False
+    return bool(_FIRST_ICU_DOC_RE.search(str(text or "")))
+
+
+def _is_first_icu_template_doc(*, text: str, metadata: dict[str, Any]) -> bool:
+    source_type = str(metadata.get("type") or "").strip().lower()
+    if source_type != "template":
+        return False
+    return bool(_FIRST_ICU_DOC_RE.search(str(text or "")))
+
+
+def _is_first_icu_glossary_doc(*, text: str, metadata: dict[str, Any]) -> bool:
+    source_type = str(metadata.get("type") or "").strip().lower()
+    if source_type not in {"glossary", "table_profile", "column_value"}:
+        return False
+    merged = " ".join(
+        [
+            str(text or ""),
+            str(metadata.get("term") or ""),
+            str(metadata.get("table") or ""),
+            str(metadata.get("column") or ""),
+        ]
+    )
+    return bool(_FIRST_ICU_DOC_RE.search(merged))
+
+
+def _suppress_lactate_example_hits_for_non_lactate_intent(
+    question: str,
+    hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not hits or _query_mentions_lactate(question):
+        return hits
+    filtered: list[dict[str, Any]] = []
+    for hit in hits:
+        metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+        text = str(hit.get("text") or "")
+        if _is_lactate_example_doc(text=text, metadata=metadata):
+            continue
+        filtered.append(hit)
+    return filtered
+
+
+def _suppress_first_icu_example_hits_for_non_first_icu_intent(
+    question: str,
+    hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not hits or _query_mentions_first_icu(question):
+        return hits
+    filtered: list[dict[str, Any]] = []
+    for hit in hits:
+        metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+        text = str(hit.get("text") or "")
+        if _is_first_icu_example_doc(text=text, metadata=metadata):
+            continue
+        filtered.append(hit)
+    return filtered
+
+
+def _suppress_first_icu_template_hits_for_non_first_icu_intent(
+    question: str,
+    hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not hits or _query_mentions_first_icu(question):
+        return hits
+    filtered: list[dict[str, Any]] = []
+    for hit in hits:
+        metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+        text = str(hit.get("text") or "")
+        if _is_first_icu_template_doc(text=text, metadata=metadata):
+            continue
+        filtered.append(hit)
+    return filtered
+
+
+def _suppress_first_icu_glossary_hits_for_non_first_icu_intent(
+    question: str,
+    hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not hits or _query_mentions_first_icu(question):
+        return hits
+    filtered: list[dict[str, Any]] = []
+    for hit in hits:
+        metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+        text = str(hit.get("text") or "")
+        if _is_first_icu_glossary_doc(text=text, metadata=metadata):
+            continue
+        filtered.append(hit)
+    return filtered
+
+
+def _is_hospital_expire_proxy_doc(*, text: str, metadata: dict[str, Any]) -> bool:
+    source_type = str(metadata.get("type") or "").strip().lower()
+    if source_type not in {"example", "template", "glossary", "column_value", "table_profile"}:
+        return False
+    merged = str(text or "").upper()
+    if "HOSPITAL_EXPIRE_FLAG" not in merged:
+        return False
+    # ICU mortality should be aligned to ICU stay timing, not hospital-expire flag alone.
+    has_icu_death_alignment = "DEATHTIME" in merged and ("INTIME" in merged or "OUTTIME" in merged)
+    return not has_icu_death_alignment
+
+
+def _suppress_hospital_expire_proxy_hits_for_icu_mortality(
+    question: str,
+    hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not hits or not _query_is_icu_mortality_intent(question):
+        return hits
+    filtered: list[dict[str, Any]] = []
+    for hit in hits:
+        metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+        text = str(hit.get("text") or "")
+        if _is_hospital_expire_proxy_doc(text=text, metadata=metadata):
+            continue
+        filtered.append(hit)
+    return filtered
 
 
 def _apply_age_semantic_retrieval_bias(
@@ -553,12 +717,17 @@ def _hybrid_search(
 
     mode = str(getattr(settings, "rag_retrieval_mode", "bm25_then_rerank") or "bm25_then_rerank").strip().lower()
     source_type = str((where or {}).get("type") or "").lower()
+    bm25_scan_cap = int(settings.rag_bm25_max_docs or 0)
+    if source_type == "column_value":
+        # Column-value docs are the largest metadata set; keep recall stable
+        # even when environment overrides a small global BM25 cap.
+        bm25_scan_cap = max(bm25_scan_cap, 2500)
 
     if mode in {"legacy", "hybrid_legacy"}:
         candidate_k = max(k, int(settings.rag_hybrid_candidates or k))
         lexical_docs = store.list_documents(
             where=where,
-            limit=max(candidate_k * 5, int(settings.rag_bm25_max_docs or 0)),
+            limit=max(candidate_k * 5, bm25_scan_cap),
         )
         bm25_hits = _bm25_rank(query, lexical_docs, k=candidate_k)
         vector_hits = store.search(query, k=candidate_k, where=where)
@@ -568,7 +737,7 @@ def _hybrid_search(
         dense_candidate_k = max(k, int(getattr(settings, "rag_dense_candidates", bm25_candidate_k) or bm25_candidate_k))
         lexical_docs = store.list_documents(
             where=where,
-            limit=max(bm25_candidate_k * 6, int(settings.rag_bm25_max_docs or 0)),
+            limit=max(bm25_candidate_k * 6, bm25_scan_cap),
         )
         bm25_hits = _bm25_rank(query, lexical_docs, k=bm25_candidate_k)
 
@@ -697,6 +866,79 @@ def _has_token(question: str, tokens: tuple[str, ...]) -> bool:
     return any(token in lowered or token in compact for token in tokens)
 
 
+_SERVICE_VALUE_TOKENS = (
+    "service", "department", "curr_service", "prev_service", "진료과", "서비스",
+    "내과", "외과", "신경과", "이비인후과", "정형외과", "산부인과", "심장외과", "흉부외과",
+    "과별", "부서",
+)
+_ADMISSION_TYPE_INTENT_TOKENS = (
+    "admission type", "admission_type", "입원유형", "입원 유형",
+    "응급", "긴급", "예약 입원", "선택 입원", "emergency", "urgent", "elective",
+)
+
+
+def _is_service_value_intent(question: str) -> bool:
+    return _has_token(question, _SERVICE_VALUE_TOKENS)
+
+
+def _is_admission_type_intent(question: str) -> bool:
+    return _has_token(question, _ADMISSION_TYPE_INTENT_TOKENS)
+
+
+def _is_service_column_value_hit(hit: dict[str, Any]) -> bool:
+    metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+    table = str(metadata.get("table") or "").strip().upper()
+    column = str(metadata.get("column") or "").strip().upper()
+    if table == "SERVICES" and column in {"CURR_SERVICE", "PREV_SERVICE"}:
+        return True
+    if table == "ADMISSIONS" and column == "ADMISSION_TYPE":
+        return True
+    text = str(hit.get("text") or "").upper()
+    if any(token in text for token in ("CURR_SERVICE", "PREV_SERVICE", "ADMISSION_TYPE", "진료과".upper(), "서비스".upper())):
+        return True
+    return False
+
+
+def _service_intent_hint_hit(question: str) -> dict[str, Any]:
+    if _is_admission_type_intent(question):
+        return {
+            "id": "service_intent::admission_type",
+            "text": (
+                "Service/admission-type intent hint: if the user explicitly asks admission-type categories, "
+                "use ADMISSIONS.ADMISSION_TYPE for grouping/filtering."
+            ),
+            "metadata": {
+                "type": "column_value",
+                "table": "ADMISSIONS",
+                "column": "ADMISSION_TYPE",
+                "struct_match": True,
+                "value_match": False,
+            },
+            "score": 1.0,
+        }
+
+    prev_requested = _has_token(
+        question,
+        ("prev service", "previous service", "prior service", "prev_service", "이전 진료과", "직전 진료과", "과거 진료과"),
+    )
+    target_column = "PREV_SERVICE" if prev_requested else "CURR_SERVICE"
+    return {
+        "id": f"service_intent::{target_column.lower()}",
+        "text": (
+            f"Service/department intent hint: use SERVICES.{target_column} for department stratification. "
+            "Do not reinterpret service intent as diagnosis/procedure grouping unless explicitly requested."
+        ),
+        "metadata": {
+            "type": "column_value",
+            "table": "SERVICES",
+            "column": target_column,
+            "struct_match": True,
+            "value_match": False,
+        },
+        "score": 1.0,
+    }
+
+
 def _detect_search_intent(question: str) -> dict[str, bool]:
     diagnosis_tokens = (
         "diagnosis", "diagnos", "disease", "icd", "질환", "진단", "병명", "코드",
@@ -709,8 +951,7 @@ def _detect_search_intent(question: str) -> dict[str, bool]:
         "admission type", "admission_type", "admission location", "discharge location",
         "insurance", "language", "race", "ethnicity", "marital status", "status code", "category code",
         "gender", "sex", "성별", "입원유형", "입원 유형", "퇴원 위치", "보험", "인종", "민족", "결혼 상태", "카테고리",
-        "service", "department", "curr_service", "prev_service", "진료과", "서비스", "내과", "외과", "신경과", "이비인후과",
-        "정형외과", "산부인과", "심장외과", "흉부외과",
+        *_SERVICE_VALUE_TOKENS,
     )
     label_intent_tokens = (
         "catheter", "dialysis", "hemodialysis", "device", "insert", "insertion", "placement",
@@ -736,10 +977,7 @@ def _resolve_context_limits(question: str, settings: Any) -> tuple[int, int]:
         templates_limit = 0
 
     # Pure categorical/value lookup questions benefit from fewer examples and no template noise.
-    service_value_intent = _has_token(
-        question,
-        ("service", "department", "curr_service", "prev_service", "진료과", "서비스", "내과", "외과"),
-    )
+    service_value_intent = _is_service_value_intent(question)
     if intent["column_value"] and not (intent["diagnosis"] or intent["procedure"] or intent["label_intent"]) and not service_value_intent:
         examples_limit = min(examples_limit, 1)
         templates_limit = 0
@@ -762,10 +1000,7 @@ def _compose_glossary_hits(
     local_label_hits: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     intent = _detect_search_intent(question)
-    service_value_intent = _has_token(
-        question,
-        ("service", "department", "curr_service", "prev_service", "진료과", "서비스", "내과", "외과"),
-    )
+    service_value_intent = _is_service_value_intent(question)
 
     diag_hits = _dedupe_hits(
         _merge_hits([local_map_hits, diagnosis_map_hits], k=max(rag_top_k, 3)),
@@ -836,6 +1071,11 @@ def _compose_glossary_hits(
                 or service_value_intent
             ),
         )
+    if service_value_intent:
+        col_hits = [hit for hit in col_hits if _is_service_column_value_hit(hit)]
+        if not col_hits:
+            col_hits = [_service_intent_hint_hit(question)]
+    col_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(question, col_hits)
 
     if not local_label_hits and not intent["label_intent"]:
         label_hits = []
@@ -1033,12 +1273,16 @@ def _build_label_intent_hits(question: str, *, k: int) -> list[dict[str, Any]]:
 
 def _filter_schema_hits(question: str, hits: list[dict[str, Any]], *, max_items: int) -> list[dict[str, Any]]:
     scoped_tables = {name.lower() for name in load_table_scope() if name}
+    broad_scope = _is_broad_table_scope(scoped_tables)
     scoped_limit = max_items
-    if scoped_tables:
+    if scoped_tables and not broad_scope:
         # When table scope is explicit, avoid truncating schema context to rag_top_k.
         # Keep at least one schema entry per scoped table (bounded for safety).
         scoped_limit = max(max_items, min(len(scoped_tables), 128))
-    deduped = _dedupe_hits(hits, max_items=max(scoped_limit, 6))
+    deduped = _dedupe_hits(hits, max_items=max(scoped_limit, max_items, 6))
+    if broad_scope:
+        # Full/near-full table scope: keep a bounded schema set without lexical over-filtering.
+        return deduped[:max_items]
     if scoped_tables:
         return deduped[:scoped_limit]
     return _filter_hits(
@@ -1080,6 +1324,9 @@ def build_candidate_context(question: str) -> CandidateContext:
         allow_fallback=False,
     )
     example_hits = _suppress_anchor_year_group_hits_for_age_intent(question, example_hits)
+    example_hits = _suppress_lactate_example_hits_for_non_lactate_intent(question, example_hits)
+    example_hits = _suppress_first_icu_example_hits_for_non_first_icu_intent(question, example_hits)
+    example_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(question, example_hits)
     if templates_limit > 0:
         template_hits = _hybrid_search(store, question, k=templates_limit, where={"type": "template"})
         template_hits = _dedupe_hits(template_hits, max_items=max(templates_limit * 2, templates_limit))
@@ -1092,6 +1339,8 @@ def build_candidate_context(question: str) -> CandidateContext:
             min_lexical_overlap=0.08,
             allow_fallback=False,
         )
+        template_hits = _suppress_first_icu_template_hits_for_non_first_icu_intent(question, template_hits)
+        template_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(question, template_hits)
     else:
         template_hits = []
     raw_glossary_hits = _dedupe_hits(
@@ -1099,15 +1348,21 @@ def build_candidate_context(question: str) -> CandidateContext:
         max_items=settings.rag_top_k,
     )
     raw_glossary_hits = _suppress_anchor_year_group_hits_for_age_intent(question, raw_glossary_hits)
+    raw_glossary_hits = _suppress_first_icu_glossary_hits_for_non_first_icu_intent(question, raw_glossary_hits)
+    raw_glossary_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(question, raw_glossary_hits)
     table_profile_hits = _dedupe_hits(
         _hybrid_search(store, question, k=settings.rag_top_k, where={"type": "table_profile"}),
         max_items=settings.rag_top_k,
     )
     table_profile_hits = _suppress_anchor_year_group_hits_for_age_intent(question, table_profile_hits)
+    table_profile_hits = _suppress_first_icu_glossary_hits_for_non_first_icu_intent(question, table_profile_hits)
+    table_profile_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(question, table_profile_hits)
     general_glossary_hits = _dedupe_hits(
         _merge_hits([raw_glossary_hits, table_profile_hits], k=max(settings.rag_top_k * 2, settings.rag_top_k)),
         max_items=max(settings.rag_top_k * 2, settings.rag_top_k),
     )
+    general_glossary_hits = _suppress_first_icu_glossary_hits_for_non_first_icu_intent(question, general_glossary_hits)
+    general_glossary_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(question, general_glossary_hits)
     diagnosis_map_hits = (
         _dedupe_hits(
             _hybrid_search(store, question, k=settings.rag_top_k, where={"type": "diagnosis_map"}),
@@ -1198,10 +1453,67 @@ def _schema_docs_for_tables(selected: set[str]) -> list[dict[str, Any]]:
     return docs
 
 
+def _schema_table_set() -> set[str]:
+    global _SCHEMA_TABLE_SET_CACHE
+    if _SCHEMA_TABLE_SET_CACHE is not None:
+        return set(_SCHEMA_TABLE_SET_CACHE)
+    base = project_path("var/metadata/schema_catalog.json")
+    if not base.exists():
+        _SCHEMA_TABLE_SET_CACHE = set()
+        return set()
+    try:
+        schema_catalog = json.loads(base.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        _SCHEMA_TABLE_SET_CACHE = set()
+        return set()
+    tables = schema_catalog.get("tables", {}) if isinstance(schema_catalog, dict) else {}
+    normalized = {
+        str(table_name).strip().lower()
+        for table_name in tables.keys()
+        if str(table_name).strip()
+    }
+    _SCHEMA_TABLE_SET_CACHE = normalized
+    return set(normalized)
+
+
+def _is_broad_table_scope(selected: set[str]) -> bool:
+    if not selected:
+        return False
+    all_tables = _schema_table_set()
+    if not all_tables:
+        return False
+    scoped = {name.lower() for name in selected if name.lower() in all_tables}
+    if not scoped:
+        return False
+    coverage = len(scoped) / float(len(all_tables))
+    return coverage >= 0.80
+
+
 def _apply_table_scope(schema_hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     selected = {name.lower() for name in load_table_scope() if name}
     if not selected:
         return schema_hits
+    if _is_broad_table_scope(selected):
+        # Full/near-full scope: avoid flooding all schema docs, but keep a stable schema baseline.
+        target = 12
+        deduped = _dedupe_hits(schema_hits, max_items=target)
+        if len(deduped) >= target:
+            return deduped[:target]
+        existing = {
+            str(hit.get("metadata", {}).get("table", "")).lower()
+            for hit in deduped
+            if str(hit.get("metadata", {}).get("table", "")).strip()
+        }
+        extras: list[dict[str, Any]] = []
+        for doc in _schema_docs_for_tables(selected):
+            table_name = str(doc.get("metadata", {}).get("table", "")).lower()
+            if table_name in existing:
+                continue
+            extras.append(doc)
+            if len(deduped) + len(extras) >= target:
+                break
+        combined = deduped + extras
+        return combined[:target] if combined else schema_hits
     filtered = [
         hit for hit in schema_hits
         if str(hit.get("metadata", {}).get("table", "")).lower() in selected
@@ -1256,6 +1568,9 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
         allow_fallback=False,
     )
     example_hits = _suppress_anchor_year_group_hits_for_age_intent(merged_query, example_hits)
+    example_hits = _suppress_lactate_example_hits_for_non_lactate_intent(merged_query, example_hits)
+    example_hits = _suppress_first_icu_example_hits_for_non_first_icu_intent(merged_query, example_hits)
+    example_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(merged_query, example_hits)
     if templates_limit > 0:
         template_hits = _merge_hits(
             [_hybrid_search(store, q, k=_per_query_k(templates_limit), where={"type": "template"}) for q in deduped],
@@ -1271,6 +1586,8 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
             min_lexical_overlap=0.08,
             allow_fallback=False,
         )
+        template_hits = _suppress_first_icu_template_hits_for_non_first_icu_intent(merged_query, template_hits)
+        template_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(merged_query, template_hits)
     else:
         template_hits = []
     raw_glossary_hits = _merge_hits(
@@ -1279,16 +1596,22 @@ def build_candidate_context_multi(questions: list[str]) -> CandidateContext:
     )
     raw_glossary_hits = _dedupe_hits(raw_glossary_hits, max_items=settings.rag_top_k)
     raw_glossary_hits = _suppress_anchor_year_group_hits_for_age_intent(merged_query, raw_glossary_hits)
+    raw_glossary_hits = _suppress_first_icu_glossary_hits_for_non_first_icu_intent(merged_query, raw_glossary_hits)
+    raw_glossary_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(merged_query, raw_glossary_hits)
     table_profile_hits = _merge_hits(
         [_hybrid_search(store, q, k=_per_query_k(settings.rag_top_k), where={"type": "table_profile"}) for q in deduped],
         k=settings.rag_top_k,
     )
     table_profile_hits = _dedupe_hits(table_profile_hits, max_items=settings.rag_top_k)
     table_profile_hits = _suppress_anchor_year_group_hits_for_age_intent(merged_query, table_profile_hits)
+    table_profile_hits = _suppress_first_icu_glossary_hits_for_non_first_icu_intent(merged_query, table_profile_hits)
+    table_profile_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(merged_query, table_profile_hits)
     general_glossary_hits = _dedupe_hits(
         _merge_hits([raw_glossary_hits, table_profile_hits], k=max(settings.rag_top_k * 2, settings.rag_top_k)),
         max_items=max(settings.rag_top_k * 2, settings.rag_top_k),
     )
+    general_glossary_hits = _suppress_first_icu_glossary_hits_for_non_first_icu_intent(merged_query, general_glossary_hits)
+    general_glossary_hits = _suppress_hospital_expire_proxy_hits_for_icu_mortality(merged_query, general_glossary_hits)
     if merged_intent["diagnosis"]:
         diagnosis_map_hits = _merge_hits(
             [_hybrid_search(store, q, k=_per_query_k(settings.rag_top_k), where={"type": "diagnosis_map"}) for q in deduped],

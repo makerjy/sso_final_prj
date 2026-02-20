@@ -113,6 +113,28 @@ _CATEGORICAL_REWRITE_INTENT_RE = re.compile(
     r"유형|종류|구분|상태|범주|코드|진료과|서비스)",
     re.IGNORECASE,
 )
+_SERVICE_STRATIFY_INTENT_RE = re.compile(
+    r"(진료과|서비스|과별|부서|department|service|curr_service|prev_service)",
+    re.IGNORECASE,
+)
+_ADMISSION_TYPE_QUERY_INTENT_RE = re.compile(
+    r"(입원\s*유형|입원유형|admission\s*type|admission_type|emergency|urgent|elective)",
+    re.IGNORECASE,
+)
+_DIAG_PROC_QUERY_INTENT_RE = re.compile(
+    r"(진단|질환|병명|코드|icd|diagnos|procedure|시술|수술)",
+    re.IGNORECASE,
+)
+_MORTALITY_QUERY_INTENT_RE = re.compile(
+    r"(사망|mortality|death|expire)",
+    re.IGNORECASE,
+)
+_ICU_QUERY_INTENT_RE = re.compile(r"(중환자실|\bicu\b)", re.IGNORECASE)
+_FIRST_ICU_INTENT_RE = re.compile(
+    r"(first\s+icu|first[-\s]*stay|initial\s+icu|index\s+icu|"
+    r"첫\s*icu|첫번째\s*icu|최초\s*icu|처음\s*icu|첫\s*중환자실|최초\s*중환자실|처음\s*중환자실)",
+    re.IGNORECASE,
+)
 _CATEGORICAL_EQ_LITERAL_RE = re.compile(
     r"(?P<ref>(?:[A-Za-z_][A-Za-z0-9_$#]*\.)?[A-Za-z_][A-Za-z0-9_$#]*)\s*=\s*'(?P<lit>[^']+)'",
     re.IGNORECASE,
@@ -2743,6 +2765,195 @@ def _rewrite_services_hadm_count_to_admissions_join(question: str, sql: str) -> 
     return rewritten, rules
 
 
+def _rewrite_service_mortality_query(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").strip().lower()
+    text = str(sql or "").strip()
+    if not text:
+        return sql, rules
+    if not _SERVICE_STRATIFY_INTENT_RE.search(q):
+        return sql, rules
+    if _ADMISSION_TYPE_QUERY_INTENT_RE.search(q):
+        return sql, rules
+    if _DIAG_PROC_QUERY_INTENT_RE.search(q):
+        return sql, rules
+    if not (_MORTALITY_QUERY_INTENT_RE.search(q) or _RATIO_INTENT_RE.search(q)):
+        return sql, rules
+
+    # Skip when SQL already references service columns correctly.
+    if re.search(r"\b(SERVICES|CURR_SERVICE|PREV_SERVICE)\b", text, re.IGNORECASE):
+        return sql, rules
+
+    # Rewrite only when explicit semantic drift is visible in SQL.
+    # Avoid broad canonical rewrites for merely incomplete drafts.
+    has_admission_type_ref = bool(re.search(r"\bADMISSION_TYPE\b", text, re.IGNORECASE))
+    has_diag_proc_ref = bool(re.search(r"\b(DIAGNOSES_ICD|PROCEDURES_ICD)\b", text, re.IGNORECASE))
+    if not (has_admission_type_ref or has_diag_proc_ref):
+        return sql, rules
+
+    prev_service_requested = bool(
+        re.search(r"(prev(?:ious)?\s*service|prior\s*service|prev_service|이전\s*진료과|직전\s*진료과|과거\s*진료과)", q, re.IGNORECASE)
+    )
+    service_col = "PREV_SERVICE" if prev_service_requested else "CURR_SERVICE"
+    icu_intent = bool(_ICU_QUERY_INTENT_RE.search(q))
+
+    if icu_intent:
+        rewritten = (
+            f"SELECT s.{service_col} AS service_group, "
+            "COUNT(DISTINCT a.HADM_ID) AS total_admissions, "
+            "COUNT(DISTINCT CASE WHEN a.DEATHTIME IS NOT NULL "
+            "AND i.INTIME IS NOT NULL AND i.OUTTIME IS NOT NULL "
+            "AND a.DEATHTIME BETWEEN i.INTIME AND i.OUTTIME THEN a.HADM_ID END) AS icu_deaths, "
+            f"ROUND(100 * COUNT(DISTINCT CASE WHEN a.DEATHTIME IS NOT NULL "
+            "AND i.INTIME IS NOT NULL AND i.OUTTIME IS NOT NULL "
+            "AND a.DEATHTIME BETWEEN i.INTIME AND i.OUTTIME THEN a.HADM_ID END) "
+            "/ NULLIF(COUNT(DISTINCT a.HADM_ID), 0), 2) AS icu_mortality_rate_pct "
+            "FROM SERVICES s "
+            "JOIN ADMISSIONS a ON a.HADM_ID = s.HADM_ID "
+            "JOIN ICUSTAYS i ON i.HADM_ID = a.HADM_ID AND i.SUBJECT_ID = a.SUBJECT_ID "
+            f"WHERE s.{service_col} IS NOT NULL "
+            f"GROUP BY s.{service_col} "
+            "ORDER BY icu_mortality_rate_pct DESC"
+        )
+        rules.append(f"service_mortality_rewrite:{service_col.lower()}:icu")
+        return rewritten, rules
+
+    rewritten = (
+        f"SELECT s.{service_col} AS service_group, "
+        "COUNT(DISTINCT a.HADM_ID) AS total_admissions, "
+        "COUNT(DISTINCT CASE WHEN a.DEATHTIME IS NOT NULL "
+        "AND (a.DISCHTIME IS NULL OR a.DEATHTIME <= a.DISCHTIME) THEN a.HADM_ID END) AS deaths, "
+        f"ROUND(100 * COUNT(DISTINCT CASE WHEN a.DEATHTIME IS NOT NULL "
+        "AND (a.DISCHTIME IS NULL OR a.DEATHTIME <= a.DISCHTIME) THEN a.HADM_ID END) "
+        "/ NULLIF(COUNT(DISTINCT a.HADM_ID), 0), 2) AS hospital_mortality_rate_pct "
+        "FROM SERVICES s "
+        "JOIN ADMISSIONS a ON a.HADM_ID = s.HADM_ID "
+        f"WHERE s.{service_col} IS NOT NULL "
+        f"GROUP BY s.{service_col} "
+        "ORDER BY hospital_mortality_rate_pct DESC"
+    )
+    rules.append(f"service_mortality_rewrite:{service_col.lower()}:hospital")
+    return rewritten, rules
+
+
+def _rewrite_icu_mortality_outcome_alignment(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").strip().lower()
+    text = str(sql or "").strip()
+    if not text:
+        return sql, rules
+    if not (_ICU_QUERY_INTENT_RE.search(q) and _MORTALITY_QUERY_INTENT_RE.search(q)):
+        return sql, rules
+    upper = text.upper()
+    if "ADMISSIONS" not in upper:
+        return sql, rules
+    span = _find_final_select_from_span(text)
+    if not span:
+        return sql, rules
+    core, select_idx, _ = span
+    final_query = core[select_idx:]
+    final_upper = final_query.upper()
+    if "HOSPITAL_EXPIRE_FLAG" not in final_upper:
+        return sql, rules
+    if "DEATHTIME" in final_upper and "INTIME" in final_upper and "OUTTIME" in final_upper:
+        return sql, rules
+
+    def _find_column_ref(fragment: str, column: str) -> str | None:
+        aliased = re.search(rf"\b([A-Za-z0-9_]+)\.{column}\b", fragment, re.IGNORECASE)
+        if aliased:
+            return f"{aliased.group(1)}.{column.upper()}"
+        if re.search(rf"\b{column}\b", fragment, re.IGNORECASE):
+            return column.upper()
+        return None
+
+    intime_ref = _find_column_ref(final_query, "INTIME")
+    outtime_ref = _find_column_ref(final_query, "OUTTIME")
+    if not (intime_ref and outtime_ref):
+        icu_alias = _find_table_alias(final_query, "ICUSTAYS")
+        if icu_alias:
+            intime_ref = f"{icu_alias}.INTIME"
+            outtime_ref = f"{icu_alias}.OUTTIME"
+        else:
+            # Avoid introducing invalid aliases when ICU timing columns are not available
+            # in the final query scope (e.g., hidden inside a CTE).
+            return sql, rules
+
+    adm_alias = _find_table_alias(final_query, "ADMISSIONS")
+    death_ref = f"{adm_alias}.DEATHTIME" if adm_alias else "DEATHTIME"
+    aligned_pred = (
+        f"{death_ref} IS NOT NULL "
+        f"AND {intime_ref} IS NOT NULL "
+        f"AND {outtime_ref} IS NOT NULL "
+        f"AND {death_ref} BETWEEN {intime_ref} AND {outtime_ref}"
+    )
+
+    case_pattern = re.compile(
+        rf"CASE\s+WHEN\s+(?:[A-Za-z0-9_]+\.)?HOSPITAL_EXPIRE_FLAG\s*=\s*1\s+THEN\s+1\s+ELSE\s+0\s+END",
+        re.IGNORECASE,
+    )
+    rewritten = case_pattern.sub(f"CASE WHEN {aligned_pred} THEN 1 ELSE 0 END", text)
+    rewritten = re.sub(
+        r"(?:[A-Za-z0-9_]+\.)?HOSPITAL_EXPIRE_FLAG\s*=\s*1",
+        aligned_pred,
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    if rewritten != text:
+        rules.append("icu_mortality_hospital_expire_to_deathtime_alignment")
+        return rewritten, rules
+    return text, rules
+
+
+def _rewrite_unrequested_first_icu_window(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").strip().lower()
+    text = str(sql or "").strip()
+    if not text:
+        return sql, rules
+    if _FIRST_ICU_INTENT_RE.search(q):
+        return sql, rules
+
+    if not re.search(r"\bICUSTAYS\b", text, re.IGNORECASE):
+        return sql, rules
+    if not re.search(r"\bROW_NUMBER\s*\(", text, re.IGNORECASE):
+        return sql, rules
+    if not re.search(
+        r"ROW_NUMBER\s*\(\s*\)\s*OVER\s*\(\s*PARTITION\s+BY\s+[A-Za-z0-9_\.]*SUBJECT_ID\s+ORDER\s+BY\s+[A-Za-z0-9_\.]*INTIME",
+        text,
+        re.IGNORECASE,
+    ):
+        return sql, rules
+    if not re.search(r"\b(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\b", text, re.IGNORECASE):
+        return sql, rules
+
+    rewritten = text
+    rewritten = re.sub(
+        r"\bWHERE\s+\(*\s*(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\s*\)*\s+AND\s+",
+        "WHERE ",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r"\bAND\s+\(*\s*(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\s*\)*",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r"\bWHERE\s+\(*\s*(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\s*\)*\s*(?=\bGROUP\b|\bORDER\b|\bHAVING\b|$)",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(r"\bWHERE\s*(?=\bGROUP\b|\bORDER\b|\bHAVING\b|$)", "", rewritten, flags=re.IGNORECASE)
+    rewritten = re.sub(r"\s{2,}", " ", rewritten).strip()
+
+    if rewritten != text:
+        rules.append("remove_unrequested_first_icu_filter")
+        return rewritten, rules
+    return text, rules
+
+
 def _rewrite_admissions_icd_count_grain(question: str, sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     q = str(question or "").lower()
@@ -3804,6 +4015,16 @@ def recommend_postprocess_profile(
             reasons.append("ratio_denominator_not_distinct_under_icd_join")
         if re.search(r"\bAVG\s*\(\s*(?:[A-Za-z0-9_]+\.)?HOSPITAL_EXPIRE_FLAG\s*\)", upper, re.IGNORECASE):
             reasons.append("mortality_avg_under_icd_join")
+
+    if _ICU_QUERY_INTENT_RE.search(q) and _MORTALITY_QUERY_INTENT_RE.search(q):
+        has_hospital_expire = bool(re.search(r"\bHOSPITAL_EXPIRE_FLAG\b", upper, re.IGNORECASE))
+        has_death_alignment = bool(
+            re.search(r"\bDEATHTIME\b", upper, re.IGNORECASE)
+            and re.search(r"\bINTIME\b", upper, re.IGNORECASE)
+            and re.search(r"\bOUTTIME\b", upper, re.IGNORECASE)
+        )
+        if has_hospital_expire and not has_death_alignment:
+            reasons.append("icu_mortality_outcome_misaligned")
 
     if re.search(r"\bJOIN\s+ICUSTAYS\b", upper):
         on_clause = re.search(r"\bJOIN\s+ICUSTAYS\b[\s\S]*?\bON\b([\s\S]*?)(?:\bJOIN\b|\bWHERE\b|\bGROUP\b|\bORDER\b|$)", text, re.IGNORECASE)
@@ -4872,7 +5093,16 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     mapped, map_rules = _apply_schema_mappings(sql)
     rules.extend(map_rules)
 
-    rewritten_date_cast, date_cast_rules = _rewrite_to_date_cast(mapped)
+    service_mortality_fixed, service_mortality_rules = _rewrite_service_mortality_query(q, mapped)
+    rules.extend(service_mortality_rules)
+
+    icu_mortality_fixed, icu_mortality_rules = _rewrite_icu_mortality_outcome_alignment(q, service_mortality_fixed)
+    rules.extend(icu_mortality_rules)
+
+    first_icu_fixed, first_icu_rules = _rewrite_unrequested_first_icu_window(q, icu_mortality_fixed)
+    rules.extend(first_icu_rules)
+
+    rewritten_date_cast, date_cast_rules = _rewrite_to_date_cast(first_icu_fixed)
     rules.extend(date_cast_rules)
 
     rewritten_extract_day, extract_day_rules = _rewrite_extract_day_diff(rewritten_date_cast)
@@ -5065,7 +5295,16 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     mapped, map_rules = _apply_schema_mappings(sql)
     rules.extend(map_rules)
 
-    micro_fixed, micro_rules = _ensure_microbiology_table(mapped)
+    service_mortality_fixed, service_mortality_rules = _rewrite_service_mortality_query(q, mapped)
+    rules.extend(service_mortality_rules)
+
+    icu_mortality_fixed, icu_mortality_rules = _rewrite_icu_mortality_outcome_alignment(q, service_mortality_fixed)
+    rules.extend(icu_mortality_rules)
+
+    first_icu_fixed, first_icu_rules = _rewrite_unrequested_first_icu_window(q, icu_mortality_fixed)
+    rules.extend(first_icu_rules)
+
+    micro_fixed, micro_rules = _ensure_microbiology_table(first_icu_fixed)
     rules.extend(micro_rules)
 
     micro_by_q, micro_q_rules = _ensure_microbiology_by_question(q, micro_fixed)
