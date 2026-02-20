@@ -1953,6 +1953,20 @@ export function QueryView() {
     await runQuery(query)
   }
 
+  const handleCopyMessage = async (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {}
+  }
+
+  const handleRerunMessage = async (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed || isLoading) return
+    await runQuery(text)
+  }
+
   const handleQuickQuestion = async (text: string) => {
     await runQuery(text)
   }
@@ -2469,25 +2483,63 @@ export function QueryView() {
               </div>
             ) : (
               messages.map((message, idx) => {
+                const isUser = message.role === "user"
                 const isAssistant = message.role === "assistant"
                 const isLastMessage = idx === messages.length - 1
                 const showSuggestions = isAssistant && isLastMessage && suggestedQuestions.length > 0
+                const canActOnMessage = Boolean(message.content.trim())
                 return (
                   <div key={message.id} className={cn(
                     "flex flex-col",
-                    message.role === "user" ? "items-end" : "items-start"
+                    isUser ? "items-end" : "items-start"
                   )}>
-                    <div className={cn(
-                      "max-w-[80%] rounded-lg p-3",
-                      message.role === "user" 
-                        ? "bg-primary text-primary-foreground" 
-                        : "bg-secondary"
-                    )}>
-                      <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
-                      <span className="text-[10px] opacity-70 mt-1 block">
-                        {message.timestamp.toLocaleTimeString()}
-                      </span>
-                    </div>
+                    {isUser ? (
+                      <div className="group max-w-[85%]">
+                        <div className="rounded-lg bg-primary p-3 text-primary-foreground">
+                          <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
+                          <span className="mt-1 block text-[10px] opacity-70">
+                            {message.timestamp.toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-end gap-0.5 pr-0.5 opacity-100 transition-opacity md:pointer-events-none md:opacity-0 md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="h-5 w-5 text-muted-foreground hover:text-foreground"
+                            title="복사"
+                            aria-label="질문 복사"
+                            onClick={() => {
+                              void handleCopyMessage(message.content)
+                            }}
+                            disabled={!canActOnMessage}
+                          >
+                            <Copy className="h-2.5 w-2.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="h-5 w-5 text-muted-foreground hover:text-foreground"
+                            title="재실행"
+                            aria-label="질문 재실행"
+                            onClick={() => {
+                              void handleRerunMessage(message.content)
+                            }}
+                            disabled={isLoading || !canActOnMessage}
+                          >
+                            <RefreshCw className="h-2.5 w-2.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="max-w-[80%] rounded-lg bg-secondary p-3">
+                        <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
+                        <span className="mt-1 block text-[10px] opacity-70">
+                          {message.timestamp.toLocaleTimeString()}
+                        </span>
+                      </div>
+                    )}
                     {showSuggestions && (
                       <div className="mt-2 max-w-[80%] rounded-lg border border-border/60 bg-secondary/40 p-2">
                         <div className="mb-2 flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -3183,28 +3235,30 @@ export function QueryView() {
                           </SelectContent>
                         </Select>
                       </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-8"
-                        onClick={() =>
-                          applyChartCategoryCountSelection(
-                            String(Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
-                          )
-                        }
-                      >
-                        기본 {Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)}개
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-8"
-                        onClick={() => applyChartCategoryCountSelection("all")}
-                      >
-                        전체 선택
-                      </Button>
+                      <div className="ml-auto flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8"
+                          onClick={() =>
+                            applyChartCategoryCountSelection(
+                              String(Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
+                            )
+                          }
+                        >
+                          기본 {Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)}개
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8"
+                          onClick={() => applyChartCategoryCountSelection("all")}
+                        >
+                          전체 선택
+                        </Button>
+                      </div>
                     </div>
                   </div>
 
