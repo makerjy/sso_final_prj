@@ -11,6 +11,9 @@ services:
       - "27017:27017"
     networks:
       - query-lens-net
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     restart: always
 
   # [Service 2] Text-to-SQL API
@@ -42,6 +45,9 @@ services:
       retries: 5
     networks:
       - query-lens-net
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     restart: always
 
   # [Service 3] Plot-Chart API (Query Visualization)
@@ -67,6 +73,9 @@ services:
       retries: 5
     networks:
       - query-lens-net
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     restart: always
 
   # [Service 4] Next.js UI
@@ -94,6 +103,9 @@ services:
       - "3000:3000"
     networks:
       - query-lens-net
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     restart: always
 
 networks:

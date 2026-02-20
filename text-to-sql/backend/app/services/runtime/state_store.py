@@ -71,6 +71,14 @@ class AppStateStore:
         except PyMongoError:
             return False
 
+    def find_one(self, query: dict[str, Any]) -> dict[str, Any] | None:
+        if self._collection is None:
+            return None
+        try:
+            return self._collection.find_one(query)
+        except PyMongoError:
+            return None
+
 
 _STORE: AppStateStore | None = None
 

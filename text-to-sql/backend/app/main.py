@@ -11,6 +11,8 @@ from app.api.routes import (
     chat,
     cohort,
     dashboard,
+    dashboard,
+    pdf,
     query,
     report,
 )
@@ -45,3 +47,4 @@ app.include_router(query.router, prefix="/query", tags=["query"])
 app.include_router(report.router, prefix="/report", tags=["report"])
 app.include_router(admin_budget.router, prefix="/admin/budget", tags=["admin-budget"])
 app.include_router(admin_oracle.router, prefix="/admin/oracle", tags=["admin-oracle"])
+app.include_router(pdf.router, prefix="/pdf", tags=["pdf"])

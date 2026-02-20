@@ -32,6 +32,7 @@ const nextConfig = {
       { source: "/chat/:path*", destination: `${API_BASE_URL}/chat/:path*` },
       { source: "/dashboard/:path*", destination: `${API_BASE_URL}/dashboard/:path*` },
       { source: "/cohort/:path*", destination: `${API_BASE_URL}/cohort/:path*` },
+      { source: "/pdf/:path*", destination: `${API_BASE_URL}/pdf/:path*` },
       { source: "/visualize", destination: `${VIS_API_BASE_URL}/visualize` },
     ]
   },

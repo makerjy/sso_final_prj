@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import hashlib
+import logging
 import math
 import os
 from pathlib import Path
@@ -14,14 +15,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.paths import project_path
+from app.services.agents.orchestrator import run_oneshot
 from app.services.oracle.executor import execute_sql
 from app.services.runtime.diagnosis_map_store import load_diagnosis_icd_map, map_prefixes_for_terms
-from app.services.runtime.request_context import use_request_user
-from app.services.runtime.state_store import get_state_store
+from app.services.runtime.request_context import get_request_user_id, use_request_user
+from app.services.runtime.state_store import AppStateStore, get_state_store
 from app.services.runtime.user_scope import scoped_state_key
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 DEFAULT_PARAMS = {
     "readmit_days": 30,
@@ -64,6 +67,20 @@ class SaveCohortRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     params: CohortParams = Field(default_factory=CohortParams)
     status: str = Field(default="active", pattern="^(active|archived)$")
+
+
+class ConfirmPdfCohortRequest(BaseModel):
+    user: str | None = None
+    pdf_hash: str = Field(min_length=64, max_length=64)
+    data: dict[str, Any]
+    status: str = Field(default="confirmed", pattern="^(confirmed|draft)$")
+
+
+class SmartSqlRequest(BaseModel):
+    user: str | None = None
+    summary: str
+    criteria: str
+    filename: str | None = None
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -976,6 +993,135 @@ def cohort_sql(req: CohortSqlRequest):
         "params": params.model_dump(),
         "sample_rows": _cohort_sample_rows(),
         "sql": _cohort_sql_bundle(params),
+    }
+
+
+@router.post("/pdf/generate-sql")
+def generate_smart_sql(req: SmartSqlRequest):
+    """
+    Use run_oneshot to generate SQL from PDF-derived summary/criteria.
+    """
+    req_user = req.user or get_request_user_id() or None
+    try:
+        question = (
+            f"논문 제목/파일: {req.filename or '알 수 없음'}\n"
+            f"연구 요약: {req.summary}\n"
+            f"선정 및 제외 기준: {req.criteria}\n\n"
+            "위 연구 디자인을 SQL 쿼리로 변환해줘. "
+            "MIMIC-IV 스키마를 사용하고, 단계별로 환자가 필터링되는 Funnel 형태의 CTE 구조를 만들어줘."
+        )
+
+        with use_request_user(req_user):
+            payload = run_oneshot(
+                question,
+                translate=False,
+                rag_multi=True,
+                enable_clarification=False,
+            )
+
+        final_sql = ""
+        if isinstance(payload, dict):
+            if isinstance(payload.get("final"), dict):
+                final_sql = str(payload["final"].get("final_sql") or "").strip()
+            elif isinstance(payload.get("draft"), dict):
+                final_sql = str(payload["draft"].get("final_sql") or "").strip()
+
+        if not final_sql:
+            raise HTTPException(status_code=500, detail="SQL generation failed")
+
+        with use_request_user(req_user):
+            db_result = execute_sql(final_sql)
+
+        return {
+            "generated_sql": {
+                "cohort_sql": final_sql,
+                "count_sql": f"SELECT COUNT(*) FROM ({final_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})",
+            },
+            "db_result": {
+                "columns": db_result.get("columns", []),
+                "rows": db_result.get("rows", [])[:50],
+                "row_count": db_result.get("row_count", 0),
+                "total_count": db_result.get("total_count"),
+                "error": db_result.get("error"),
+            },
+            "user": req_user,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/pdf/confirm")
+def confirm_pdf_cohort(req: ConfirmPdfCohortRequest):
+    """
+    Persist final PDF cohort extraction result by pdf_hash after SQL validation.
+    """
+    confirmed_store = AppStateStore(collection_name="pdf_confirmed_cohorts")
+    if not confirmed_store.enabled:
+        raise HTTPException(status_code=500, detail="State store is not enabled")
+
+    req_user = req.user or get_request_user_id() or None
+
+    generated_sql = req.data.get("generated_sql", {}) if isinstance(req.data, dict) else {}
+    cohort_sql = str((generated_sql or {}).get("cohort_sql") or "").strip()
+    if not cohort_sql:
+        raise HTTPException(status_code=400, detail="Generated cohort SQL is missing")
+
+    validation_res: dict[str, Any] = {}
+    validation_error: str | None = None
+    with use_request_user(req_user):
+        try:
+            validation_res = execute_sql(cohort_sql)
+        except HTTPException as exc:
+            validation_error = str(exc.detail)
+        except Exception as exc:
+            validation_error = str(exc)
+
+    if validation_error and req.status == "confirmed":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot confirm cohort due to SQL error: {validation_error}",
+        )
+
+    now_iso = datetime.now().isoformat()
+    saved_status = req.status if not validation_error else "draft"
+
+    merged_data = dict(req.data)
+    db_result = merged_data.get("db_result")
+    if not isinstance(db_result, dict):
+        db_result = {}
+    if validation_error:
+        db_result["error"] = validation_error
+    else:
+        db_result["columns"] = validation_res.get("columns", [])
+        db_result["rows"] = validation_res.get("rows", [])[:100]
+        db_result["row_count"] = validation_res.get("row_count", 0)
+        db_result["total_count"] = validation_res.get("total_count")
+        db_result["error"] = None
+    merged_data["db_result"] = db_result
+
+    payload = {
+        **merged_data,
+        "pdf_hash": req.pdf_hash,
+        "user_id": req_user,
+        "status": saved_status,
+        "confirmed_at": now_iso if saved_status == "confirmed" else None,
+        "updated_at": now_iso,
+    }
+
+    save_key = scoped_state_key(req.pdf_hash, req_user)
+    ok = confirmed_store.set(save_key, payload)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save cohort data")
+
+    logger.info("Saved PDF cohort (%s) status=%s user=%s", req.pdf_hash, saved_status, req_user or "-")
+    return {
+        "status": "success",
+        "message": "Cohort confirmed and saved" if saved_status == "confirmed" else "Cohort saved as draft",
+        "pdf_hash": req.pdf_hash,
+        "user": req_user,
+        "saved_status": saved_status,
     }
 
 

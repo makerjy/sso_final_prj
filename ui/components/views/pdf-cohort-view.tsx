@@ -6,8 +6,10 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Upload, FileText, Sparkles, Loader2, ArrowLeft } from "lucide-react"
 import PdfResultPanel from "./pdf-result-panel"
+import { useAuth } from "@/components/auth-provider"
 
 export function PdfCohortView() {
+    const { user } = useAuth()
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [message, setMessage] = useState<string | null>(null)
@@ -15,6 +17,7 @@ export function PdfCohortView() {
     // PDF 분석 결과 상태
     const [pdfResult, setPdfResult] = useState<any>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
+    const pdfUser = (user?.id || user?.username || user?.name || "").trim()
 
     const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
@@ -29,7 +32,11 @@ export function PdfCohortView() {
         formData.append("file", file)
 
         try {
-            const res = await fetch("/pdf/upload", {
+            const query = new URLSearchParams()
+            if (pdfUser) query.set("user", pdfUser)
+            const uploadUrl = query.toString() ? `/pdf/upload?${query.toString()}` : "/pdf/upload"
+
+            const res = await fetch(uploadUrl, {
                 method: "POST",
                 body: formData,
             })
@@ -44,7 +51,12 @@ export function PdfCohortView() {
 
             const poll = async () => {
                 try {
-                    const statusRes = await fetch(`/pdf/status/${task_id}`)
+                    const statusQuery = new URLSearchParams()
+                    if (pdfUser) statusQuery.set("user", pdfUser)
+                    const statusUrl = statusQuery.toString()
+                        ? `/pdf/status/${task_id}?${statusQuery.toString()}`
+                        : `/pdf/status/${task_id}`
+                    const statusRes = await fetch(statusUrl)
                     if (!statusRes.ok) throw new Error("분석 상태 확인 실패")
 
                     const statusData = await statusRes.json()
@@ -96,6 +108,7 @@ export function PdfCohortView() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                    user: pdfUser || null,
                     pdf_hash: hash,
                     data: pdfResult,
                     status: "confirmed"
