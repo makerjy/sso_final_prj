@@ -28,6 +28,19 @@ _SSL_RETRY_ERROR_MARKERS = (
 )
 
 
+def _pool_create_error(exc: Exception) -> HTTPException:
+    detail = str(exc).strip()
+    if "ORA-01017" in detail.upper():
+        return HTTPException(
+            status_code=503,
+            detail=(
+                "Oracle authentication failed (ORA-01017). "
+                "Check username/password and save connection settings again."
+            ),
+        )
+    return HTTPException(status_code=503, detail=f"Oracle pool create failed: {detail or exc}")
+
+
 def _has_client_lib(lib_path: Path) -> bool:
     return any(
         next(lib_path.glob(pattern), None) is not None
@@ -174,8 +187,23 @@ def get_pool(user_id: str | None = None):
         if existing is not None:
             return existing
 
-        username = (overrides.get("username") or settings.oracle_user)
-        password = (overrides.get("password") or settings.oracle_password)
+        username = str(overrides.get("username") or settings.oracle_user or "").strip()
+        password_value = overrides.get("password")
+        if password_value is None:
+            password_value = settings.oracle_password
+        password = str(password_value or "")
+        if password != password.strip():
+            password = password.strip()
+        if not username:
+            raise HTTPException(
+                status_code=503,
+                detail="Oracle username is not configured. Save connection settings first.",
+            )
+        if not password:
+            raise HTTPException(
+                status_code=503,
+                detail="Oracle password is empty. Save connection settings with a valid password.",
+            )
         pool_kwargs = {
             "user": username,
             "password": password,
@@ -203,15 +231,9 @@ def get_pool(user_id: str | None = None):
                     pool_kwargs["dsn"] = tcp_fallback_dsn
                     created = lib.create_pool(**pool_kwargs)
                 except Exception as retry_exc:
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Oracle pool create failed: {retry_exc}",
-                    ) from retry_exc
+                    raise _pool_create_error(retry_exc) from retry_exc
             else:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Oracle pool create failed: {exc}",
-                ) from exc
+                raise _pool_create_error(exc) from exc
         _POOLS[key] = created
         return created
 

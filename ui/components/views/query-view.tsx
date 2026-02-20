@@ -536,7 +536,7 @@ export function QueryView() {
     () =>
       statsRows.filter((row) => {
         const required = [row.min, row.q1, row.median, row.q3, row.max, row.avg]
-        return row.count > 0 && required.every((value) => typeof value === "number" && Number.isFinite(value))
+        return row.numericCount > 0 && required.every((value) => typeof value === "number" && Number.isFinite(value))
       }),
     [statsRows]
   )
@@ -859,7 +859,7 @@ export function QueryView() {
   const resultInterpretation = useMemo(() => {
     if (summary) return summary
     if (!previewColumns.length) return "쿼리 결과가 없어 해석을 생성할 수 없습니다."
-    const numericCols = statsRows.filter((row) => row.count > 0)
+    const numericCols = statsRows.filter((row) => row.numericCount > 0)
     const topNumeric = numericCols
       .slice()
       .sort((a, b) => (b.avg ?? Number.NEGATIVE_INFINITY) - (a.avg ?? Number.NEGATIVE_INFINITY))[0]
@@ -880,7 +880,7 @@ export function QueryView() {
   }, [recommendedAnalysis, recommendedChart, survivalChartData, medianSurvival])
   const statsInterpretation = useMemo(() => {
     if (!statsRows.length) return "통계표를 생성할 결과가 없습니다."
-    const numeric = statsRows.filter((row) => row.count > 0)
+    const numeric = statsRows.filter((row) => row.numericCount > 0)
     const nullTotal = statsRows.reduce((sum, row) => sum + row.nullCount, 0)
     const missingTotal = statsRows.reduce((sum, row) => sum + row.missingCount, 0)
     if (!numeric.length) return `수치형 컬럼이 없어 결측/NULL 중심으로 확인됩니다(결측 ${missingTotal}, NULL ${nullTotal}).`
@@ -3015,6 +3015,7 @@ export function QueryView() {
 interface SimpleStatsRow {
   column: string
   count: number
+  numericCount: number
   nullCount: number
   missingCount: number
   min: number | null
@@ -3026,6 +3027,7 @@ interface SimpleStatsRow {
 }
 
 function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
+  const totalCount = rows.length
   return columns.map((column, colIdx) => {
     const numbers: number[] = []
     let nullCount = 0
@@ -3053,7 +3055,8 @@ function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
     if (!numbers.length) {
       return {
         column,
-        count: 0,
+        count: totalCount,
+        numericCount: 0,
         nullCount,
         missingCount,
         min: null,
@@ -3075,7 +3078,8 @@ function buildSimpleStats(columns: string[], rows: any[][]): SimpleStatsRow[] {
 
     return {
       column,
-      count: numbers.length,
+      count: totalCount,
+      numericCount: numbers.length,
       nullCount,
       missingCount,
       min: Number(min.toFixed(4)),

@@ -30,6 +30,40 @@ class TableScopeSettings(BaseModel):
     selected_ids: list[str] = []
 
 
+def _normalize_connection_settings_payload(
+    payload: dict[str, str | None],
+    previous: dict[str, str] | None = None,
+) -> dict[str, str]:
+    prev = previous or {}
+    normalized: dict[str, str] = {}
+
+    for key in ("host", "port", "database", "username"):
+        normalized[key] = str(payload.get(key) or "").strip()
+
+    ssl_mode = str(payload.get("sslMode") or "").strip()
+    if ssl_mode:
+        normalized["sslMode"] = ssl_mode
+
+    default_schema = str(payload.get("defaultSchema") or "").strip()
+    if default_schema:
+        normalized["defaultSchema"] = default_schema
+
+    password_raw = payload.get("password")
+    if password_raw is None:
+        password = str(prev.get("password") or "")
+    else:
+        password = str(password_raw).strip()
+        if not password:
+            password = str(prev.get("password") or "")
+    if not password:
+        raise HTTPException(
+            status_code=400,
+            detail="Password is required for Oracle authentication.",
+        )
+    normalized["password"] = password
+    return normalized
+
+
 def _validate_connection_settings_payload(payload: dict[str, str]) -> None:
     host = str(payload.get("host") or "").strip()
     port = str(payload.get("port") or "").strip()
@@ -75,7 +109,10 @@ def get_connection_settings(user: str | None = Query(default=None)):
 @router.post("/connection")
 def save_connection_settings(req: ConnectionSettings, user: str | None = Query(default=None)):
     previous = fetch_connection_settings(user, include_global_fallback=False) or {}
-    payload = req.model_dump(exclude_none=True)
+    payload = _normalize_connection_settings_payload(
+        req.model_dump(exclude_none=True),
+        previous=previous,
+    )
     _validate_connection_settings_payload(payload)
     persist_connection_settings(payload, user)
     reset_pool(user)

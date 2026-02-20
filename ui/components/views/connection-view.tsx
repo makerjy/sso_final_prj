@@ -112,6 +112,7 @@ export function ConnectionView() {
   })
 
   const [tableScopes, setTableScopes] = useState<TableScope[]>(DEFAULT_TABLE_SCOPES)
+  const oraAuthFailed = Boolean(statusError?.toUpperCase().includes("ORA-01017"))
 
   const readError = async (res: Response) => {
     const text = await res.text()
@@ -218,9 +219,17 @@ export function ConnectionView() {
     const port = connectionConfig.port.trim()
     const database = connectionConfig.database.trim()
     const username = connectionConfig.username.trim()
+    const password = connectionConfig.password.trim()
+    const sslMode = connectionConfig.sslMode.trim()
+    const defaultSchema = connectionConfig.defaultSchema.trim()
 
     if (!host || !port || !database || !username) {
       setConnectionSaveError("호스트/포트/데이터베이스/사용자명은 필수 입력입니다.")
+      setConnectionSaveMessage(null)
+      return
+    }
+    if (!password) {
+      setConnectionSaveError("비밀번호는 필수 입력입니다.")
       setConnectionSaveMessage(null)
       return
     }
@@ -237,13 +246,13 @@ export function ConnectionView() {
     setTableScopeSaveError(null)
     try {
       const connectionPayload: ConnectionSettings = {
-        host: connectionConfig.host,
-        port: connectionConfig.port,
-        database: connectionConfig.database,
-        username: connectionConfig.username,
-        password: connectionConfig.password,
-        sslMode: connectionConfig.sslMode,
-        defaultSchema: connectionConfig.defaultSchema?.trim() || undefined,
+        host,
+        port,
+        database,
+        username,
+        password,
+        sslMode: sslMode || "disable",
+        defaultSchema: defaultSchema || undefined,
       }
       const connectionRes = await fetch(apiUrlWithUser("/admin/settings/connection"), {
         method: "POST",
@@ -369,6 +378,11 @@ export function ConnectionView() {
                         ? `Oracle pool ${poolStatus?.open_connections ?? "-"} / ${poolStatus?.max ?? "-"} (busy ${poolStatus?.busy ?? "-"})`
                         : "데이터베이스에 연결되지 않았습니다"}
                 </p>
+                {oraAuthFailed && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    DB 사용자명에는 앱 로그인 아이디가 아닌 Oracle 계정(예: team9_user)을 입력하세요.
+                  </p>
+                )}
                 {lastChecked && (
                   <p className="text-xs text-muted-foreground mt-1">
                     마지막 확인: {lastChecked.toLocaleTimeString()}
@@ -429,13 +443,14 @@ export function ConnectionView() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="username">사용자명</Label>
+              <Label htmlFor="username">DB 사용자명</Label>
               <Input 
                 id="username" 
                 value={connectionConfig.username}
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, username: e.target.value }))}
-                placeholder="예: team9_user"
+                placeholder="예: team9_user (앱 로그인 ID 아님)"
               />
+              <p className="text-xs text-muted-foreground">앱 로그인 아이디가 아니라 Oracle DB 계정을 입력하세요.</p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="password">비밀번호</Label>
