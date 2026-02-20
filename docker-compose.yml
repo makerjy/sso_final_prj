@@ -1,0 +1,101 @@
+name: text2sql
+
+services:
+  # [Service 1] MongoDB
+  mongo:
+    image: mongo:7
+    container_name: ql-mongo
+    volumes:
+      - ./text-to-sql/var/mongo:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - query-lens-net
+    restart: always
+
+  # [Service 2] Text-to-SQL API
+  text-sql:
+    build:
+      context: .
+      dockerfile: text-to-sql/deploy/docker/Dockerfile.api
+    depends_on:
+      - mongo
+    container_name: ql-text-sql
+    env_file:
+      - text-to-sql/.env
+    environment:
+      - ORACLE_LIB_DIR=/opt/oracle/instantclient
+      - LD_LIBRARY_PATH=/opt/oracle/instantclient
+      - ANONYMIZED_TELEMETRY=false
+    volumes:
+      - ./text-to-sql/oracle/instantclient_23_26:/opt/oracle/instantclient:ro
+      - ./text-to-sql/var/metadata:/app/var/metadata
+      - ./text-to-sql/var/cache:/app/var/cache
+      - ./text-to-sql/var/logs:/app/var/logs
+      - ./text-to-sql/var/rag:/app/var/rag
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8000)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - query-lens-net
+    restart: always
+
+  # [Service 3] Plot-Chart API (Query Visualization)
+  plot-chart:
+    build:
+      context: .
+      dockerfile: query-visualization/deploy/docker/Dockerfile.api
+    container_name: ql-plot-chart
+    env_file:
+      - query-visualization/.env
+    environment:
+      - ORACLE_DRIVER_MODE=${ORACLE_DRIVER_MODE:-thin}
+      - ORACLE_LIB_DIR=/opt/oracle/instantclient
+      - LD_LIBRARY_PATH=/opt/oracle/instantclient
+    volumes:
+      - ./query-visualization/oracle/instantclient_23_26:/opt/oracle/instantclient:ro
+    ports:
+      - "${VIS_API_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - query-lens-net
+    restart: always
+
+  # [Service 4] Next.js UI
+  ui:
+    build:
+      context: .
+      dockerfile: text-to-sql/deploy/docker/Dockerfile.ui
+      args:
+        - API_BASE_URL=http://text-sql:8000
+        - VIS_API_BASE_URL=${VIS_API_BASE_URL:-http://plot-chart:8080}
+    container_name: query-lens-ui
+    env_file:
+      - text-to-sql/.env
+    environment:
+      - API_BASE_URL=http://text-sql:8000
+      - VIS_API_BASE_URL=${VIS_API_BASE_URL:-http://plot-chart:8080}
+    depends_on:
+      text-sql:
+        condition: service_healthy
+      plot-chart:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "3000:3000"
+    networks:
+      - query-lens-net
+    restart: always
+
+networks:
+  query-lens-net:
+    driver: bridge
