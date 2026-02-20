@@ -59,6 +59,7 @@ interface SavedQuery {
   id: string
   title: string
   description: string
+  insight?: string
   query: string
   lastRun: string
   schedule?: string
@@ -89,6 +90,19 @@ interface FolderCardInfo {
   pinnedCount: number
   tone?: string
   editable: boolean
+}
+
+interface DialogStatRow {
+  column: string
+  n: number
+  missingCount: number
+  nullCount: number
+  min: number | null
+  q1: number | null
+  median: number | null
+  q3: number | null
+  max: number | null
+  avg: number | null
 }
 
 const ALL_FOLDER_ID = "__all__"
@@ -211,6 +225,27 @@ const formatDashboardMetricLabel = (label: string, index: number) => {
 const isNumericValue = (value: unknown) => {
   const n = Number(value)
   return Number.isFinite(n)
+}
+
+const toFiniteNumber = (value: unknown): number | null => {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+const quantile = (sortedValues: number[], p: number): number | null => {
+  if (!sortedValues.length) return null
+  if (sortedValues.length === 1) return sortedValues[0]
+  const pos = (sortedValues.length - 1) * p
+  const lower = Math.floor(pos)
+  const upper = Math.ceil(pos)
+  if (lower === upper) return sortedValues[lower]
+  const weight = pos - lower
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
+}
+
+const formatStatNumber = (value: number | null) => {
+  if (value == null || Number.isNaN(value)) return "-"
+  return value.toLocaleString(undefined, { maximumFractionDigits: 4 })
 }
 
 const previewRowsToRecords = (query: SavedQuery | null) => {
@@ -885,6 +920,64 @@ export function DashboardView() {
     return null
   }, [selectedDialogQuery, selectedDialogRecords])
 
+  const selectedDialogStatsRows = useMemo<DialogStatRow[]>(() => {
+    const preview = selectedDialogQuery?.preview
+    if (!preview?.columns?.length || !Array.isArray(preview.rows)) return []
+
+    return preview.columns.map((column, colIndex) => {
+      let n = 0
+      let missingCount = 0
+      let nullCount = 0
+      const numericValues: number[] = []
+
+      for (const row of preview.rows) {
+        const cell = Array.isArray(row) ? row[colIndex] : undefined
+
+        if (cell === null) {
+          nullCount += 1
+          missingCount += 1
+          continue
+        }
+        if (cell === undefined || (typeof cell === "string" && cell.trim() === "")) {
+          missingCount += 1
+          continue
+        }
+
+        n += 1
+        const numeric = toFiniteNumber(cell)
+        if (numeric != null) numericValues.push(numeric)
+      }
+
+      numericValues.sort((a, b) => a - b)
+      const min = numericValues.length ? numericValues[0] : null
+      const max = numericValues.length ? numericValues[numericValues.length - 1] : null
+      const avg = numericValues.length
+        ? numericValues.reduce((acc, value) => acc + value, 0) / numericValues.length
+        : null
+
+      return {
+        column,
+        n,
+        missingCount,
+        nullCount,
+        min,
+        q1: quantile(numericValues, 0.25),
+        median: quantile(numericValues, 0.5),
+        q3: quantile(numericValues, 0.75),
+        max,
+        avg,
+      }
+    })
+  }, [selectedDialogQuery])
+
+  const selectedDialogInsight = useMemo(() => {
+    if (!selectedDialogQuery) return "선택된 쿼리가 없습니다."
+    const savedInsight = String(selectedDialogQuery.insight || "").trim()
+    if (savedInsight) return savedInsight
+    const fallback = String(selectedDialogQuery.description || "").trim()
+    return fallback || "저장된 해석 데이터가 없습니다."
+  }, [selectedDialogQuery])
+
   const handleOpenFolder = (folderId: string) => {
     if (folderId === ALL_FOLDER_ID) return
     setActiveFolderId(folderId)
@@ -1391,19 +1484,58 @@ export function DashboardView() {
 
                   <Card className="border border-border/60">
                     <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">SQL</CardTitle>
-                      <CardDescription className="text-xs">대시보드에 저장된 원본 SQL</CardDescription>
+                      <CardTitle className="text-sm">통계 자료</CardTitle>
+                      <CardDescription className="text-xs">
+                        컬럼별 N, 결측치, NULL, MIN, Q1, 중앙값, Q3, MAX, 평균
+                      </CardDescription>
                     </CardHeader>
                     <CardContent>
-                      <pre className="rounded-lg bg-secondary/30 p-3 text-xs overflow-x-auto">
-                        <code>{selectedDialogQuery.query || "-- no sql --"}</code>
-                      </pre>
+                      {selectedDialogStatsRows.length ? (
+                        <div className="rounded-lg border border-border overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead className="bg-secondary/50">
+                              <tr>
+                                <th className="text-left p-2 font-medium">컬럼</th>
+                                <th className="text-right p-2 font-medium">N</th>
+                                <th className="text-right p-2 font-medium">결측치</th>
+                                <th className="text-right p-2 font-medium">NULL</th>
+                                <th className="text-right p-2 font-medium">MIN</th>
+                                <th className="text-right p-2 font-medium">Q1</th>
+                                <th className="text-right p-2 font-medium">중앙값</th>
+                                <th className="text-right p-2 font-medium">Q3</th>
+                                <th className="text-right p-2 font-medium">MAX</th>
+                                <th className="text-right p-2 font-medium">평균</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {selectedDialogStatsRows.map((row) => (
+                                <tr key={row.column} className="border-t border-border hover:bg-secondary/30">
+                                  <td className="p-2 font-medium">{row.column}</td>
+                                  <td className="p-2 text-right">{row.n.toLocaleString()}</td>
+                                  <td className="p-2 text-right">{row.missingCount.toLocaleString()}</td>
+                                  <td className="p-2 text-right">{row.nullCount.toLocaleString()}</td>
+                                  <td className="p-2 text-right">{formatStatNumber(row.min)}</td>
+                                  <td className="p-2 text-right">{formatStatNumber(row.q1)}</td>
+                                  <td className="p-2 text-right">{formatStatNumber(row.median)}</td>
+                                  <td className="p-2 text-right">{formatStatNumber(row.q3)}</td>
+                                  <td className="p-2 text-right">{formatStatNumber(row.max)}</td>
+                                  <td className="p-2 text-right">{formatStatNumber(row.avg)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                          통계 자료를 계산할 수 있는 결과가 없습니다.
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
 
                   <Card className="border border-border/60">
                     <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">시각화</CardTitle>
+                      <CardTitle className="text-sm">시각화 차트</CardTitle>
                       <CardDescription className="text-xs">저장된 결과 기반 Plotly 차트</CardDescription>
                     </CardHeader>
                     <CardContent>
@@ -1427,44 +1559,13 @@ export function DashboardView() {
 
                   <Card className="border border-border/60">
                     <CardHeader className="pb-2">
-                      <CardTitle className="text-sm">결과 미리보기</CardTitle>
-                      <CardDescription className="text-xs">쿼리탭에서 저장한 결과 일부를 표시합니다.</CardDescription>
+                      <CardTitle className="text-sm">해석</CardTitle>
+                      <CardDescription className="text-xs">저장된 해석 원문</CardDescription>
                     </CardHeader>
                     <CardContent>
-                      {selectedDialogQuery.preview?.columns?.length ? (
-                        <div className="rounded-lg border border-border overflow-hidden">
-                          <table className="w-full text-xs">
-                            <thead className="bg-secondary/50">
-                              <tr>
-                                {selectedDialogQuery.preview.columns.map((col) => (
-                                  <th key={col} className="text-left p-2 font-medium">
-                                    {col}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {selectedDialogQuery.preview.rows.map((row, idx) => (
-                                <tr key={idx} className="border-t border-border hover:bg-secondary/30">
-                                  {selectedDialogQuery.preview!.columns.map((_, colIdx) => {
-                                    const cell = row[colIdx]
-                                    const text = cell == null ? "" : String(cell)
-                                    return (
-                                      <td key={`${idx}-${colIdx}`} className="p-2 font-mono">
-                                        {text}
-                                      </td>
-                                    )
-                                  })}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : (
-                        <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                          저장된 결과가 없습니다.
-                        </div>
-                      )}
+                      <div className="rounded-lg border border-border/60 bg-secondary/20 p-3 text-sm leading-relaxed whitespace-pre-wrap">
+                        {selectedDialogInsight}
+                      </div>
                     </CardContent>
                   </Card>
                 </div>
