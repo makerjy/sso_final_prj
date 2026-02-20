@@ -23,6 +23,7 @@ class ChartSpec(BaseModel):
     bar_mode: Optional[str] = None
     orientation: Optional[str] = None
     series_cols: Optional[List[str]] = None
+    max_categories: Optional[int] = None
     title: Optional[str] = None
     x_title: Optional[str] = None
     y_title: Optional[str] = None

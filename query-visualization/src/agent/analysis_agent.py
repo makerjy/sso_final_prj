@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from pandas.api import types as pdt
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -85,6 +86,21 @@ def _stats_snapshot(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
             "mean": float(series.mean()),
         }
     return stats
+
+
+def _numeric_columns_for_visualization(df: pd.DataFrame) -> List[str]:
+    numeric_cols: List[str] = []
+    for col in df.columns:
+        series = df[col]
+        if pdt.is_bool_dtype(series):
+            continue
+        if pdt.is_numeric_dtype(series):
+            numeric_cols.append(col)
+            continue
+        coerced = pd.to_numeric(series, errors="coerce")
+        if coerced.notna().any():
+            numeric_cols.append(col)
+    return numeric_cols
 
 
 def _fallback_insight(user_query: str, df: pd.DataFrame, analyses: List[AnalysisCard]) -> str:

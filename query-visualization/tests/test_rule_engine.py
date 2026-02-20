@@ -86,3 +86,44 @@ def test_plan_analyses_blocks_identifier_group_for_distribution() -> None:
     for plan in plans:
         spec = plan.get("chart_spec", {})
         assert spec.get("group") != "subject_id"
+
+
+def test_plan_analyses_skips_bar_when_y_is_constant() -> None:
+    df = pd.DataFrame(
+        {
+            "gender": ["M", "F", "M", "F"],
+            "cnt": [1, 1, 1, 1],
+        }
+    )
+    intent_info = {
+        "analysis_intent": "comparison",
+        "primary_outcome": "cnt",
+        "time_var": None,
+        "group_var": "gender",
+    }
+
+    plans = plan_analyses(intent_info, df)
+    chart_types = {str(p.get("chart_spec", {}).get("chart_type", "")).lower() for p in plans}
+
+    assert not any(chart_type.startswith("bar") for chart_type in chart_types)
+    assert "box" in chart_types
+
+
+def test_plan_analyses_keeps_bar_when_y_is_not_constant() -> None:
+    df = pd.DataFrame(
+        {
+            "gender": ["M", "F", "M", "F"],
+            "cnt": [1, 2, 1, 3],
+        }
+    )
+    intent_info = {
+        "analysis_intent": "comparison",
+        "primary_outcome": "cnt",
+        "time_var": None,
+        "group_var": "gender",
+    }
+
+    plans = plan_analyses(intent_info, df)
+    chart_types = {str(p.get("chart_spec", {}).get("chart_type", "")).lower() for p in plans}
+
+    assert any(chart_type.startswith("bar") for chart_type in chart_types)

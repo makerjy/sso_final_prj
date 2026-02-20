@@ -827,6 +827,43 @@ def _ensure_bar_plan(
     return [new_plan, *plans]
 
 
+def _filter_constant_y_bar_plans(
+    plans: List[Dict[str, Any]],
+    df: pd.DataFrame,
+    failure_reasons: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    filtered: List[Dict[str, Any]] = []
+    dropped_y: set[str] = set()
+
+    for plan in plans:
+        spec = plan.get("chart_spec") or {}
+        chart_type = str(spec.get("chart_type") or "").lower()
+        if not chart_type.startswith("bar"):
+            filtered.append(plan)
+            continue
+
+        y = spec.get("y")
+        if not isinstance(y, str) or y not in df.columns:
+            filtered.append(plan)
+            continue
+
+        numeric_y = pd.to_numeric(df[y], errors="coerce").dropna()
+        if numeric_y.empty or numeric_y.nunique(dropna=True) > 1:
+            filtered.append(plan)
+            continue
+
+        dropped_y.add(y)
+
+    for y_col in sorted(dropped_y):
+        _record_failure(failure_reasons, f"bar_skipped_constant_y: {y_col}")
+    if dropped_y:
+        log_event(
+            "rule_engine.bar.constant_y_skipped",
+            {"y_columns": sorted(dropped_y), "dropped_count": len(dropped_y)},
+        )
+    return filtered
+
+
 # 입력: intent, group_var, time_var, available_columns, context_flags
 # 출력: None | Exception
 # 임상 규칙 위반 시 예외 발생 (잘못된 차트 생성 방지)
@@ -1503,6 +1540,7 @@ def plan_analyses(
     plans = _prioritize_requested_chart(plans, preferred_chart)
     plans = _ensure_bar_plan(plans, bar_style, primary, group_var, column_only_plan)
     plans = _prioritize_bar_plans(plans, bar_style)
+    plans = _filter_constant_y_bar_plans(plans, df, failure_reasons)
     if not plans:
         _record_failure(
             failure_reasons,

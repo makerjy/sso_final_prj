@@ -5,7 +5,8 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+import os
+from typing import Any, Dict, Optional, Tuple
 import json
 
 import pandas as pd
@@ -15,6 +16,20 @@ import plotly.graph_objects as go
 import plotly.io as pio
 
 from src.utils.logging import log_event
+
+
+def _read_bar_max_categories(default: int = 30) -> int:
+    raw = str(os.getenv("QV_BAR_MAX_CATEGORIES", str(default))).strip()
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+_BAR_MAX_CATEGORIES = _read_bar_max_categories(30)
+_BAR_OTHER_LABEL = "기타"
+_BAR_LONG_LABEL_LEN = 14
+_BAR_DENSE_COUNT = 12
 
 
 def _hex_to_rgb(color: str) -> Tuple[int, int, int]:
@@ -52,11 +67,12 @@ def _build_code(chart_spec: Dict[str, Any]) -> str:
     bar_mode = chart_spec.get("bar_mode")
     orientation = chart_spec.get("orientation")
     series_cols = chart_spec.get("series_cols")
+    max_categories = chart_spec.get("max_categories")
 
     return (
         "# plotly 코드(요약)\n"
         f"# chart_type={chart_type}, x={x}, y={y}, group={group}, agg={agg}, size={size}, animation_frame={animation_frame}, mode={mode}, "
-        f"bar_mode={bar_mode}, orientation={orientation}, series_cols={series_cols}\n"
+        f"bar_mode={bar_mode}, orientation={orientation}, series_cols={series_cols}, max_categories={max_categories}\n"
     )
 
 
@@ -117,6 +133,91 @@ def _aggregate_pyramid_frame(
     )
 
 
+def _limit_bar_categories(
+    chart_df: pd.DataFrame,
+    category_col: str,
+    value_col: str,
+    group_col: Optional[str] = None,
+    *,
+    top_n: int = _BAR_MAX_CATEGORIES,
+    agg: Optional[str] = None,
+) -> pd.DataFrame:
+    if category_col not in chart_df.columns or value_col not in chart_df.columns:
+        return chart_df
+
+    df2 = chart_df.copy()
+    if top_n <= 0:
+        return df2
+    df2[category_col] = df2[category_col].astype(str)
+    unique_count = int(df2[category_col].nunique(dropna=False))
+    if unique_count <= top_n:
+        return df2
+
+    numeric_value = pd.to_numeric(df2[value_col], errors="coerce").fillna(0.0)
+    score_by_category = (
+        pd.DataFrame({category_col: df2[category_col], "__score__": numeric_value.abs()})
+        .groupby(category_col, dropna=False)["__score__"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    top_categories = score_by_category.head(top_n).index.astype(str).tolist()
+    top_set = set(top_categories)
+
+    keep_df = df2[df2[category_col].isin(top_set)].copy()
+    rest_df = df2[~df2[category_col].isin(top_set)].copy()
+
+    agg_norm = str(agg or "").strip().lower()
+    can_rollup_other = agg_norm in {"", "sum", "count"}
+    if can_rollup_other and not rest_df.empty:
+        if group_col and group_col in rest_df.columns:
+            other_rows = (
+                rest_df.groupby(group_col, dropna=False, as_index=False)[value_col]
+                .sum()
+            )
+            other_rows[category_col] = _BAR_OTHER_LABEL
+            keep_df = pd.concat(
+                [keep_df, other_rows[[category_col, group_col, value_col]]],
+                ignore_index=True,
+            )
+        else:
+            other_value = pd.to_numeric(rest_df[value_col], errors="coerce").fillna(0.0).sum()
+            keep_df = pd.concat(
+                [
+                    keep_df,
+                    pd.DataFrame([{category_col: _BAR_OTHER_LABEL, value_col: float(other_value)}]),
+                ],
+                ignore_index=True,
+            )
+        top_categories.append(_BAR_OTHER_LABEL)
+
+    order_map = {cat: idx for idx, cat in enumerate(top_categories)}
+    keep_df["__order__"] = keep_df[category_col].map(order_map).fillna(len(order_map))
+    sort_cols = ["__order__"]
+    if group_col and group_col in keep_df.columns:
+        sort_cols.append(group_col)
+    keep_df = keep_df.sort_values(sort_cols, kind="stable").drop(columns=["__order__"])
+
+    log_event(
+        "codegen.bar.capped_categories",
+        {
+            "category_col": category_col,
+            "group_col": group_col,
+            "before": unique_count,
+            "after": int(keep_df[category_col].nunique(dropna=False)),
+            "top_n": top_n,
+        },
+    )
+    return keep_df
+
+
+def _should_use_horizontal_bar(category_values: pd.Series) -> bool:
+    if category_values.empty:
+        return False
+    labels = category_values.astype(str).tolist()
+    max_len = max((len(text) for text in labels), default=0)
+    return len(labels) >= _BAR_DENSE_COUNT or max_len >= _BAR_LONG_LABEL_LEN
+
+
 def generate_chart(
     chart_spec: Dict[str, Any],
     df: pd.DataFrame,
@@ -136,6 +237,13 @@ def generate_chart(
     title = chart_spec.get("title")
     x_title = chart_spec.get("x_title")
     y_title = chart_spec.get("y_title")
+    max_categories_raw = chart_spec.get("max_categories")
+    max_categories = _BAR_MAX_CATEGORIES
+    if max_categories_raw is not None:
+        try:
+            max_categories = int(max_categories_raw)
+        except Exception:
+            max_categories = _BAR_MAX_CATEGORIES
 
     log_event(
         "codegen.start",
@@ -150,6 +258,7 @@ def generate_chart(
             "mode": mode,
             "bar_mode": bar_mode,
             "orientation": orientation,
+            "max_categories": max_categories,
         },
     )
 
@@ -204,6 +313,7 @@ def generate_chart(
             resolved_mode = default_mode
         if resolved_orientation not in {"h", "v"}:
             resolved_orientation = default_orientation
+        auto_orientation = not bool(orientation)
 
         series_cols: list[str] = []
         if isinstance(raw_series_cols, list):
@@ -231,6 +341,16 @@ def generate_chart(
                     melt_df.groupby([x, "__series__"], dropna=False, as_index=False)["__value__"]
                     .sum()
                 )
+                chart_df = _limit_bar_categories(
+                    chart_df,
+                    category_col=x,
+                    value_col="__value__",
+                    group_col="__series__",
+                    top_n=max_categories,
+                    agg="sum",
+                )
+                if auto_orientation and _should_use_horizontal_bar(chart_df[x]):
+                    resolved_orientation = "h"
                 if resolved_orientation == "h":
                     fig = px.bar(
                         chart_df,
@@ -254,6 +374,16 @@ def generate_chart(
             if not chart_df.empty:
                 if y in chart_df.columns:
                     chart_df[y] = pd.to_numeric(chart_df[y], errors="coerce")
+                chart_df = _limit_bar_categories(
+                    chart_df,
+                    category_col=x,
+                    value_col=y,
+                    group_col=group if group and group in chart_df.columns else None,
+                    top_n=max_categories,
+                    agg=agg,
+                )
+                if auto_orientation and _should_use_horizontal_bar(chart_df[x]):
+                    resolved_orientation = "h"
                 if resolved_orientation == "h":
                     fig = px.bar(
                         chart_df,
@@ -274,6 +404,7 @@ def generate_chart(
                     )
 
         if fig is not None:
+            category_count = int(chart_df[x].nunique(dropna=False)) if "chart_df" in locals() and x in chart_df.columns else 0
             if chart_type in {"bar_percent", "bar_hpercent"}:
                 fig.update_layout(barnorm="percent")
             fig.update_traces(
@@ -284,6 +415,10 @@ def generate_chart(
                 margin=dict(l=56, r=24, t=36, b=56),
                 legend_title_text=None,
             )
+            if resolved_orientation == "v" and category_count >= _BAR_DENSE_COUNT:
+                fig.update_xaxes(tickangle=-35, automargin=True)
+            if resolved_orientation == "h" and category_count >= _BAR_DENSE_COUNT:
+                fig.update_layout(height=min(1400, max(480, 220 + category_count * 18)))
             if title:
                 fig.update_layout(title=str(title))
             if x_title:
