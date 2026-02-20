@@ -1713,6 +1713,20 @@ export function QueryView() {
     await runQuery(query)
   }
 
+  const handleCopyMessage = async (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {}
+  }
+
+  const handleRerunMessage = async (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed || isLoading) return
+    await runQuery(text)
+  }
+
   const handleQuickQuestion = async (text: string) => {
     await runQuery(text)
   }
@@ -2229,25 +2243,63 @@ export function QueryView() {
               </div>
             ) : (
               messages.map((message, idx) => {
+                const isUser = message.role === "user"
                 const isAssistant = message.role === "assistant"
                 const isLastMessage = idx === messages.length - 1
                 const showSuggestions = isAssistant && isLastMessage && suggestedQuestions.length > 0
+                const canActOnMessage = Boolean(message.content.trim())
                 return (
                   <div key={message.id} className={cn(
                     "flex flex-col",
-                    message.role === "user" ? "items-end" : "items-start"
+                    isUser ? "items-end" : "items-start"
                   )}>
-                    <div className={cn(
-                      "max-w-[80%] rounded-lg p-3",
-                      message.role === "user" 
-                        ? "bg-primary text-primary-foreground" 
-                        : "bg-secondary"
-                    )}>
-                      <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
-                      <span className="text-[10px] opacity-70 mt-1 block">
-                        {message.timestamp.toLocaleTimeString()}
-                      </span>
-                    </div>
+                    {isUser ? (
+                      <div className="flex max-w-[85%] items-start gap-2">
+                        <div className="flex shrink-0 items-center gap-1 pt-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                            title="복사"
+                            aria-label="질문 복사"
+                            onClick={() => {
+                              void handleCopyMessage(message.content)
+                            }}
+                            disabled={!canActOnMessage}
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                            title="재실행"
+                            aria-label="질문 재실행"
+                            onClick={() => {
+                              void handleRerunMessage(message.content)
+                            }}
+                            disabled={isLoading || !canActOnMessage}
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                        <div className="min-w-0 flex-1 rounded-lg bg-primary p-3 text-primary-foreground">
+                          <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
+                          <span className="mt-1 block text-[10px] opacity-70">
+                            {message.timestamp.toLocaleTimeString()}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="max-w-[80%] rounded-lg bg-secondary p-3">
+                        <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
+                        <span className="mt-1 block text-[10px] opacity-70">
+                          {message.timestamp.toLocaleTimeString()}
+                        </span>
+                      </div>
+                    )}
                     {showSuggestions && (
                       <div className="mt-2 max-w-[80%] rounded-lg border border-border/60 bg-secondary/40 p-2">
                         <div className="mb-2 flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -2286,12 +2338,12 @@ export function QueryView() {
 
           {/* Input */}
           <div className="p-4 border-t border-border">
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <Textarea
                 placeholder="자연어로 질문하세요..."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="min-h-[60px] resize-none"
+                className="min-h-[60px] min-w-0 flex-1 resize-none"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault()
@@ -2302,7 +2354,7 @@ export function QueryView() {
               <Button 
                 onClick={handleSubmit} 
                 disabled={isLoading || !query.trim()}
-                className="px-4"
+                className="shrink-0 px-4"
               >
                 <Send className="w-4 h-4" />
               </Button>
