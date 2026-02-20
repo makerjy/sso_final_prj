@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -180,9 +181,16 @@ interface DashboardFolderOption {
   name: string
 }
 
+interface CategoryTypeSummary {
+  value: string
+  occurrences: number
+}
+
 const MAX_PERSIST_ROWS = 200
 const VIZ_CACHE_PREFIX = "viz_cache_v3:"
 const VIZ_CACHE_TTL_MS = 1000 * 60 * 60 * 24
+const CHART_CATEGORY_THRESHOLD = 10
+const CHART_CATEGORY_DEFAULT_COUNT = 10
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
 const hashText = (value: string) => {
@@ -233,6 +241,100 @@ const sanitizeRunResult = (runResult: RunResponse | null): RunResponse | null =>
   return {
     ...runResult,
     result: trimPreview(runResult.result) || runResult.result,
+  }
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value)
+
+const readFiniteNumber = (value: unknown): number | null => {
+  const num = typeof value === "number" ? value : Number(value)
+  return Number.isFinite(num) ? num : null
+}
+
+const getAxisKey = (trace: Record<string, unknown>): "x" | "y" =>
+  String(trace.orientation || "").toLowerCase() === "h" ? "y" : "x"
+
+const collectCategoryTypeSummariesFromFigure = (
+  figure: { data?: unknown[]; layout?: Record<string, unknown> } | null
+): CategoryTypeSummary[] => {
+  if (!figure || !Array.isArray(figure.data)) return []
+  const counts = new Map<string, number>()
+  const order: string[] = []
+  for (const rawTrace of figure.data) {
+    if (!isRecord(rawTrace)) continue
+    const axisKey = getAxisKey(rawTrace)
+    const axisValues = rawTrace[axisKey]
+    if (!Array.isArray(axisValues) || !axisValues.length) continue
+    for (const rawValue of axisValues) {
+      const value = String(rawValue ?? "").trim()
+      if (!value) continue
+      if (!counts.has(value)) order.push(value)
+      counts.set(value, (counts.get(value) || 0) + 1)
+    }
+  }
+  return order.map((value) => ({
+    value,
+    occurrences: counts.get(value) || 0,
+  }))
+}
+
+const filterFigureByCategories = (
+  figure: { data?: unknown[]; layout?: Record<string, unknown> } | null,
+  selectedCategories: string[] | null
+): { data?: unknown[]; layout?: Record<string, unknown> } | null => {
+  if (!figure || !selectedCategories?.length || !Array.isArray(figure.data)) return figure
+  const allowed = new Set(selectedCategories)
+  const filteredData = figure.data.map((rawTrace) => {
+    if (!isRecord(rawTrace)) return rawTrace
+    const trace = { ...rawTrace } as Record<string, unknown>
+    const axisKey = getAxisKey(trace)
+    const axisValues = trace[axisKey]
+    if (!Array.isArray(axisValues) || !axisValues.length) return trace
+    const normalizedAxis = axisValues.map((value) => String(value ?? "").trim())
+    const filteredIndexes: number[] = []
+    for (let i = 0; i < normalizedAxis.length; i += 1) {
+      if (allowed.has(normalizedAxis[i])) filteredIndexes.push(i)
+    }
+    if (!filteredIndexes.length) {
+      trace[axisKey] = []
+      const otherAxisKey = axisKey === "x" ? "y" : "x"
+      if (Array.isArray(trace[otherAxisKey]) && trace[otherAxisKey].length === axisValues.length) {
+        trace[otherAxisKey] = []
+      }
+      return trace
+    }
+
+    trace[axisKey] = filteredIndexes.map((idx) => axisValues[idx])
+
+    const otherAxisKey = axisKey === "x" ? "y" : "x"
+    const otherAxis = trace[otherAxisKey]
+    if (Array.isArray(otherAxis) && otherAxis.length === axisValues.length) {
+      trace[otherAxisKey] = filteredIndexes.map((idx) => otherAxis[idx])
+    }
+
+    if (Array.isArray(trace.text) && trace.text.length === axisValues.length) {
+      trace.text = filteredIndexes.map((idx) => trace.text[idx])
+    }
+
+    if (Array.isArray(trace.customdata) && trace.customdata.length === axisValues.length) {
+      trace.customdata = filteredIndexes.map((idx) => trace.customdata[idx])
+    }
+
+    if (isRecord(trace.marker)) {
+      const marker = { ...trace.marker }
+      if (Array.isArray(marker.color) && marker.color.length === axisValues.length) {
+        marker.color = filteredIndexes.map((idx) => marker.color[idx])
+      }
+      trace.marker = marker
+    }
+
+    return trace
+  })
+
+  return {
+    ...figure,
+    data: filteredData,
   }
 }
 
@@ -469,6 +571,9 @@ export function QueryView() {
   const [visibleTabLimit, setVisibleTabLimit] = useState(3)
   const [selectedStatsBoxColumn, setSelectedStatsBoxColumn] = useState<string>("")
   const [showStatsBoxPlot, setShowStatsBoxPlot] = useState(false)
+  const [isChartCategoryPickerOpen, setIsChartCategoryPickerOpen] = useState(false)
+  const [selectedChartCategoryValues, setSelectedChartCategoryValues] = useState<string[]>([])
+  const [selectedChartCategoryCount, setSelectedChartCategoryCount] = useState<string>(String(CHART_CATEGORY_DEFAULT_COUNT))
   const saveTimerRef = useRef<number | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
@@ -578,6 +683,40 @@ export function QueryView() {
     if (fig && typeof fig === "object") return fig as { data?: unknown[]; layout?: Record<string, unknown> }
     return null
   }, [recommendedAnalysis])
+  const normalizedRecommendedLayout = useMemo<Record<string, unknown>>(() => {
+    const baseLayout = isRecord(recommendedFigure?.layout) ? { ...recommendedFigure.layout } : {}
+    delete baseLayout.height
+    delete baseLayout.width
+
+    const sourceMargin = isRecord(baseLayout.margin) ? baseLayout.margin : {}
+    const marginLeft = readFiniteNumber(sourceMargin.l)
+    const marginRight = readFiniteNumber(sourceMargin.r)
+    const marginTop = readFiniteNumber(sourceMargin.t)
+    const marginBottom = readFiniteNumber(sourceMargin.b)
+
+    const xaxis = isRecord(baseLayout.xaxis)
+      ? { ...baseLayout.xaxis, automargin: true }
+      : { automargin: true }
+    const yaxis = isRecord(baseLayout.yaxis)
+      ? { ...baseLayout.yaxis, automargin: true }
+      : { automargin: true }
+
+    return {
+      ...baseLayout,
+      autosize: true,
+      margin: {
+        ...sourceMargin,
+        l: Math.max(64, marginLeft ?? 0),
+        r: Math.max(24, marginRight ?? 0),
+        t: Math.max(20, marginTop ?? 0),
+        b: Math.max(56, marginBottom ?? 0),
+      },
+      xaxis,
+      yaxis,
+      paper_bgcolor: "transparent",
+      plot_bgcolor: "transparent",
+    }
+  }, [recommendedFigure])
   const recommendedChart = useMemo(() => {
     const spec = recommendedAnalysis?.chart_spec
     if (!spec || !previewRecords.length) return null
@@ -724,6 +863,107 @@ export function QueryView() {
       },
     }
   }, [chartForRender])
+  const activeVisualizationFigure = recommendedFigure || localFallbackFigure
+  const chartCategorySummaries = useMemo(
+    () => collectCategoryTypeSummariesFromFigure(activeVisualizationFigure),
+    [activeVisualizationFigure]
+  )
+  const chartCategories = useMemo(
+    () => chartCategorySummaries.map((item) => item.value),
+    [chartCategorySummaries]
+  )
+  const isChartCategoryPickerEnabled = chartCategories.length > CHART_CATEGORY_THRESHOLD
+  const chartCategoryCountOptions = useMemo(() => {
+    if (!isChartCategoryPickerEnabled) return []
+    const total = chartCategories.length
+    const presetCounts = Array.from(new Set([10, 20, 30, 50].filter((count) => count < total)))
+    return [
+      ...presetCounts.map((count) => ({ value: String(count), label: `${count}개` })),
+      { value: "all", label: `전체 (${total})` },
+    ]
+  }, [isChartCategoryPickerEnabled, chartCategories])
+  const applyChartCategoryCountSelection = (nextValue: string) => {
+    setSelectedChartCategoryCount(nextValue)
+    if (!isChartCategoryPickerEnabled) return
+    if (nextValue === "all") {
+      setSelectedChartCategoryValues(chartCategories)
+      return
+    }
+    const parsed = Number(nextValue)
+    const count = Number.isFinite(parsed)
+      ? Math.max(1, Math.min(chartCategories.length, parsed))
+      : Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)
+    setSelectedChartCategoryValues(chartCategories.slice(0, count))
+  }
+  const toggleChartCategoryValue = (category: string, checked: boolean) => {
+    if (!isChartCategoryPickerEnabled) return
+    setSelectedChartCategoryValues((previous) => {
+      const fallback = chartCategories.slice(0, Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
+      const base = previous.length ? previous : fallback
+      const nextSet = new Set(base)
+      if (checked) {
+        nextSet.add(category)
+      } else {
+        if (nextSet.size === 1 && nextSet.has(category)) return base
+        nextSet.delete(category)
+      }
+      return chartCategories.filter((value) => nextSet.has(value))
+    })
+  }
+  useEffect(() => {
+    if (!isChartCategoryPickerEnabled) {
+      if (selectedChartCategoryValues.length) setSelectedChartCategoryValues([])
+      if (selectedChartCategoryCount !== String(CHART_CATEGORY_DEFAULT_COUNT)) {
+        setSelectedChartCategoryCount(String(CHART_CATEGORY_DEFAULT_COUNT))
+      }
+      if (isChartCategoryPickerOpen) setIsChartCategoryPickerOpen(false)
+      return
+    }
+    const validSet = new Set(chartCategories)
+    const normalizedSelected = selectedChartCategoryValues.filter((value) => validSet.has(value))
+    if (normalizedSelected.length !== selectedChartCategoryValues.length) {
+      setSelectedChartCategoryValues(normalizedSelected)
+      return
+    }
+    if (!normalizedSelected.length) {
+      const initialCount = Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)
+      setSelectedChartCategoryValues(chartCategories.slice(0, initialCount))
+      if (selectedChartCategoryCount !== String(initialCount)) {
+        setSelectedChartCategoryCount(String(initialCount))
+      }
+      return
+    }
+    if (
+      selectedChartCategoryCount !== "all" &&
+      !chartCategoryCountOptions.some((option) => option.value === selectedChartCategoryCount)
+    ) {
+      setSelectedChartCategoryCount(String(Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)))
+    }
+  }, [
+    isChartCategoryPickerEnabled,
+    chartCategories,
+    selectedChartCategoryValues,
+    selectedChartCategoryCount,
+    chartCategoryCountOptions,
+    isChartCategoryPickerOpen,
+  ])
+  const effectiveSelectedChartCategories = useMemo(() => {
+    if (!isChartCategoryPickerEnabled) return null
+    if (selectedChartCategoryValues.length) return selectedChartCategoryValues
+    return chartCategories.slice(0, Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
+  }, [isChartCategoryPickerEnabled, selectedChartCategoryValues, chartCategories])
+  const selectedChartCategorySet = useMemo(
+    () => new Set(effectiveSelectedChartCategories || []),
+    [effectiveSelectedChartCategories]
+  )
+  const filteredRecommendedFigure = useMemo(
+    () => filterFigureByCategories(recommendedFigure, effectiveSelectedChartCategories),
+    [recommendedFigure, effectiveSelectedChartCategories]
+  )
+  const filteredLocalFallbackFigure = useMemo(
+    () => filterFigureByCategories(localFallbackFigure, effectiveSelectedChartCategories),
+    [localFallbackFigure, effectiveSelectedChartCategories]
+  )
 
   const survivalFigure = useMemo(() => {
     if (!survivalChartData?.length) return null
@@ -2813,9 +3053,9 @@ export function QueryView() {
                     <div className="rounded-lg border border-border p-6 text-xs text-muted-foreground">
                       시각화 추천 플랜을 생성 중입니다...
                     </div>
-                  ) : previewColumns.length === 0 ? (
+                  ) : previewColumns.length < 2 ? (
                     <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
-                      결과 테이블이 없어 차트를 표시할 수 없습니다.
+                      결과 컬럼이 1개라 시각화를 표시할 수 없습니다. 최소 2개 컬럼이 필요합니다.
                     </div>
                   ) : recommendedFigure ? (
                     <div className="space-y-3">
@@ -2830,18 +3070,29 @@ export function QueryView() {
                           <Badge variant="secondary">Y: {recommendedAnalysis.chart_spec.y}</Badge>
                         )}
                       </div>
-                      <div className="h-[380px] w-full rounded-lg border border-border p-2">
+                      {isChartCategoryPickerEnabled && (
+                        <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-2 md:flex-row md:items-center md:justify-between">
+                          <div className="text-xs text-muted-foreground">
+                            X축 카테고리 {chartCategories.length}개 / 선택 {(effectiveSelectedChartCategories?.length ?? chartCategories.length)}개
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 w-fit"
+                            onClick={() => setIsChartCategoryPickerOpen(true)}
+                          >
+                            종류 선택
+                          </Button>
+                        </div>
+                      )}
+                      <div className="h-[380px] w-full rounded-lg border border-border p-2 overflow-hidden">
                         <Plot
-                          data={Array.isArray(recommendedFigure.data) ? recommendedFigure.data : []}
-                          layout={{
-                            autosize: true,
-                            margin: { l: 48, r: 16, t: 16, b: 48 },
-                            paper_bgcolor: "transparent",
-                            plot_bgcolor: "transparent",
-                            ...(recommendedFigure.layout || {}),
-                          }}
+                          data={Array.isArray(filteredRecommendedFigure?.data) ? filteredRecommendedFigure.data : []}
+                          layout={normalizedRecommendedLayout}
                           config={{ responsive: true, displaylogo: false, editable: true }}
                           style={{ width: "100%", height: "100%" }}
+                          useResizeHandler
                         />
                       </div>
                       {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
@@ -2864,12 +3115,29 @@ export function QueryView() {
                         <Badge variant="secondary">Y: {chartForRender.yKey}</Badge>
                         {!recommendedChart && <Badge variant="secondary">AUTO</Badge>}
                       </div>
-                      <div className="h-[340px] w-full rounded-lg border border-border p-3">
+                      {isChartCategoryPickerEnabled && (
+                        <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-2 md:flex-row md:items-center md:justify-between">
+                          <div className="text-xs text-muted-foreground">
+                            X축 카테고리 {chartCategories.length}개 / 선택 {(effectiveSelectedChartCategories?.length ?? chartCategories.length)}개
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 w-fit"
+                            onClick={() => setIsChartCategoryPickerOpen(true)}
+                          >
+                            종류 선택
+                          </Button>
+                        </div>
+                      )}
+                      <div className="h-[340px] w-full rounded-lg border border-border p-3 overflow-hidden">
                         <Plot
-                          data={Array.isArray(localFallbackFigure.data) ? localFallbackFigure.data : []}
-                          layout={localFallbackFigure.layout || {}}
+                          data={Array.isArray(filteredLocalFallbackFigure?.data) ? filteredLocalFallbackFigure.data : []}
+                          layout={filteredLocalFallbackFigure?.layout || {}}
                           config={{ responsive: true, displaylogo: false, editable: true }}
                           style={{ width: "100%", height: "100%" }}
+                          useResizeHandler
                         />
                       </div>
                       {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
@@ -2885,12 +3153,13 @@ export function QueryView() {
                         <Badge variant="outline">SURVIVAL (PLOTLY)</Badge>
                         <Badge variant="secondary">Median: {medianSurvival.toFixed(2)}</Badge>
                       </div>
-                      <div className="h-[360px] w-full rounded-lg border border-border p-2">
+                      <div className="h-[360px] w-full rounded-lg border border-border p-2 overflow-hidden">
                         <Plot
                           data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
                           layout={survivalFigure.layout || {}}
                           config={{ responsive: true, displaylogo: false, editable: true }}
                           style={{ width: "100%", height: "100%" }}
+                          useResizeHandler
                         />
                       </div>
                     </div>
@@ -2932,6 +3201,103 @@ export function QueryView() {
           </div>
         )}
       </div>
+
+      <Dialog open={isChartCategoryPickerOpen} onOpenChange={setIsChartCategoryPickerOpen}>
+        <DialogContent className="w-[min(96vw,980px)] max-h-[90dvh] overflow-hidden p-0 sm:max-w-[980px]">
+          <div className="flex h-full max-h-[90dvh] flex-col">
+            <DialogHeader className="border-b border-border/70 px-6 py-4 pr-12">
+              <DialogTitle>시각화 종류 선택</DialogTitle>
+              <DialogDescription>
+                X축 카테고리가 많을 때 표시할 개수와 종류를 선택합니다.
+              </DialogDescription>
+            </DialogHeader>
+
+            {isChartCategoryPickerEnabled ? (
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+                <div className="space-y-3">
+                  <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-3">
+                    <div className="text-xs text-muted-foreground">
+                      총 {chartCategories.length}개 / 선택 {(effectiveSelectedChartCategories?.length ?? chartCategories.length)}개
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-muted-foreground">표시 개수</span>
+                      <div className="w-[160px]">
+                        <Select value={selectedChartCategoryCount} onValueChange={applyChartCategoryCountSelection}>
+                          <SelectTrigger className="h-8">
+                            <SelectValue placeholder="표시 개수 선택" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {chartCategoryCountOptions.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8"
+                        onClick={() =>
+                          applyChartCategoryCountSelection(
+                            String(Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
+                          )
+                        }
+                      >
+                        기본 {Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)}개
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8"
+                        onClick={() => applyChartCategoryCountSelection("all")}
+                      >
+                        전체 선택
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="overflow-hidden rounded-lg border border-border">
+                    {chartCategorySummaries.map((item, idx) => (
+                      <label
+                        key={`${item.value}-${idx}`}
+                        className={cn(
+                          "flex cursor-pointer items-center gap-3 px-3 py-2 text-sm hover:bg-secondary/40",
+                          idx > 0 && "border-t border-border/60"
+                        )}
+                      >
+                        <Checkbox
+                          checked={selectedChartCategorySet.has(item.value)}
+                          onCheckedChange={(checked) => toggleChartCategoryValue(item.value, checked === true)}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{item.value}</span>
+                        <Badge variant="outline" className="text-[10px]">
+                          {item.occurrences}
+                        </Badge>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="px-6 py-4">
+                <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
+                  X축 카테고리가 10개 이하라서 종류 선택 팝업이 필요하지 않습니다.
+                </div>
+              </div>
+            )}
+
+            <DialogFooter className="border-t border-border/70 px-6 py-4">
+              <Button variant="outline" onClick={() => setIsChartCategoryPickerOpen(false)}>
+                닫기
+              </Button>
+            </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isSaveDialogOpen} onOpenChange={setIsSaveDialogOpen}>
         <DialogContent className="max-w-md">

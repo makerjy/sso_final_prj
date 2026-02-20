@@ -29,3 +29,38 @@ def test_analysis_agent_empty_rows_uses_fallback_insight() -> None:
     assert result.insight
     assert result.total_latency_ms is not None
     assert isinstance(result.stage_latency_ms, dict)
+
+
+def test_analysis_agent_skips_visualization_without_numeric_columns() -> None:
+    df = pd.DataFrame(
+        {
+            "diagnosis_name": ["Hypertension", "Diabetes", "COPD"],
+            "gender_label": ["M", "F", "M"],
+        }
+    )
+
+    result = analyze_and_visualize(
+        "진단별 환자 목록 보여줘",
+        "SELECT diagnosis_name, gender_label FROM sample",
+        df,
+    )
+
+    assert result.analyses == []
+    assert any("no_numeric_columns" in reason for reason in result.failure_reasons)
+    assert result.fallback_stage == "no_numeric_columns"
+    assert result.insight
+
+
+def test_analysis_agent_skips_visualization_with_single_column() -> None:
+    df = pd.DataFrame({"average_admissions": [2396.8, 2397.0, 2397.2]})
+
+    result = analyze_and_visualize(
+        "평균 입원 건수 보여줘",
+        "SELECT average_admissions FROM sample",
+        df,
+    )
+
+    assert result.analyses == []
+    assert any("insufficient_columns" in reason for reason in result.failure_reasons)
+    assert result.fallback_stage == "insufficient_columns"
+    assert result.insight

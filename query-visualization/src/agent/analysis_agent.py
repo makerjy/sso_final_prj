@@ -270,6 +270,74 @@ def analyze_and_visualize(
     _tick("schema_summary", s)
 
     s = perf_counter()
+    column_count = len(df.columns)
+    _tick("column_guard", s)
+    if column_count < 2:
+        _record_failure(failure_reasons, "insufficient_columns: visualization_skipped")
+        insight = (
+            "Visualization was skipped because the SQL result has only one column. "
+            "Please return at least two columns (for example, one category/time column and one numeric column)."
+        )
+        total_latency_ms = round((perf_counter() - t0) * 1000.0, 2)
+        log_event(
+            "analysis.skip.insufficient_columns",
+            {
+                "request_id": request_id,
+                "row_count": len(df),
+                "column_count": column_count,
+                "total_latency_ms": total_latency_ms,
+                "stage_latency_ms": stage_latency_ms,
+            },
+        )
+        return VisualizationResponse(
+            sql=sql,
+            table_preview=df.head(20).to_dict(orient="records"),
+            analyses=[],
+            insight=insight,
+            fallback_used=False,
+            fallback_stage="insufficient_columns",
+            failure_reasons=failure_reasons,
+            attempt_count=attempt_count,
+            request_id=request_id,
+            total_latency_ms=total_latency_ms,
+            stage_latency_ms=stage_latency_ms,
+        )
+
+    s = perf_counter()
+    numeric_columns = _numeric_columns_for_visualization(df)
+    _tick("numeric_guard", s)
+    if not numeric_columns:
+        _record_failure(failure_reasons, "no_numeric_columns: visualization_skipped")
+        insight = (
+            "SQL 결과 컬럼에 수치형 데이터가 없어 시각화를 생성하지 않았습니다. "
+            "COUNT/AVG/SUM 같은 수치형 컬럼을 포함해 다시 실행해 주세요."
+        )
+        total_latency_ms = round((perf_counter() - t0) * 1000.0, 2)
+        log_event(
+            "analysis.skip.no_numeric_columns",
+            {
+                "request_id": request_id,
+                "row_count": len(df),
+                "column_count": len(df.columns),
+                "total_latency_ms": total_latency_ms,
+                "stage_latency_ms": stage_latency_ms,
+            },
+        )
+        return VisualizationResponse(
+            sql=sql,
+            table_preview=df.head(20).to_dict(orient="records"),
+            analyses=[],
+            insight=insight,
+            fallback_used=False,
+            fallback_stage="no_numeric_columns",
+            failure_reasons=failure_reasons,
+            attempt_count=attempt_count,
+            request_id=request_id,
+            total_latency_ms=total_latency_ms,
+            stage_latency_ms=stage_latency_ms,
+        )
+
+    s = perf_counter()
     rag = retrieval.retrieve_context(user_query, df_schema)
     rag_context = rag.get("context_text", "")
     _tick("rag_retrieve", s)
