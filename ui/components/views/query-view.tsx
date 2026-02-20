@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Progress } from "@/components/ui/progress"
 import {
   Dialog,
   DialogContent,
@@ -192,6 +193,9 @@ const VIZ_CACHE_PREFIX = "viz_cache_v3:"
 const VIZ_CACHE_TTL_MS = 1000 * 60 * 60 * 24
 const CHART_CATEGORY_THRESHOLD = 10
 const CHART_CATEGORY_DEFAULT_COUNT = 10
+const BOX_PLOT_TRIGGER_MIN_W = 120
+const BOX_PLOT_TRIGGER_MAX_W = 360
+const BOX_PLOT_TRIGGER_EXTRA_PX = 64
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
 const hashText = (value: string) => {
@@ -324,18 +328,21 @@ const filterFigureByCategories = (
       trace[otherAxisKey] = filteredIndexes.map((idx) => otherAxis[idx])
     }
 
-    if (Array.isArray(trace.text) && trace.text.length === axisValues.length) {
-      trace.text = filteredIndexes.map((idx) => trace.text[idx])
+    const traceText = trace.text
+    if (Array.isArray(traceText) && traceText.length === axisValues.length) {
+      trace.text = filteredIndexes.map((idx) => traceText[idx])
     }
 
-    if (Array.isArray(trace.customdata) && trace.customdata.length === axisValues.length) {
-      trace.customdata = filteredIndexes.map((idx) => trace.customdata[idx])
+    const traceCustomData = trace.customdata
+    if (Array.isArray(traceCustomData) && traceCustomData.length === axisValues.length) {
+      trace.customdata = filteredIndexes.map((idx) => traceCustomData[idx])
     }
 
     if (isRecord(trace.marker)) {
       const marker = { ...trace.marker }
-      if (Array.isArray(marker.color) && marker.color.length === axisValues.length) {
-        marker.color = filteredIndexes.map((idx) => marker.color[idx])
+      const markerColor = marker.color
+      if (Array.isArray(markerColor) && markerColor.length === axisValues.length) {
+        marker.color = filteredIndexes.map((idx) => markerColor[idx])
       }
       trace.marker = marker
     }
@@ -543,6 +550,7 @@ export function QueryView() {
   }
   const [query, setQuery] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [loadingProgress, setLoadingProgress] = useState(0)
   const [showResults, setShowResults] = useState(false)
   const [showSqlPanel, setShowSqlPanel] = useState(false)
   const [showQueryResultPanel, setShowQueryResultPanel] = useState(false)
@@ -582,6 +590,8 @@ export function QueryView() {
   const [visibleTabLimit, setVisibleTabLimit] = useState(3)
   const [selectedStatsBoxColumn, setSelectedStatsBoxColumn] = useState<string>("")
   const [showStatsBoxPlot, setShowStatsBoxPlot] = useState(false)
+  const [statsBoxValueLabel, setStatsBoxValueLabel] = useState("박스플롯 컬럼 선택")
+  const [statsBoxTriggerWidth, setStatsBoxTriggerWidth] = useState(BOX_PLOT_TRIGGER_MIN_W)
   const [isChartCategoryPickerOpen, setIsChartCategoryPickerOpen] = useState(false)
   const [selectedChartCategoryValues, setSelectedChartCategoryValues] = useState<string[]>([])
   const [selectedChartCategoryCount, setSelectedChartCategoryCount] = useState<string>(String(CHART_CATEGORY_DEFAULT_COUNT))
@@ -607,6 +617,24 @@ export function QueryView() {
     containerWidth: 0,
   })
   const requestTokenRef = useRef(0)
+  const activeTabIdRef = useRef("")
+  const statsBoxMeasureRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingProgress(0)
+      return
+    }
+    setLoadingProgress(12)
+    const intervalId = window.setInterval(() => {
+      setLoadingProgress((prev) => {
+        if (prev >= 92) return 92
+        const step = prev < 60 ? 8 : prev < 80 ? 4 : 2
+        return Math.min(92, prev + step)
+      })
+    }, 550)
+    return () => window.clearInterval(intervalId)
+  }, [isLoading])
 
   const payload = response?.payload
   const mode = payload?.mode
@@ -1124,7 +1152,9 @@ export function QueryView() {
   const statsBoxPlotFigures = useMemo<Array<{ column: string; figure: { data: unknown[]; layout: Record<string, unknown> } }>>(() => {
     if (!previewRecords.length || !boxPlotEligibleRows.length) return []
     const figures: Array<{ column: string; figure: { data: unknown[]; layout: Record<string, unknown> } }> = []
+    const seenColumns = new Set<string>()
     for (const row of boxPlotEligibleRows) {
+      if (seenColumns.has(row.column)) continue
       const values = previewRecords
         .map((record) => Number(record?.[row.column]))
         .filter((value) => Number.isFinite(value))
@@ -1153,6 +1183,7 @@ export function QueryView() {
           },
         },
       })
+      seenColumns.add(row.column)
     }
     return figures
   }, [previewRecords, boxPlotEligibleRows])
@@ -1172,6 +1203,25 @@ export function QueryView() {
     const exists = statsBoxPlotFigures.some((item) => item.column === selectedStatsBoxColumn)
     if (!exists) setSelectedStatsBoxColumn(statsBoxPlotFigures[0].column)
   }, [statsBoxPlotFigures, selectedStatsBoxColumn, showStatsBoxPlot])
+  useEffect(() => {
+    const nextLabel = selectedStatsBoxPlot?.column || "박스플롯 컬럼 선택"
+    setStatsBoxValueLabel((prev) => (prev === nextLabel ? prev : nextLabel))
+  }, [selectedStatsBoxPlot?.column])
+  useEffect(() => {
+    const measure = () => {
+      const measureEl = statsBoxMeasureRef.current
+      if (!measureEl) return
+      const textWidth = Math.ceil(measureEl.getBoundingClientRect().width)
+      const nextWidth = Math.min(
+        BOX_PLOT_TRIGGER_MAX_W,
+        Math.max(BOX_PLOT_TRIGGER_MIN_W, textWidth + BOX_PLOT_TRIGGER_EXTRA_PX)
+      )
+      setStatsBoxTriggerWidth((prev) => (prev === nextWidth ? prev : nextWidth))
+    }
+    measure()
+    const rafId = window.requestAnimationFrame(measure)
+    return () => window.cancelAnimationFrame(rafId)
+  }, [statsBoxValueLabel])
   const resultInterpretation = useMemo(() => {
     if (summary) return summary
     if (!previewColumns.length) return "쿼리 결과가 없어 해석을 생성할 수 없습니다."
@@ -1359,6 +1409,40 @@ export function QueryView() {
     preferredChartType: null,
   })
 
+  const syncPanelsFromTab = (tab: ResultTabState | null) => {
+    if (!tab) {
+      setResponse(null)
+      setRunResult(null)
+      setVisualizationResult(null)
+      setVisualizationError(null)
+      setError(null)
+      setEditedSql("")
+      setIsEditing(false)
+      setSuggestedQuestions([])
+      setLastQuestion("")
+      setShowSqlPanel(false)
+      setShowQueryResultPanel(false)
+      setShowResults(false)
+      return
+    }
+
+    setResponse(tab.response)
+    setRunResult(tab.runResult)
+    setVisualizationResult(tab.visualization)
+    setVisualizationError(tab.error || null)
+    setError(tab.error || null)
+    setEditedSql(tab.editedSql || tab.sql || "")
+    setIsEditing(tab.isEditing)
+    setSuggestedQuestions(tab.suggestedQuestions || [])
+    setLastQuestion(tab.question || "")
+    setShowSqlPanel(tab.showSqlPanel)
+    setShowQueryResultPanel(tab.showQueryResultPanel)
+    setShowResults(true)
+  }
+
+  const isTargetTabActive = (targetTabId?: string) =>
+    !targetTabId || targetTabId === activeTabIdRef.current
+
   const updateTab = (tabId: string, patch: Partial<ResultTabState>) => {
     setResultTabs((prev) =>
       prev.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab))
@@ -1377,7 +1461,7 @@ export function QueryView() {
     targetTabId?: string
   ) => {
     if (!sqlText?.trim() || !previewData?.columns?.length || !previewData?.rows?.length) {
-      if (!targetTabId || targetTabId === activeTabId) {
+      if (isTargetTabActive(targetTabId)) {
         setVisualizationResult(null)
         setVisualizationError(null)
       }
@@ -1386,9 +1470,12 @@ export function QueryView() {
       }
       return null
     }
+    const shouldTrackLoading = isTargetTabActive(targetTabId)
     // Always fetch latest visualization/insight from server (disable local cache)
-    setVisualizationLoading(true)
-    setVisualizationError(null)
+    if (shouldTrackLoading) {
+      setVisualizationLoading(true)
+      setVisualizationError(null)
+    }
     try {
       const records = previewData.rows.map((row) =>
         Object.fromEntries(previewData.columns.map((col, idx) => [col, row?.[idx]]))
@@ -1412,7 +1499,7 @@ export function QueryView() {
       )
       if (!res.ok) throw new Error(await readError(res))
       const data: VisualizationResponsePayload = await res.json()
-      if (!targetTabId || targetTabId === activeTabId) {
+      if (isTargetTabActive(targetTabId)) {
         setVisualizationResult(data)
       }
       if (targetTabId) {
@@ -1421,7 +1508,7 @@ export function QueryView() {
       return data
     } catch (err: any) {
       const message = err?.message || "시각화 추천 플랜 조회에 실패했습니다."
-      if (!targetTabId || targetTabId === activeTabId) {
+      if (isTargetTabActive(targetTabId)) {
         setVisualizationResult(null)
         setVisualizationError(message)
       }
@@ -1430,7 +1517,9 @@ export function QueryView() {
       }
       return null
     } finally {
-      setVisualizationLoading(false)
+      if (shouldTrackLoading) {
+        setVisualizationLoading(false)
+      }
     }
   }
 
@@ -1495,22 +1584,8 @@ export function QueryView() {
   }, [])
 
   useEffect(() => {
-    if (!activeTabId) return
-    const tab = resultTabs.find((item) => item.id === activeTabId)
-    if (!tab) return
-    setResponse(tab.response)
-    setRunResult(tab.runResult)
-    setVisualizationResult(tab.visualization)
-    setVisualizationError(tab.error || null)
-    setError(tab.error || null)
-    setEditedSql(tab.editedSql || tab.sql || "")
-    setIsEditing(tab.isEditing)
-    setSuggestedQuestions(tab.suggestedQuestions || [])
-    setLastQuestion(tab.question || "")
-    setShowSqlPanel(tab.showSqlPanel)
-    setShowQueryResultPanel(tab.showQueryResultPanel)
-    setShowResults(true)
-  }, [activeTabId, resultTabs])
+    activeTabIdRef.current = activeTabId
+  }, [activeTabId])
 
   useEffect(() => {
     const syncDesktopLayout = () => {
@@ -1875,6 +1950,7 @@ export function QueryView() {
 
     const tab = createResultTab(trimmed)
     setResultTabs((prev) => [tab, ...prev])
+    activeTabIdRef.current = tab.id
     setActiveTabId(tab.id)
     setShowResults(true)
     const requestToken = ++requestTokenRef.current
@@ -1924,18 +2000,25 @@ export function QueryView() {
       }
       if (requestToken !== requestTokenRef.current) return
       const data: OneShotResponse = await res.json()
-      setResponse(data)
+      const shouldSyncActivePanels = activeTabIdRef.current === tab.id
+      if (shouldSyncActivePanels) {
+        setResponse(data)
+      }
       updateTab(tab.id, {
         response: data,
         status: "success",
       })
       if (data.payload.mode === "clarify") {
-        setShowSqlPanel(false)
-        setShowQueryResultPanel(false)
-        setEditedSql("")
-        setIsEditing(false)
+        if (shouldSyncActivePanels) {
+          setShowSqlPanel(false)
+          setShowQueryResultPanel(false)
+          setEditedSql("")
+          setIsEditing(false)
+        }
         const clarificationSuggestions = buildClarificationSuggestions(data.payload)
-        setSuggestedQuestions(clarificationSuggestions)
+        if (shouldSyncActivePanels) {
+          setSuggestedQuestions(clarificationSuggestions)
+        }
         updateTab(tab.id, {
           suggestedQuestions: clarificationSuggestions,
           response: data,
@@ -1951,19 +2034,23 @@ export function QueryView() {
         return
       }
 
-      setShowResults(true)
-      setShowSqlPanel(false)
-      setShowQueryResultPanel(false)
+      if (shouldSyncActivePanels) {
+        setShowResults(true)
+        setShowSqlPanel(false)
+        setShowQueryResultPanel(false)
+      }
       const generatedSql =
         (data.payload.mode === "demo"
           ? data.payload.result?.sql
           : data.payload.final?.final_sql || data.payload.draft?.final_sql) || ""
-      setEditedSql(
-        generatedSql
-      )
-      setIsEditing(false)
+      if (shouldSyncActivePanels) {
+        setEditedSql(generatedSql)
+        setIsEditing(false)
+      }
       const suggestions: string[] = []
-      setSuggestedQuestions(suggestions)
+      if (shouldSyncActivePanels) {
+        setSuggestedQuestions(suggestions)
+      }
       updateTab(tab.id, {
         question: trimmed,
         sql: generatedSql,
@@ -1997,7 +2084,9 @@ export function QueryView() {
           fetchedRows,
         })
         const llmSuggestions = answerPayload.suggestedQuestions
-        setSuggestedQuestions(llmSuggestions)
+        if (activeTabIdRef.current === tab.id) {
+          setSuggestedQuestions(llmSuggestions)
+        }
         updateTab(tab.id, {
           resultData: preview,
           suggestedQuestions: llmSuggestions,
@@ -2034,7 +2123,9 @@ export function QueryView() {
         err?.name === "AbortError"
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
           : err?.message || "요청이 실패했습니다."
-      setError(message)
+      if (activeTabIdRef.current === tab.id) {
+        setError(message)
+      }
       updateTab(tab.id, {
         status: "error",
         error: message,
@@ -2049,7 +2140,9 @@ export function QueryView() {
         }
       ])
     } finally {
-      setIsLoading(false)
+      if (requestToken === requestTokenRef.current) {
+        setIsLoading(false)
+      }
     }
   }
 
@@ -2302,10 +2395,12 @@ export function QueryView() {
     }
 
     const data: RunResponse = await res.json()
-    setRunResult(data)
-    setShowResults(true)
-    setIsEditing(false)
-    const targetTabId = tabId || activeTabId
+    const targetTabId = tabId || activeTabIdRef.current
+    if (isTargetTabActive(targetTabId)) {
+      setRunResult(data)
+      setShowResults(true)
+      setIsEditing(false)
+    }
     const fetchedRows = Number(data.result?.row_count ?? 0)
     const totalRows =
       typeof data.result?.total_count === "number" && Number.isFinite(data.result.total_count)
@@ -2325,7 +2420,9 @@ export function QueryView() {
       targetTabId
     )
 
-    setSuggestedQuestions([])
+    if (isTargetTabActive(targetTabId)) {
+      setSuggestedQuestions([])
+    }
     if (targetTabId) {
       updateTab(targetTabId, {
         sql: data.sql || sql || "",
@@ -2341,7 +2438,9 @@ export function QueryView() {
 
     const answerPayload = await answerPromise
     const suggestions = answerPayload.suggestedQuestions
-    setSuggestedQuestions(suggestions)
+    if (isTargetTabActive(targetTabId)) {
+      setSuggestedQuestions(suggestions)
+    }
     if (targetTabId) {
       updateTab(targetTabId, {
         suggestedQuestions: suggestions,
@@ -2429,7 +2528,9 @@ export function QueryView() {
       tab.editedSql = sqlText
       tab.showSqlPanel = true
       tab.preferredChartType = preferredChartType
+      syncPanelsFromTab(tab)
       setResultTabs((prev) => [tab, ...prev])
+      activeTabIdRef.current = tab.id
       setActiveTabId(tab.id)
       setShowResults(true)
       setIsLoading(true)
@@ -2519,6 +2620,7 @@ export function QueryView() {
     setSuggestedQuestions([])
     setError(null)
     setResultTabs([])
+    activeTabIdRef.current = ""
     setActiveTabId("")
     fetch(apiUrl("/chat/history"), {
       method: "POST",
@@ -2532,16 +2634,19 @@ export function QueryView() {
       const next = prev.filter((tab) => tab.id !== tabId)
       if (activeTabId === tabId) {
         const fallback = next[0]
+        syncPanelsFromTab(fallback || null)
+        activeTabIdRef.current = fallback?.id || ""
         setActiveTabId(fallback?.id || "")
-        if (!fallback) {
-          setShowResults(false)
-        }
       }
       return next
     })
   }
 
   const handleActivateTab = (tabId: string, promote = false) => {
+    const targetTab = resultTabs.find((item) => item.id === tabId)
+    if (!targetTab) return
+    syncPanelsFromTab(targetTab)
+    activeTabIdRef.current = tabId
     setActiveTabId(tabId)
     if (!promote) return
     setResultTabs((prev) => {
@@ -2605,14 +2710,8 @@ export function QueryView() {
                     isUser ? "items-end" : "items-start"
                   )}>
                     {isUser ? (
-                      <div className="group max-w-[85%]">
-                        <div className="rounded-lg bg-primary p-3 text-primary-foreground">
-                          <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
-                          <span className="mt-1 block text-[10px] opacity-70">
-                            {message.timestamp.toLocaleTimeString()}
-                          </span>
-                        </div>
-                        <div className="mt-1 flex items-center justify-end gap-0.5 pr-0.5 opacity-100 transition-opacity md:pointer-events-none md:opacity-0 md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100">
+                      <div className="group flex max-w-[85%] items-end gap-1">
+                        <div className="flex shrink-0 items-center gap-0.5 pb-0.5 opacity-100 transition-opacity md:pointer-events-none md:opacity-0 md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100">
                           <Button
                             type="button"
                             variant="ghost"
@@ -2641,6 +2740,12 @@ export function QueryView() {
                           >
                             <RefreshCw className="h-2.5 w-2.5" />
                           </Button>
+                        </div>
+                        <div className="rounded-lg bg-primary p-3 text-primary-foreground">
+                          <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
+                          <span className="mt-1 block text-[10px] opacity-70">
+                            {message.timestamp.toLocaleTimeString()}
+                          </span>
                         </div>
                       </div>
                     ) : (
@@ -2679,9 +2784,12 @@ export function QueryView() {
             )}
             {isLoading && (
               <div className="flex justify-start">
-                <div className="bg-secondary rounded-lg p-3 flex items-center gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">분석 중...</span>
+                <div className="w-full max-w-[320px] rounded-lg bg-secondary p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-sm">분석 중...</span>
+                    <span className="text-[11px] text-muted-foreground">{Math.round(loadingProgress)}%</span>
+                  </div>
+                  <Progress value={loadingProgress} className="h-1.5" />
                 </div>
               </div>
             )}
@@ -3068,50 +3176,47 @@ export function QueryView() {
 
                       {statsBoxPlotFigures.length ? (
                         <div className="space-y-3">
-                          <div
-                            className={cn(
-                              "gap-2",
-                              isDesktopLayout
-                                ? "grid min-h-8 grid-cols-[auto_1fr_auto] items-center"
-                                : "flex flex-col"
-                            )}
-                          >
-                            <div className="text-xs text-muted-foreground">
+                          <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-3">
+                            <div className="justify-self-start text-xs text-muted-foreground">
                               박스플롯 (컬럼별 개별 분포)
                             </div>
-                            <div
-                              className={cn(
-                                isDesktopLayout
-                                  ? "w-full max-w-[260px] justify-self-center"
-                                  : "mx-auto w-full max-w-[260px]"
-                              )}
-                            >
+                            <div className="relative justify-self-center">
+                              <span
+                                ref={statsBoxMeasureRef}
+                                className="pointer-events-none absolute -z-10 opacity-0 whitespace-nowrap text-sm font-normal"
+                              >
+                                {statsBoxValueLabel}
+                              </span>
                               {showStatsBoxPlot && statsBoxPlotFigures.length > 1 ? (
-                                <div className="w-full">
-                                  <Select
-                                    value={selectedStatsBoxPlot?.column || undefined}
-                                    onValueChange={setSelectedStatsBoxColumn}
+                                <Select
+                                  value={selectedStatsBoxPlot?.column || undefined}
+                                  onValueChange={(value) => {
+                                    setSelectedStatsBoxColumn(value)
+                                    setStatsBoxValueLabel(value)
+                                  }}
+                                >
+                                  <SelectTrigger
+                                    className="relative h-8 pr-8 [&_svg]:absolute [&_svg]:right-3"
+                                    style={{ width: statsBoxTriggerWidth }}
                                   >
-                                    <SelectTrigger className="relative h-8 w-full justify-end pr-8 [&_svg]:absolute [&_svg]:right-3">
-                                      <SelectValue
-                                        className="pointer-events-none absolute left-1/2 max-w-[calc(100%-2.5rem)] -translate-x-1/2 truncate text-center"
-                                        placeholder="박스플롯 컬럼 선택"
-                                      />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {statsBoxPlotFigures.map((item) => (
-                                        <SelectItem key={item.column} value={item.column}>
-                                          {item.column}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                </div>
+                                    <SelectValue
+                                      className="pointer-events-none absolute left-1/2 max-w-[calc(100%-2.5rem)] -translate-x-1/2 truncate text-center text-sm font-normal"
+                                      placeholder="박스플롯 컬럼 선택"
+                                    />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {statsBoxPlotFigures.map((item) => (
+                                      <SelectItem key={item.column} value={item.column}>
+                                        {item.column}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
                               ) : (
-                                <div className={cn(isDesktopLayout ? "h-8 w-full" : "hidden")} />
+                                <div className="h-8" style={{ width: statsBoxTriggerWidth }} />
                               )}
                             </div>
-                            <div className={cn(isDesktopLayout ? "justify-self-end" : "self-end")}>
+                            <div className="justify-self-end">
                               <Button
                                 variant="outline"
                                 size="sm"

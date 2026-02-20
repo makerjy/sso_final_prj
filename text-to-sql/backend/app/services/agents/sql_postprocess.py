@@ -2199,6 +2199,14 @@ def _normalize_count_aliases(sql: str) -> tuple[str, list[str]]:
     aliases: list[str] = []
 
     def repl(match: re.Match) -> str:
+        # Skip COUNT aliases that are part of arithmetic expressions such as
+        # "... / COUNT(...) AS ratio", otherwise ratio aliases can be rewritten to CNT.
+        prev_idx = match.start() - 1
+        while prev_idx >= 0 and text[prev_idx].isspace():
+            prev_idx -= 1
+        if prev_idx >= 0 and text[prev_idx] in {"/", "+", "-", "*", "("}:
+            return match.group(0)
+
         alias = match.group(2)
         if alias.upper() == "CNT" or alias.upper() in keywords:
             return match.group(0)

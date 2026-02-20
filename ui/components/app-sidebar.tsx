@@ -3,18 +3,19 @@
 import { cn } from "@/lib/utils"
 import {
   Database,
+  // Settings2,
   MessageSquare,
   LayoutDashboard,
   FileText,
   Heart,
   ChevronLeft,
   ChevronRight,
-  Users,
+  Users
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
-export type ViewType = "connection" | "query" | "dashboard" | "audit" | "cohort"
+export type ViewType = "connection" | "query" | "dashboard" | "audit" | "cohort" | "pdf-cohort"
 
 interface AppSidebarProps {
   currentView: ViewType
@@ -25,30 +26,29 @@ interface AppSidebarProps {
 
 const navItems = [
   { id: "connection" as const, label: "DB 연결", icon: Database, description: "연결/권한 설정" },
+  // { id: "context" as const, label: "컨텍스트", icon: Settings2, description: "관리자 설정" },
   { id: "query" as const, label: "쿼리", icon: MessageSquare, description: "질문 & SQL" },
   { id: "dashboard" as const, label: "대시보드", icon: LayoutDashboard, description: "결과 보드" },
-  { id: "audit" as const, label: "감사 로그", icon: FileText, description: "의사결정 추적" },
+  { id: "audit" as const, label: "감사 로그", icon: FileText, description: "의사결정 증적" },
 ]
 
 const secondaryItems = [
-  { id: "cohort" as const, label: "코호트", icon: Users, description: "코호트 생성" },
+  { id: "cohort" as const, label: "단면 연구 집단", icon: Users, description: "코호트 및 시뮬레이션" },
+  { id: "pdf-cohort" as const, label: "PDF 코호트 분석", icon: FileText, description: "논문 기반 분석" },
 ]
 
 export function AppSidebar({ currentView, onViewChange, collapsed, onToggleCollapse }: AppSidebarProps) {
   return (
     <TooltipProvider delayDuration={0}>
-      <aside
-        className={cn(
-          "flex flex-col h-screen bg-card border-r border-border transition-all duration-300",
-          collapsed ? "w-16" : "w-56"
-        )}
-      >
-        <div
-          className={cn(
-            "flex items-center h-16 border-b border-border px-4",
-            collapsed ? "justify-center" : "gap-3"
-          )}
-        >
+      <aside className={cn(
+        "flex flex-col h-screen bg-card border-r border-border transition-all duration-300",
+        collapsed ? "w-16" : "w-56"
+      )}>
+        {/* Logo */}
+        <div className={cn(
+          "flex items-center h-16 border-b border-border px-4",
+          collapsed ? "justify-center" : "gap-3"
+        )}>
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary shrink-0">
             <Heart className="w-4 h-4 text-primary-foreground" />
           </div>
@@ -60,13 +60,9 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
           )}
         </div>
 
+        {/* Main Navigation */}
         <nav className="flex-1 p-2 space-y-1">
-          <div
-            className={cn(
-              "text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2",
-              collapsed ? "text-center" : "px-3"
-            )}
-          >
+          <div className={cn("text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2", collapsed ? "text-center" : "px-3")}>
             {collapsed ? "Main" : "메인 메뉴"}
           </div>
           {navItems.map((item) => {
@@ -87,12 +83,7 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
                 {!collapsed && (
                   <div className="flex-1 text-left overflow-hidden">
                     <div className="text-sm font-medium truncate">{item.label}</div>
-                    <div
-                      className={cn(
-                        "text-[10px] truncate",
-                        isActive ? "text-primary-foreground/70" : "text-muted-foreground"
-                      )}
-                    >
+                    <div className={cn("text-[10px] truncate", isActive ? "text-primary-foreground/70" : "text-muted-foreground")}>
                       {item.description}
                     </div>
                   </div>
@@ -114,13 +105,9 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
             return button
           })}
 
-          <div
-            className={cn(
-              "text-[10px] font-medium text-muted-foreground uppercase tracking-wider mt-6 mb-2",
-              collapsed ? "text-center" : "px-3"
-            )}
-          >
-            {collapsed ? "Sub" : "추가 기능"}
+          {/* Secondary Navigation */}
+          <div className={cn("text-[10px] font-medium text-muted-foreground uppercase tracking-wider mt-6 mb-2", collapsed ? "text-center" : "px-3")}>
+            {collapsed ? "Sub" : "부가 기능"}
           </div>
           {secondaryItems.map((item) => {
             const isActive = currentView === item.id
@@ -140,12 +127,7 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
                 {!collapsed && (
                   <div className="flex-1 text-left overflow-hidden">
                     <div className="text-sm font-medium truncate">{item.label}</div>
-                    <div
-                      className={cn(
-                        "text-[10px] truncate",
-                        isActive ? "text-primary-foreground/70" : "text-muted-foreground"
-                      )}
-                    >
+                    <div className={cn("text-[10px] truncate", isActive ? "text-primary-foreground/70" : "text-muted-foreground")}>
                       {item.description}
                     </div>
                   </div>
@@ -168,6 +150,7 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
           })}
         </nav>
 
+        {/* Collapse Toggle */}
         <div className="p-2 border-t border-border">
           <Button
             variant="ghost"
@@ -183,4 +166,3 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
     </TooltipProvider>
   )
 }
-

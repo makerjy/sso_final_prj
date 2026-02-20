@@ -85,7 +85,7 @@ export function ConnectionView() {
     if (width >= 640) return 2
     return 1
   }
-  const [isConnected, setIsConnected] = useState(false)
+  const [connectionState, setConnectionState] = useState<"checking" | "connected" | "disconnected">("checking")
   const [isReadOnly, setIsReadOnly] = useState(true)
   const [isTesting, setIsTesting] = useState(false)
   const [poolStatus, setPoolStatus] = useState<PoolStatus | null>(null)
@@ -112,6 +112,8 @@ export function ConnectionView() {
   })
 
   const [tableScopes, setTableScopes] = useState<TableScope[]>(DEFAULT_TABLE_SCOPES)
+  const isConnected = connectionState === "connected"
+  const isCheckingConnection = connectionState === "checking"
   const oraAuthFailed = Boolean(statusError?.toUpperCase().includes("ORA-01017"))
 
   const readError = async (res: Response) => {
@@ -133,9 +135,9 @@ export function ConnectionView() {
       }
       const data: PoolStatus = await res.json()
       setPoolStatus(data)
-      setIsConnected(Boolean(data?.open))
+      setConnectionState(Boolean(data?.open) ? "connected" : "disconnected")
     } catch (err: any) {
-      setIsConnected(false)
+      setConnectionState("disconnected")
       setPoolStatus(null)
       setStatusError(err?.message || "연결 상태를 확인할 수 없습니다.")
     } finally {
@@ -313,6 +315,7 @@ export function ConnectionView() {
   )
 
   useEffect(() => {
+    setConnectionState("checking")
     fetchPoolStatus()
     loadSettings()
   }, [stateUser])
@@ -342,16 +345,26 @@ export function ConnectionView() {
       {/* Connection Status */}
       <Card className={cn(
         "border-2 transition-colors",
-        isConnected ? "border-primary/50 bg-primary/5" : "border-destructive/50 bg-destructive/5"
+        isCheckingConnection
+          ? "border-border bg-secondary/20"
+          : isConnected
+            ? "border-primary/50 bg-primary/5"
+            : "border-destructive/50 bg-destructive/5"
       )}>
         <CardContent className="p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className={cn(
                 "flex items-center justify-center w-10 h-10 rounded-full",
-                isConnected ? "bg-primary/20" : "bg-destructive/20"
+                isCheckingConnection
+                  ? "bg-secondary"
+                  : isConnected
+                    ? "bg-primary/20"
+                    : "bg-destructive/20"
               )}>
-                {isConnected ? (
+                {isCheckingConnection ? (
+                  <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
+                ) : isConnected ? (
                   <CheckCircle2 className="w-5 h-5 text-primary" />
                 ) : (
                   <XCircle className="w-5 h-5 text-destructive" />
@@ -360,9 +373,9 @@ export function ConnectionView() {
               <div>
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-foreground">
-                    {isConnected ? "연결됨" : "연결 안됨"}
+                    {isCheckingConnection ? "연결 확인 중" : isConnected ? "연결됨" : "연결 안됨"}
                   </span>
-                  {isConnected && (
+                  {isConnected && !isCheckingConnection && (
                     <Badge variant="outline" className="text-xs">
                       <Lock className="w-3 h-3 mr-1" />
                       SSL
@@ -372,9 +385,9 @@ export function ConnectionView() {
                 <p className="text-sm text-muted-foreground">
                   {statusError
                     ? statusError
-                    : isTesting && !lastChecked
+                    : isCheckingConnection
                       ? "연결 확인 중..."
-                      : isConnected
+                    : isConnected
                         ? `Oracle pool ${poolStatus?.open_connections ?? "-"} / ${poolStatus?.max ?? "-"} (busy ${poolStatus?.busy ?? "-"})`
                         : "데이터베이스에 연결되지 않았습니다"}
                 </p>

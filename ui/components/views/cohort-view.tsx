@@ -402,9 +402,8 @@ export function CohortView() {
   }, [apiBaseUrl, cohortUser])
 
   useEffect(() => {
-    void runSimulation(DEFAULT_PARAMS)
     void loadSavedCohorts()
-  }, [runSimulation, loadSavedCohorts, cohortUser])
+  }, [loadSavedCohorts])
 
   const handleRunSimulation = async () => {
     await runSimulation(currentParams)
@@ -558,7 +557,6 @@ export function CohortView() {
   const currentMetrics = simulation?.current ?? EMPTY_METRICS
   const simulatedMetrics = simulation?.simulated ?? EMPTY_METRICS
   const survivalData = simulation?.survival ?? []
-  const confidence = simulation?.confidence
   const subgroupData: SubgroupPayload = simulation?.subgroups ?? { age: [], gender: [], comorbidity: [] }
   const survivalFigure = useMemo(() => {
     if (!survivalData.length) return null
@@ -647,12 +645,6 @@ export function CohortView() {
     },
   ]
 
-  const readmitDiff = simulatedMetrics.readmitRate - currentMetrics.readmitRate
-  const mortalityDiff = simulatedMetrics.mortalityRate - currentMetrics.mortalityRate
-  const losDiff = simulatedMetrics.avgLosDays - currentMetrics.avgLosDays
-  const icuAdmissionDiff = simulatedMetrics.icuAdmissionRate - currentMetrics.icuAdmissionRate
-  const erAdmissionDiff = simulatedMetrics.erAdmissionRate - currentMetrics.erAdmissionRate
-
   const getChangeIndicator = (current: number, simulated: number, unit: string, inverse = false) => {
     const diff = simulated - current
     const isPositive = inverse ? diff < 0 : diff > 0
@@ -687,12 +679,6 @@ export function CohortView() {
     .filter(Boolean)
     .join(" AND ")
 
-  const formatPValue = (value: number) => {
-    if (!Number.isFinite(value)) return "-"
-    if (value < 0.001) return "< 0.001"
-    return value.toFixed(3)
-  }
-
   const formatSigned = (value: number, unit: "count" | "pct" | "days") => {
     const prefix = value > 0 ? "+" : ""
     if (unit === "count") return `${prefix}${Math.round(value).toLocaleString()}`
@@ -705,6 +691,27 @@ export function CohortView() {
     { key: "gender", title: "성별", rows: subgroupData.gender },
     { key: "comorbidity", title: "기저질환", rows: subgroupData.comorbidity },
   ]
+
+  const insightText = useMemo(() => {
+    if (!simulation) {
+      return "시뮬레이션 실행 후 결과를 바탕으로 인사이트를 생성합니다."
+    }
+
+    const readmitDiff = simulatedMetrics.readmitRate - currentMetrics.readmitRate
+    const mortalityDiff = simulatedMetrics.mortalityRate - currentMetrics.mortalityRate
+    const losDiff = simulatedMetrics.avgLosDays - currentMetrics.avgLosDays
+    const icuAdmissionDiff = simulatedMetrics.icuAdmissionRate - currentMetrics.icuAdmissionRate
+    const erAdmissionDiff = simulatedMetrics.erAdmissionRate - currentMetrics.erAdmissionRate
+
+    return (
+      `재입원율 ${readmitDiff >= 0 ? "증가" : "감소"} ${Math.abs(readmitDiff).toFixed(1)}%p, ` +
+      `사망률 ${mortalityDiff >= 0 ? "증가" : "감소"} ${Math.abs(mortalityDiff).toFixed(1)}%p, ` +
+      `평균 재원일수 ${losDiff >= 0 ? "증가" : "감소"} ${Math.abs(losDiff).toFixed(1)}일, ` +
+      `ICU 입실 비율 ${icuAdmissionDiff >= 0 ? "증가" : "감소"} ${Math.abs(icuAdmissionDiff).toFixed(1)}%p, ` +
+      `응급실 입원 비율 ${erAdmissionDiff >= 0 ? "증가" : "감소"} ${Math.abs(erAdmissionDiff).toFixed(1)}%p로 추정됩니다. ` +
+      "임계값 변경 시 분모가 달라질 수 있으므로 하위 그룹 분석을 함께 확인하세요."
+    )
+  }, [simulation, currentMetrics, simulatedMetrics])
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
@@ -996,65 +1003,6 @@ export function CohortView() {
                   </div>
                 </div>
 
-                <div className="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <h4 className="text-sm font-medium text-foreground">통계 신뢰도</h4>
-                    <Badge variant="outline" className="text-[10px]">
-                      {confidence ? `n=${confidence.nSimulated.toLocaleString()}` : "데이터 없음"}
-                    </Badge>
-                  </div>
-                  {confidence ? (
-                    <div className="space-y-2">
-                      <div className="text-[11px] text-muted-foreground">
-                        {confidence.method} / alpha={confidence.alpha} / bootstrap={confidence.bootstrapIterations}
-                      </div>
-                      <div className="overflow-x-auto rounded-md border border-border/70 bg-background/80">
-                        <table className="w-full text-xs">
-                          <thead className="border-b border-border/70 bg-secondary/40">
-                            <tr>
-                              <th className="text-left px-2 py-2">지표</th>
-                              <th className="text-right px-2 py-2">차이(시뮬-현재)</th>
-                              <th className="text-right px-2 py-2">95% CI</th>
-                              <th className="text-right px-2 py-2">p-value</th>
-                              <th className="text-right px-2 py-2">효과크기</th>
-                              <th className="text-right px-2 py-2">Bootstrap CI</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {confidence.metrics.map((item) => (
-                              <tr key={item.metric} className="border-b border-border/40">
-                                <td className="px-2 py-1.5">
-                                  <div className="flex items-center gap-2">
-                                    <span>{item.label}</span>
-                                    <Badge variant={item.significant ? "default" : "secondary"} className="text-[10px]">
-                                      {item.significant ? "유의" : "비유의"}
-                                    </Badge>
-                                  </div>
-                                </td>
-                                <td className="text-right px-2 py-1.5">
-                                  {item.difference.toFixed(2)} {item.unit === "days" ? "일" : "%p"}
-                                </td>
-                                <td className="text-right px-2 py-1.5">
-                                  [{item.ci[0].toFixed(2)}, {item.ci[1].toFixed(2)}]
-                                </td>
-                                <td className="text-right px-2 py-1.5">{formatPValue(item.pValue)}</td>
-                                <td className="text-right px-2 py-1.5">
-                                  {item.effectSize.toFixed(3)} ({item.effectSizeType})
-                                </td>
-                                <td className="text-right px-2 py-1.5">
-                                  [{item.bootstrapCi[0].toFixed(2)}, {item.bootstrapCi[1].toFixed(2)}]
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-xs text-muted-foreground">신뢰도 계산 결과가 없습니다.</div>
-                  )}
-                </div>
-
                 <div className="rounded-lg border border-border bg-secondary/20 p-4 space-y-4">
                   <div className="flex items-center justify-between gap-2">
                     <h4 className="text-sm font-medium text-foreground">서브그룹/층화 분석</h4>
@@ -1117,14 +1065,7 @@ export function CohortView() {
                     <AlertTriangle className="w-4 h-4 text-primary" />
                     분석 인사이트
                   </h4>
-                  <p className="text-sm text-muted-foreground">
-                    재입원율 {readmitDiff >= 0 ? "증가" : "감소"} {Math.abs(readmitDiff).toFixed(1)}%p, 사망률{" "}
-                    {mortalityDiff >= 0 ? "증가" : "감소"} {Math.abs(mortalityDiff).toFixed(1)}%p, 평균 재원일수{" "}
-                    {losDiff >= 0 ? "증가" : "감소"} {Math.abs(losDiff).toFixed(1)}일, ICU 입실 비율{" "}
-                    {icuAdmissionDiff >= 0 ? "증가" : "감소"} {Math.abs(icuAdmissionDiff).toFixed(1)}%p, 응급실 입원 비율{" "}
-                    {erAdmissionDiff >= 0 ? "증가" : "감소"} {Math.abs(erAdmissionDiff).toFixed(1)}%p로 추정됩니다.
-                    임계값 변경 시 분모가 달라질 수 있으므로 하위 그룹 분석을 함께 확인하세요.
-                  </p>
+                  <p className="text-sm text-muted-foreground">{insightText}</p>
                 </div>
               </CardContent>
             </Card>

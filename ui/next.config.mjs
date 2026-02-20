@@ -1,3 +1,6 @@
+import { dirname } from "node:path"
+import { fileURLToPath } from "node:url"
+
 const API_BASE_URL =
   process.env.API_BASE_URL ||
   process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -6,9 +9,13 @@ const VIS_API_BASE_URL =
   process.env.VIS_API_BASE_URL ||
   process.env.NEXT_PUBLIC_VIS_API_BASE_URL ||
   "http://localhost:8080"
+const projectRoot = dirname(fileURLToPath(import.meta.url))
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  turbopack: {
+    root: projectRoot,
+  },
   output: "standalone",
   typescript: {
     ignoreBuildErrors: true,

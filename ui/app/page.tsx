@@ -4,10 +4,12 @@ import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { AppSidebar, type ViewType } from "@/components/app-sidebar"
 import { ConnectionView } from "@/components/views/connection-view"
+// import { ContextView } from "@/components/views/context-view"
 import { QueryView } from "@/components/views/query-view"
 import { DashboardView } from "@/components/views/dashboard-view"
 import { AuditView } from "@/components/views/audit-view"
 import { CohortView } from "@/components/views/cohort-view"
+import { PdfCohortView } from "@/components/views/pdf-cohort-view"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { useAuth } from "@/components/auth-provider"
 import { Badge } from "@/components/ui/badge"
@@ -17,7 +19,7 @@ import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 
 const VIEW_STORAGE_PREFIX = "querylens.ui.lastView:"
-const VIEW_VALUES: ViewType[] = ["connection", "query", "dashboard", "audit", "cohort"]
+const VIEW_VALUES: ViewType[] = ["connection", "query", "dashboard", "audit", "cohort", "pdf-cohort"]
 
 const isViewType = (value: string): value is ViewType =>
   VIEW_VALUES.includes(value as ViewType)
@@ -31,6 +33,7 @@ export default function Home() {
   const [isViewRestored, setIsViewRestored] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [hasOpenedQueryView, setHasOpenedQueryView] = useState(false)
 
   useEffect(() => {
     if (!isHydrated) return
@@ -70,6 +73,14 @@ export default function Home() {
     } catch {}
   }, [isHydrated, user, isViewRestored, currentView])
 
+  useEffect(() => {
+    if (currentView === "query") {
+      setHasOpenedQueryView(true)
+    }
+  }, [currentView])
+
+  const shouldRenderQueryView = hasOpenedQueryView || currentView === "query"
+
   const userInitial = useMemo(() => {
     const base = (user?.name || "").trim()
     return base ? base.charAt(0) : "?"
@@ -84,14 +95,16 @@ export default function Home() {
     switch (currentView) {
       case "connection":
         return <ConnectionView />
-      case "query":
-        return <QueryView />
+      // case "context":
+      //   return <ContextView />
       case "dashboard":
         return <DashboardView />
       case "audit":
         return <AuditView />
       case "cohort":
         return <CohortView />
+      case "pdf-cohort":
+        return <PdfCohortView />
       default:
         return <ConnectionView />
     }
@@ -99,13 +112,13 @@ export default function Home() {
 
   const getViewTitle = () => {
     switch (currentView) {
-      case "connection":
-        return "DB 연결/권한 설정"
-      case "query":
-        return "쿼리 & 분석"
+      case "connection": return "DB 연결/권한 설정"
+      // case "context": return "컨텍스트 편집"
+      case "query": return "쿼리 & 분석"
       case "dashboard": return "결과 보드"
       case "audit": return "감사 로그"
       case "cohort": return "코호트 생성"
+      case "pdf-cohort": return "PDF 코호트 분석"
       default: return ""
     }
   }
@@ -175,15 +188,15 @@ export default function Home() {
               <Badge variant="secondary" className="text-[10px] sm:text-xs hidden sm:inline-flex">부가 기능</Badge>
             )}
           </div>
-          
+
           <div className="flex items-center gap-2 sm:gap-4">
             {/* DB Status - Hidden on mobile */}
             <div className="hidden md:flex items-center gap-2 text-xs text-muted-foreground">
               <Database className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">MIMIC-IV 연결</span>
+              <span className="hidden lg:inline">MIMIC-IV 연동</span>
               <Badge variant="outline" className="text-[10px]">Read-Only</Badge>
             </div>
-            
+
             {/* HIPAA Badge - Hidden on mobile */}
             <div className="hidden md:flex items-center gap-2 text-xs text-primary">
               <Shield className="w-3.5 h-3.5" />
@@ -237,7 +250,12 @@ export default function Home() {
 
         {/* Content Area */}
         <main className="flex-1 overflow-auto">
-          {renderView()}
+          {shouldRenderQueryView && (
+            <section className={currentView === "query" ? "block" : "hidden"} aria-hidden={currentView !== "query"}>
+              <QueryView />
+            </section>
+          )}
+          {currentView !== "query" && renderView()}
         </main>
       </div>
     </div>
