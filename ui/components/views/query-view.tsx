@@ -148,6 +148,7 @@ interface PersistedQueryState {
   messages: PersistedChatMessage[]
   response: OneShotResponse | null
   runResult: RunResponse | null
+  visualizationResult?: VisualizationResponsePayload | null
   suggestedQuestions: string[]
   showResults: boolean
   showSqlPanel: boolean
@@ -242,6 +243,16 @@ const sanitizeRunResult = (runResult: RunResponse | null): RunResponse | null =>
     ...runResult,
     result: trimPreview(runResult.result) || runResult.result,
   }
+}
+
+const sanitizeVisualizationResult = (
+  visualization: VisualizationResponsePayload | null
+): VisualizationResponsePayload | null => {
+  if (!visualization) return null
+  const insight = String(visualization.insight || "").trim()
+  if (!insight) return null
+  // Persist only insight text to avoid storing oversized figure payloads.
+  return { insight }
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -574,6 +585,8 @@ export function QueryView() {
   const [isChartCategoryPickerOpen, setIsChartCategoryPickerOpen] = useState(false)
   const [selectedChartCategoryValues, setSelectedChartCategoryValues] = useState<string[]>([])
   const [selectedChartCategoryCount, setSelectedChartCategoryCount] = useState<string>(String(CHART_CATEGORY_DEFAULT_COUNT))
+  const [draftChartCategoryValues, setDraftChartCategoryValues] = useState<string[]>([])
+  const [draftChartCategoryCount, setDraftChartCategoryCount] = useState<string>(String(CHART_CATEGORY_DEFAULT_COUNT))
   const saveTimerRef = useRef<number | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
@@ -882,23 +895,28 @@ export function QueryView() {
       { value: "all", label: `전체 (${total})` },
     ]
   }, [isChartCategoryPickerEnabled, chartCategories])
+  const defaultChartCategoryCount = Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)
+  const defaultChartCategorySelection = useMemo(
+    () => chartCategories.slice(0, defaultChartCategoryCount),
+    [chartCategories, defaultChartCategoryCount]
+  )
   const applyChartCategoryCountSelection = (nextValue: string) => {
-    setSelectedChartCategoryCount(nextValue)
+    setDraftChartCategoryCount(nextValue)
     if (!isChartCategoryPickerEnabled) return
     if (nextValue === "all") {
-      setSelectedChartCategoryValues(chartCategories)
+      setDraftChartCategoryValues(chartCategories)
       return
     }
     const parsed = Number(nextValue)
     const count = Number.isFinite(parsed)
       ? Math.max(1, Math.min(chartCategories.length, parsed))
       : Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)
-    setSelectedChartCategoryValues(chartCategories.slice(0, count))
+    setDraftChartCategoryValues(chartCategories.slice(0, count))
   }
   const toggleChartCategoryValue = (category: string, checked: boolean) => {
     if (!isChartCategoryPickerEnabled) return
-    setSelectedChartCategoryValues((previous) => {
-      const fallback = chartCategories.slice(0, Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
+    setDraftChartCategoryValues((previous) => {
+      const fallback = defaultChartCategorySelection
       const base = previous.length ? previous : fallback
       const nextSet = new Set(base)
       if (checked) {
@@ -916,6 +934,10 @@ export function QueryView() {
       if (selectedChartCategoryCount !== String(CHART_CATEGORY_DEFAULT_COUNT)) {
         setSelectedChartCategoryCount(String(CHART_CATEGORY_DEFAULT_COUNT))
       }
+      if (draftChartCategoryValues.length) setDraftChartCategoryValues([])
+      if (draftChartCategoryCount !== String(CHART_CATEGORY_DEFAULT_COUNT)) {
+        setDraftChartCategoryCount(String(CHART_CATEGORY_DEFAULT_COUNT))
+      }
       if (isChartCategoryPickerOpen) setIsChartCategoryPickerOpen(false)
       return
     }
@@ -926,10 +948,9 @@ export function QueryView() {
       return
     }
     if (!normalizedSelected.length) {
-      const initialCount = Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)
-      setSelectedChartCategoryValues(chartCategories.slice(0, initialCount))
-      if (selectedChartCategoryCount !== String(initialCount)) {
-        setSelectedChartCategoryCount(String(initialCount))
+      setSelectedChartCategoryValues(defaultChartCategorySelection)
+      if (selectedChartCategoryCount !== String(defaultChartCategoryCount)) {
+        setSelectedChartCategoryCount(String(defaultChartCategoryCount))
       }
       return
     }
@@ -937,7 +958,7 @@ export function QueryView() {
       selectedChartCategoryCount !== "all" &&
       !chartCategoryCountOptions.some((option) => option.value === selectedChartCategoryCount)
     ) {
-      setSelectedChartCategoryCount(String(Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length)))
+      setSelectedChartCategoryCount(String(defaultChartCategoryCount))
     }
   }, [
     isChartCategoryPickerEnabled,
@@ -945,17 +966,72 @@ export function QueryView() {
     selectedChartCategoryValues,
     selectedChartCategoryCount,
     chartCategoryCountOptions,
+    defaultChartCategoryCount,
+    defaultChartCategorySelection,
     isChartCategoryPickerOpen,
+    draftChartCategoryValues,
+    draftChartCategoryCount,
+  ])
+  useEffect(() => {
+    if (!isChartCategoryPickerOpen) return
+    const nextDraftValues = selectedChartCategoryValues.length
+      ? selectedChartCategoryValues
+      : defaultChartCategorySelection
+    setDraftChartCategoryValues(nextDraftValues)
+    const countIsValid =
+      selectedChartCategoryCount === "all" ||
+      chartCategoryCountOptions.some((option) => option.value === selectedChartCategoryCount)
+    setDraftChartCategoryCount(countIsValid ? selectedChartCategoryCount : String(defaultChartCategoryCount))
+  }, [
+    isChartCategoryPickerOpen,
+    selectedChartCategoryValues,
+    selectedChartCategoryCount,
+    chartCategoryCountOptions,
+    defaultChartCategorySelection,
+    defaultChartCategoryCount,
   ])
   const effectiveSelectedChartCategories = useMemo(() => {
     if (!isChartCategoryPickerEnabled) return null
     if (selectedChartCategoryValues.length) return selectedChartCategoryValues
-    return chartCategories.slice(0, Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
-  }, [isChartCategoryPickerEnabled, selectedChartCategoryValues, chartCategories])
+    return defaultChartCategorySelection
+  }, [isChartCategoryPickerEnabled, selectedChartCategoryValues, defaultChartCategorySelection])
+  const effectiveDraftChartCategories = useMemo(() => {
+    if (!isChartCategoryPickerEnabled) return null
+    if (draftChartCategoryValues.length) return draftChartCategoryValues
+    return defaultChartCategorySelection
+  }, [isChartCategoryPickerEnabled, draftChartCategoryValues, defaultChartCategorySelection])
   const selectedChartCategorySet = useMemo(
-    () => new Set(effectiveSelectedChartCategories || []),
-    [effectiveSelectedChartCategories]
+    () => new Set(effectiveDraftChartCategories || []),
+    [effectiveDraftChartCategories]
   )
+  const handleApplyChartCategorySelection = () => {
+    if (!isChartCategoryPickerEnabled) {
+      setIsChartCategoryPickerOpen(false)
+      return
+    }
+    const nextSelected = effectiveDraftChartCategories?.length
+      ? effectiveDraftChartCategories
+      : defaultChartCategorySelection
+    setSelectedChartCategoryValues(nextSelected)
+
+    const draftCountIsValid =
+      draftChartCategoryCount === "all" ||
+      chartCategoryCountOptions.some((option) => option.value === draftChartCategoryCount)
+    const hasMatchingCountOption = chartCategoryCountOptions.some(
+      (option) => option.value === String(nextSelected.length)
+    )
+    if (nextSelected.length === chartCategories.length) {
+      setSelectedChartCategoryCount("all")
+    } else if (draftCountIsValid && draftChartCategoryCount !== "all") {
+      setSelectedChartCategoryCount(draftChartCategoryCount)
+    } else if (hasMatchingCountOption) {
+      setSelectedChartCategoryCount(String(nextSelected.length))
+    } else {
+      setSelectedChartCategoryCount(String(defaultChartCategoryCount))
+    }
+
+    setIsChartCategoryPickerOpen(false)
+  }
   const filteredRecommendedFigure = useMemo(
     () => filterFigureByCategories(recommendedFigure, effectiveSelectedChartCategories),
     [recommendedFigure, effectiveSelectedChartCategories]
@@ -1148,6 +1224,34 @@ export function QueryView() {
       .trim()
   }
 
+  const splitLineIntoSentences = (line: string): string[] => {
+    const sentences: string[] = []
+    let buffer = ""
+
+    for (let idx = 0; idx < line.length; idx += 1) {
+      const ch = line[idx]
+      buffer += ch
+
+      if (!/[.!?]/.test(ch)) continue
+
+      const prev = idx > 0 ? line[idx - 1] : ""
+      const next = idx + 1 < line.length ? line[idx + 1] : ""
+
+      // Keep decimal points inside numbers (e.g., 9.62) as part of the same sentence.
+      if (/\d/.test(prev) && /\d/.test(next)) continue
+      if (/[.!?]/.test(next)) continue
+      if (next && !/[\s"')\]}]/.test(next)) continue
+
+      const sentence = buffer.trim()
+      if (sentence) sentences.push(sentence)
+      buffer = ""
+    }
+
+    const tail = buffer.trim()
+    if (tail) sentences.push(tail)
+    return sentences
+  }
+
   const splitInsightIntoPoints = (text: string): string[] => {
     const normalized = String(text || "")
       .replace(/\r/g, "")
@@ -1175,11 +1279,7 @@ export function QueryView() {
     }
 
     for (const line of rawLines) {
-      const sentenceParts =
-        line
-          .match(/[^.!?]+[.!?]?/g)
-          ?.map((part) => part.trim())
-          .filter(Boolean) || []
+      const sentenceParts = splitLineIntoSentences(line)
 
       if (sentenceParts.length > 1) {
         sentenceParts.forEach(pushPoint)
@@ -1667,6 +1767,7 @@ export function QueryView() {
       setMessages([])
       setResponse(null)
       setRunResult(null)
+      setVisualizationResult(null)
       setShowResults(false)
       setShowSqlPanel(false)
       setShowQueryResultPanel(false)
@@ -1688,6 +1789,7 @@ export function QueryView() {
         if (Array.isArray(state.messages)) setMessages(deserializeMessages(state.messages))
         if (state.response) setResponse(state.response)
         if (state.runResult) setRunResult(state.runResult)
+        if (state.visualizationResult) setVisualizationResult(state.visualizationResult)
         if (typeof state.lastQuestion === "string") setLastQuestion(state.lastQuestion)
         if (Array.isArray(state.suggestedQuestions)) setSuggestedQuestions(state.suggestedQuestions)
         if (typeof state.showResults === "boolean") setShowResults(state.showResults)
@@ -1715,6 +1817,7 @@ export function QueryView() {
       messages: serializeMessages(messages),
       response: sanitizeResponse(response),
       runResult: sanitizeRunResult(runResult),
+      visualizationResult: sanitizeVisualizationResult(visualizationResult),
       suggestedQuestions,
       showResults,
       showSqlPanel,
@@ -1741,6 +1844,7 @@ export function QueryView() {
     messages,
     response,
     runResult,
+    visualizationResult,
     suggestedQuestions,
     showResults,
     showSqlPanel,
@@ -2099,10 +2203,16 @@ export function QueryView() {
       if (chartForRender?.type === "line") return "line"
       return "bar"
     })()
+
+    const savedInsight = normalizeInsightText(
+      String(visualizationResult?.insight || activeTab?.insight || "").trim()
+    )
+
     const newEntry = {
       id: `dashboard-${Date.now()}`,
       title: finalTitle,
       description: summary || "쿼리 결과 요약",
+      insight: savedInsight || undefined,
       query: displaySql || currentSql,
       lastRun: "방금 전",
       isPinned: true,
@@ -2128,6 +2238,7 @@ export function QueryView() {
             row_cap: previewRowCap ?? null,
             total_count: previewTotalCount,
             summary: summary || "",
+            insight: savedInsight || "",
             mode: mode || "",
             entry: newEntry,
             new_folder:
@@ -3217,12 +3328,12 @@ export function QueryView() {
                 <div className="space-y-3">
                   <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-3">
                     <div className="text-xs text-muted-foreground">
-                      총 {chartCategories.length}개 / 선택 {(effectiveSelectedChartCategories?.length ?? chartCategories.length)}개
+                      총 {chartCategories.length}개 / 선택 {(effectiveDraftChartCategories?.length ?? chartCategories.length)}개
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-xs text-muted-foreground">표시 개수</span>
                       <div className="w-[160px]">
-                        <Select value={selectedChartCategoryCount} onValueChange={applyChartCategoryCountSelection}>
+                        <Select value={draftChartCategoryCount} onValueChange={applyChartCategoryCountSelection}>
                           <SelectTrigger className="h-8">
                             <SelectValue placeholder="표시 개수 선택" />
                           </SelectTrigger>
@@ -3293,8 +3404,8 @@ export function QueryView() {
             )}
 
             <DialogFooter className="border-t border-border/70 px-6 py-4">
-              <Button variant="outline" onClick={() => setIsChartCategoryPickerOpen(false)}>
-                닫기
+              <Button onClick={handleApplyChartCategorySelection}>
+                적용
               </Button>
             </DialogFooter>
           </div>

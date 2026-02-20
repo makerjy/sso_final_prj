@@ -16,10 +16,19 @@ import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 
+const VIEW_STORAGE_PREFIX = "querylens.ui.lastView:"
+const VIEW_VALUES: ViewType[] = ["connection", "query", "dashboard", "audit", "cohort"]
+
+const isViewType = (value: string): value is ViewType =>
+  VIEW_VALUES.includes(value as ViewType)
+
+const getViewStorageKey = (userId: string) => `${VIEW_STORAGE_PREFIX}${userId}`
+
 export default function Home() {
   const router = useRouter()
   const { user, isHydrated, logout } = useAuth()
   const [currentView, setCurrentView] = useState<ViewType>("connection")
+  const [isViewRestored, setIsViewRestored] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
@@ -37,6 +46,29 @@ export default function Home() {
       window.removeEventListener("ql-open-query-view", openQueryView)
     }
   }, [])
+
+  useEffect(() => {
+    if (!isHydrated || !user) {
+      setIsViewRestored(false)
+      return
+    }
+    try {
+      const savedView = localStorage.getItem(getViewStorageKey(user.id))
+      if (savedView && isViewType(savedView)) {
+        setCurrentView(savedView)
+      } else {
+        setCurrentView("connection")
+      }
+    } catch {}
+    setIsViewRestored(true)
+  }, [isHydrated, user])
+
+  useEffect(() => {
+    if (!isHydrated || !user || !isViewRestored) return
+    try {
+      localStorage.setItem(getViewStorageKey(user.id), currentView)
+    } catch {}
+  }, [isHydrated, user, isViewRestored, currentView])
 
   const userInitial = useMemo(() => {
     const base = (user?.name || "").trim()
@@ -87,6 +119,14 @@ export default function Home() {
     return (
       <div className="h-screen flex items-center justify-center text-sm text-muted-foreground">
         로그인 상태를 확인 중입니다...
+      </div>
+    )
+  }
+
+  if (!isViewRestored) {
+    return (
+      <div className="h-screen flex items-center justify-center text-sm text-muted-foreground">
+        마지막 화면을 불러오는 중입니다...
       </div>
     )
   }
@@ -203,4 +243,3 @@ export default function Home() {
     </div>
   )
 }
-

@@ -28,6 +28,7 @@ class DashboardQuery(BaseModel):
     id: str
     title: str
     description: str
+    insight: str | None = None
     query: str
     lastRun: str
     schedule: str | None = None
@@ -124,6 +125,7 @@ def save_query(payload: SaveQueryPayload):
             "id": f"dashboard-{len(existing_queries) + 1}",
             "title": payload.question,
             "description": "Query result summary",
+            "insight": str(metadata.get("insight") or "").strip() or None,
             "query": payload.sql,
             "lastRun": "just now",
             "isPinned": True,
