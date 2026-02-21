@@ -88,6 +88,46 @@ _SIGNAL_NAME_ALIASES: dict[str, str] = {
 _RESULT_IDENTIFIER_COLUMNS = {"SUBJECT_ID", "HADM_ID", "STAY_ID"}
 
 
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    try:
+        value = int(raw) if raw else int(default)
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_mode(name: str, default: str, allowed: set[str]) -> str:
+    value = str(os.getenv(name, default)).strip().lower()
+    return value if value in allowed else default
+
+
+_PDF_MAX_PAGES = _env_int("PDF_MAX_PAGES", 7, minimum=1, maximum=50)
+_PDF_MAX_TEXT_CHARS = _env_int("PDF_MAX_TEXT_CHARS", 22000, minimum=4000, maximum=120000)
+_PDF_ASSET_TABLE_ROWS = _env_int("PDF_ASSET_TABLE_ROWS", 20, minimum=1, maximum=100)
+_PDF_ASSET_TABLE_COLS = _env_int("PDF_ASSET_TABLE_COLS", 8, minimum=1, maximum=30)
+_PDF_ASSET_TABLE_CHARS = _env_int("PDF_ASSET_TABLE_CHARS", 2500, minimum=300, maximum=20000)
+_PDF_RAG_REFINEMENT_MODE = _env_mode(
+    "PDF_RAG_REFINEMENT_MODE",
+    "auto",
+    {"auto", "always", "off"},
+)
+
+
+class _SkipRagRefinement(Exception):
+    pass
+
+
 def _normalize_signal_name(value: Any) -> str:
     if isinstance(value, (list, tuple, set)):
         for item in value:
@@ -474,20 +514,16 @@ class PDFCohortService:
 
         text_parts = []
         assets = {"figures": [], "tables": []}
-        max_pages = min(7, len(doc))
+        max_pages = min(_PDF_MAX_PAGES, len(doc))
         
         for i in range(max_pages):
             page_no = i + 1
             page = doc[i]
-            page_text = page.get_text("text")
+            page_text = (page.get_text("text") or "").strip()
             
             # 텍스트 섹션 추가
-            text_parts.append(f"\n=== PAGE {page_no} ===")
-            blocks = page.get_text("blocks")
-            for b in blocks:
-                block_text = b[4].strip()
-                if block_text:
-                    text_parts.append(f"[Page {page_no}, Block {b[5]}] {block_text}")
+            if page_text:
+                text_parts.append(f"\n=== PAGE {page_no} ===\n{page_text}")
 
             # 키워드 기반 자산 추출 (비용 및 성능 최적화)
             lower_text = page_text.lower()
@@ -497,7 +533,7 @@ class PDFCohortService:
                 # 표 추출
                 try:
                     tabs = page.find_tables()
-                    for j, tab in enumerate(tabs.tables):
+                    for tab in tabs.tables[:5]:
                         content = tab.extract()
                         if content and len(content) > 1: # 의미 있는 표만
                             assets["tables"].append({
@@ -510,21 +546,21 @@ class PDFCohortService:
                 # 이미지 추출
                 try:
                     image_list = page.get_images(full=True)
-                    for img_index, img in enumerate(image_list[:3]): # 페이지당 최대 3개
-                        xref = img[0]
-                        base_image = doc.extract_image(xref)
+                    if image_list:
                         assets["figures"].append({
                             "page": page_no,
-                            "image_bytes": base_image["image"],
-                            "ext": base_image["ext"]
+                            "count": len(image_list),
                         })
                 except Exception as e:
                     logger.warning(f"Page {page_no} 이미지 추출 실패: {e}")
 
+        total_pages = len(doc)
         doc.close()
         return {
             "full_text": "\n".join(text_parts).strip(),
-            "assets": assets
+            "assets": assets,
+            "page_count": total_pages,
+            "pages_scanned": max_pages,
         }
 
     def _canonicalize_text(self, text: str) -> str:
@@ -539,6 +575,56 @@ class PDFCohortService:
         # 4. 공백 통합
         t = re.sub(r'\s+', ' ', t).strip()
         return t
+
+    def _build_focus_text(self, full_text: str) -> str:
+        """조건 추출 정확도를 유지하면서 프롬프트 입력 길이를 줄이기 위한 핵심 문단 추출."""
+        text = str(full_text or "").strip()
+        if not text:
+            return ""
+
+        lines = [line.strip() for line in text.splitlines() if line and line.strip()]
+        if not lines:
+            return text[:_PDF_MAX_TEXT_CHARS]
+
+        keywords = (
+            "eligibility", "inclusion", "exclusion", "criteria", "population", "cohort",
+            "flowchart", "figure", "table", "outcome", "endpoint", "methods",
+            "selection", "baseline", "icu", "admission", "diagnosis",
+            "선정", "제외", "기준", "코호트", "대상", "방법", "결과",
+        )
+        selected_indices: set[int] = set()
+        for idx, line in enumerate(lines):
+            lowered = line.lower()
+            if any(keyword in lowered for keyword in keywords):
+                start = max(0, idx - 2)
+                end = min(len(lines), idx + 3)
+                selected_indices.update(range(start, end))
+
+        if not selected_indices:
+            return text[:_PDF_MAX_TEXT_CHARS]
+
+        focused_lines = [lines[idx] for idx in sorted(selected_indices)]
+        focused_text = "\n".join(focused_lines).strip()
+        if len(focused_text) < min(3000, len(text)):
+            focused_text = f"{focused_text}\n\n{text}"
+        return focused_text[:_PDF_MAX_TEXT_CHARS]
+
+    def _table_preview_text(self, rows: Any) -> str:
+        if not isinstance(rows, list):
+            return ""
+        preview_rows = rows[:_PDF_ASSET_TABLE_ROWS]
+        lines: list[str] = []
+        for row in preview_rows:
+            if isinstance(row, list):
+                values = row[:_PDF_ASSET_TABLE_COLS]
+            else:
+                values = [row]
+            cleaned = [str(cell or "").replace("\n", " ").strip() for cell in values]
+            lines.append(" | ".join(cleaned))
+        preview = "\n".join(lines).strip()
+        if len(rows) > len(preview_rows):
+            preview += f"\n... ({len(rows) - len(preview_rows)} more rows)"
+        return preview[:_PDF_ASSET_TABLE_CHARS]
 
     async def _describe_image(self, image_bytes: bytes, page_no: int) -> str:
         """Vision 모델을 사용하여 이미지를 요약 설명합니다."""
@@ -571,15 +657,20 @@ class PDFCohortService:
         summaries = []
         
         if assets.get("tables"):
-            summaries.append("\n## EXTRACTED TABLES (RAW)")
+            summaries.append("\n## EXTRACTED TABLES (PREVIEW)")
             for t in assets["tables"]:
-                table_str = "\n".join([" | ".join([str(cell or "").strip() for cell in row]) for row in t["content"]])
-                summaries.append(f"### [Page {t['page']}] Table\n{table_str}")
+                table_str = self._table_preview_text(t.get("content"))
+                if table_str:
+                    summaries.append(f"### [Page {t['page']}] Table\n{table_str}")
 
         if assets.get("figures"):
             summaries.append("\n## EXTRACTED FIGURES (ANALYSIS SKIPPED)")
             # 그림 분석(LLM)은 속도를 위해 생략하고 개수만 표시
-            summaries.append(f"Total {len(assets['figures'])} figures detected in this PDF.")
+            total_figures = 0
+            for fig in assets["figures"]:
+                if isinstance(fig, dict):
+                    total_figures += int(fig.get("count") or 0)
+            summaries.append(f"Total {total_figures} figures detected in this PDF.")
                     
         return "\n".join(summaries)
 
@@ -703,8 +794,8 @@ class PDFCohortService:
   "cohort_definition": {{
     "title": "논문 제목",
     "description": "Short description (English)",
-    "summary_ko": "상세 연구 요약 (500자 이상)",
-    "criteria_summary_ko": "상세 선정/제외 기준 요약 (500자 이상)",
+    "summary_ko": "연구 요약 (핵심 3문장, 150~300자)",
+    "criteria_summary_ko": "선정/제외 기준 요약 (핵심 3문장, 150~300자)",
     "extraction_details": {{
       "study_context": {{
         "data_source": "데이터 출처",
@@ -1041,19 +1132,28 @@ COHORT JSON:
                 )
                 return None
         
-        # 가이드라인 2 & 3: First-Stay 원칙 및 최소 재원 시간(24h) 필터 적용
+        # 기본 모집단은 ADMISSIONS 중심으로 시작하고, ICU 정보는 있으면 결합합니다.
+        # 논문 본문에 없는 ICU/재원시간 제약을 기본값으로 강제하지 않아야 코호트 정확도가 높아집니다.
         ctes.append("""population AS (
-    SELECT subject_id, hadm_id, stay_id, intime, outtime, admittime
-    FROM (
-        SELECT a.subject_id, a.hadm_id, i.stay_id, i.intime, i.outtime, a.admittime,
-               ROW_NUMBER() OVER (PARTITION BY a.subject_id ORDER BY i.intime) as rn
-        FROM SSO.ADMISSIONS a
-        JOIN SSO.ICUSTAYS i ON a.hadm_id = i.hadm_id
-        WHERE (CAST(i.outtime AS DATE) - CAST(i.intime AS DATE)) >= 1
-    )
-    WHERE rn = 1
+    SELECT
+        a.subject_id,
+        a.hadm_id,
+        i.stay_id,
+        i.intime,
+        i.outtime,
+        a.admittime
+    FROM SSO.ADMISSIONS a
+    LEFT JOIN (
+        SELECT
+            hadm_id,
+            stay_id,
+            intime,
+            outtime,
+            ROW_NUMBER() OVER (PARTITION BY hadm_id ORDER BY intime) AS rn
+        FROM SSO.ICUSTAYS
+    ) i ON i.hadm_id = a.hadm_id AND i.rn = 1
 )""")
-        step_labels.append("Initial Population (First ICU Stay & >24h)")
+        step_labels.append("Initial Population (Admissions)")
         step_refs.append("population")
         
         current_prev = "population"
@@ -1185,17 +1285,11 @@ COHORT JSON:
                         )
                         continue
 
-                    code_val = ", ".join([f"'{code}'" for code in cleaned_codes])
-                    # Keep sanitized SQL literal list; do not let raw list params overwrite it.
-                    format_params = {**safe_params, "codes": code_val}
-                    signal_sql = _safe_render_sql_template(
-                        raw_sql,
-                        format_params,
-                        step_name=s_name,
-                        signal_name=s_type,
+                    code_conditions = [f"TRIM(icd_code) LIKE '{code}%'" for code in cleaned_codes]
+                    signal_sql = (
+                        "SELECT hadm_id FROM SSO.DIAGNOSES_ICD "
+                        f"WHERE {' OR '.join(code_conditions)}"
                     )
-                    if not signal_sql:
-                        continue
                 else:
                     signal_sql = _safe_render_sql_template(
                         raw_sql,
@@ -1392,6 +1486,27 @@ WHERE {operator_exists} (
             
         return True, "Integrity check passed"
 
+    def _should_run_rag_refinement(self, db_result: dict[str, Any]) -> bool:
+        """RAG 고도화 실행 여부를 결정합니다.
+        - always: 항상 실행
+        - off: 항상 생략
+        - auto: 실패/0건/식별자 누락일 때만 실행
+        """
+        if _PDF_RAG_REFINEMENT_MODE == "always":
+            return True
+        if _PDF_RAG_REFINEMENT_MODE == "off":
+            return False
+
+        if db_result.get("error"):
+            return True
+        row_count = int(db_result.get("row_count") or 0)
+        if row_count <= 0:
+            return True
+        cols = _normalize_result_columns(db_result.get("columns", []))
+        if not _has_identifier_columns(cols):
+            return True
+        return False
+
     async def analyze_and_generate_sql(
         self,
         file_content: bytes,
@@ -1408,7 +1523,7 @@ WHERE {operator_exists} (
         False이면 캐시를 무시하고 강제로 재생성하여 업데이트합니다.
         """
         # Bump cache version when SQL assembly logic changes to avoid stale results.
-        pipeline_version = "v56"
+        pipeline_version = "v57"
         file_hash = hashlib.sha256(file_content).hexdigest()
         model_name = self.model
         prompt_hash = self._calculate_prompt_hash(relax_mode, deterministic)
@@ -1451,6 +1566,8 @@ WHERE {operator_exists} (
         extracted = await extracted_task # Wait for extraction to complete
         full_text = extracted["full_text"]
         assets = extracted["assets"]
+        page_count = int(extracted.get("page_count") or 0)
+        pages_scanned = int(extracted.get("pages_scanned") or 0)
         
         canonical_text = self._canonicalize_text(full_text)
         canonical_hash = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
@@ -1484,9 +1601,20 @@ WHERE {operator_exists} (
             logger.warning(f"자산 요약 생성 실패 (Text-only fallback 실행): {e}")
             assets_summary = "" # 실패 시 빈 문자열로 유지하여 텍스트 분석으로 진행
 
+        focused_text = self._build_focus_text(full_text)
+        logger.info(
+            "조건 추출 입력 길이 최적화: raw=%d chars, focused=%d chars",
+            len(full_text),
+            len(focused_text),
+        )
+
         # 1단계: 코호트 조건 추출
         logger.info(f"1단계: 코호트 조건 추출 시작 (Deterministic: {deterministic})")
-        conditions = await self._extract_conditions(full_text, assets_summary=assets_summary, deterministic=deterministic)
+        conditions = await self._extract_conditions(
+            focused_text,
+            assets_summary=assets_summary,
+            deterministic=deterministic,
+        )
         
         # 2단계: SQL 생성
         logger.info(f"2단계: SQL 생성 시작 (Relax Mode: {relax_mode}, Deterministic: {deterministic})")
@@ -1524,13 +1652,6 @@ WHERE {operator_exists} (
             "warning": sql_result.get("warning", []),
         }
         
-        # Max retries for relaxation
-        max_retries = 3
-        current_intent = conditions # Actually we need intent json, but it is inside _generate_sql. 
-        # Refactoring: _generate_sql_from_conditions returns sql_dict, but we need intent object to modify steps.
-        # For v43 hotfix, we cannot modify intent structure easily here without larger refactor.
-        # Instead, we will simulate relaxation by checking row count.
-        
         # 1st Attempt
         try:
             main_res = await asyncio.to_thread(execute_sql, sql_result["cohort_sql"])
@@ -1564,8 +1685,17 @@ WHERE {operator_exists} (
             db_result["error"] = str(e)
 
         # === 4.5 AI RAG 고도화 (Automatic) ===
-        logger.info("4.5단계: AI RAG 쿼리 고도화 자동 실행")
+        logger.info("4.5단계: AI RAG 고도화 실행 조건 판단 (mode=%s)", _PDF_RAG_REFINEMENT_MODE)
         try:
+            if not self._should_run_rag_refinement(db_result):
+                logger.info(
+                    "4.5단계 생략: 기본 SQL 결과 사용 (rows=%s, error=%s)",
+                    int(db_result.get("row_count") or 0),
+                    bool(db_result.get("error")),
+                )
+                raise _SkipRagRefinement()
+
+            logger.info("4.5단계: AI RAG 쿼리 고도화 자동 실행")
             summary_ko = conditions.get("cohort_definition", {}).get("summary_ko", "")
             criteria_summary = conditions.get("cohort_definition", {}).get("criteria_summary_ko", "")
             
@@ -1721,6 +1851,8 @@ WHERE {operator_exists} (
                         db_result["step_counts"] = []
             else:
                 logger.warning("RAG 고도화 SQL 생성 실패 (빈 결과)")
+        except _SkipRagRefinement:
+            pass
         except Exception as e:
             logger.error(f"RAG 고도화 중 오류 발생 (기존 템플릿 결과 유지): {e}")
 
@@ -1737,6 +1869,8 @@ WHERE {operator_exists} (
             "user_id": str(user_id or "").strip() or None,
             "relax_mode": relax_mode,
             "deterministic": deterministic,
+            "pdf_page_count": page_count,
+            "pdf_pages_scanned": pages_scanned,
             "pipeline_version": pipeline_version,
             "model": model_name,
             "prompt_hash": prompt_hash,

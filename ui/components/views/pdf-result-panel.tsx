@@ -27,6 +27,8 @@ import {
     Database,
     Search,
     Loader2,
+    Clock3,
+    Gauge,
 } from "lucide-react"
 import {
     Table,
@@ -239,6 +241,17 @@ export default function PdfResultPanel({
         }
     }
 
+    const perf = (pdfResult.performance || {}) as any
+    const analysisDurationSec = toNumber(perf.analysis_duration_sec) ?? 0
+    const totalElapsedSec = toNumber(perf.total_elapsed_sec) ?? 0
+    const queueWaitSec = toNumber(perf.queue_wait_sec) ?? 0
+    const pdfPageCount = toNumber(pdfResult.pdf_page_count)
+    const secPerPage = pdfPageCount > 0 && analysisDurationSec > 0 ? analysisDurationSec / pdfPageCount : null
+    const pagesPerSec = pdfPageCount > 0 && analysisDurationSec > 0 ? pdfPageCount / analysisDurationSec : null
+
+    const fmtSec = (value: number) => value.toFixed(3)
+    const fmtMaybe = (value: number | null, digits = 3) => (value == null ? "-" : value.toFixed(digits))
+
     /* 카테고리별 그룹 */
     const grouped: Record<string, any[]> = {}
     features.forEach((f: any) => {
@@ -281,6 +294,50 @@ export default function PdfResultPanel({
                     </div>
                 </div>
             </div>
+
+            {/* ══ 분석 성능 지표 ══ */}
+            <Card className="overflow-hidden border-0 shadow-sm">
+                <CardHeader className="pb-4 bg-gradient-to-r from-indigo-500/5 to-transparent border-b">
+                    <CardTitle className="text-sm font-bold flex items-center gap-2.5">
+                        <Clock3 className="w-4 h-4 text-indigo-500" />
+                        PDF 분석 성능 지표
+                    </CardTitle>
+                    <CardDescription className="text-xs">
+                        실제 분석시간, 총 소요시간, 대기시간 기준 요약
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="pt-4">
+                    <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+                        <div className="rounded-lg border p-3 bg-muted/20">
+                            <div className="text-[10px] text-muted-foreground mb-1">analysis_duration_sec</div>
+                            <div className="text-sm font-bold">{fmtSec(analysisDurationSec)}</div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-muted/20">
+                            <div className="text-[10px] text-muted-foreground mb-1">total_elapsed_sec</div>
+                            <div className="text-sm font-bold">{fmtSec(totalElapsedSec)}</div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-muted/20">
+                            <div className="text-[10px] text-muted-foreground mb-1">queue_wait_sec</div>
+                            <div className="text-sm font-bold">{fmtSec(queueWaitSec)}</div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-muted/20">
+                            <div className="text-[10px] text-muted-foreground mb-1">pages</div>
+                            <div className="text-sm font-bold">{pdfPageCount > 0 ? pdfPageCount : "-"}</div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-muted/20">
+                            <div className="text-[10px] text-muted-foreground mb-1">분석시간/페이지(sec)</div>
+                            <div className="text-sm font-bold">{fmtMaybe(secPerPage)}</div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-muted/20">
+                            <div className="text-[10px] text-muted-foreground mb-1">처리속도(pages/sec)</div>
+                            <div className="text-sm font-bold flex items-center gap-1">
+                                <Gauge className="w-3 h-3 text-muted-foreground" />
+                                {fmtMaybe(pagesPerSec)}
+                            </div>
+                        </div>
+                    </div>
+                </CardContent>
+            </Card>
 
             {/* ══ 섹션 1 · 논문 핵심 요약 ══ */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -37,7 +37,7 @@ services:
       - ./text-to-sql/var/logs:/app/var/logs
       - ./text-to-sql/var/rag:/app/var/rag
     ports:
-      - "8001:8000"
+      - "${TEXT_SQL_HOST_PORT:-8001}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8000)); s.close()"]
       interval: 10s
@@ -100,7 +100,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "3000:3000"
+      - "${UI_HOST_PORT:-3000}:3000"
     networks:
       - query-lens-net
     dns:

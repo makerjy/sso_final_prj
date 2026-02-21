@@ -40,6 +40,11 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
         }
     }
 
+    const toNumber = (value: any, fallback = 0) => {
+        const n = Number(value)
+        return Number.isFinite(n) ? n : fallback
+    }
+
     const saveActiveTask = (taskId: string) => {
         if (typeof window === "undefined") return
         const payload: ActivePdfTask = { taskId }
@@ -72,7 +77,23 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
                 clearPollTimer()
                 clearActiveTask()
                 setProgressValue(100)
-                setPdfResult(statusData.result)
+                const performance = {
+                    analysis_duration_ms: toNumber(statusData.analysis_duration_ms),
+                    analysis_duration_sec: toNumber(statusData.analysis_duration_sec),
+                    total_elapsed_ms: toNumber(statusData.total_elapsed_ms),
+                    total_elapsed_sec: toNumber(statusData.total_elapsed_sec),
+                    queue_wait_ms: toNumber(statusData.queue_wait_ms),
+                    queue_wait_sec: toNumber(statusData.queue_wait_sec),
+                    started_at: statusData.started_at || "",
+                    completed_at: statusData.completed_at || "",
+                    submitted_at: statusData.submitted_at || "",
+                }
+                setPdfResult({
+                    ...(statusData.result || {}),
+                    filename: statusData.filename || statusData.result?.filename,
+                    task_id: statusData.task_id || "",
+                    performance,
+                })
                 setMessage("분석이 완료되었습니다.")
                 setIsLoading(false)
                 return
