@@ -36,7 +36,8 @@ export default function Home() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [hasOpenedQueryView, setHasOpenedQueryView] = useState(false)
   const [hasOpenedCohortView, setHasOpenedCohortView] = useState(false)
-  const effectiveView: ViewType = isPdfViewPinned ? "pdf-cohort" : currentView
+  const [hasOpenedPdfCohortView, setHasOpenedPdfCohortView] = useState(false)
+  const effectiveView: ViewType = currentView
 
   useEffect(() => {
     if (!isHydrated) return
@@ -47,14 +48,13 @@ export default function Home() {
 
   useEffect(() => {
     const openQueryView = () => {
-      if (isPdfViewPinned) return
       setCurrentView("query")
     }
     window.addEventListener("ql-open-query-view", openQueryView)
     return () => {
       window.removeEventListener("ql-open-query-view", openQueryView)
     }
-  }, [isPdfViewPinned])
+  }, [])
 
   useEffect(() => {
     if (!isHydrated || !user) {
@@ -94,6 +94,14 @@ export default function Home() {
   }, [effectiveView])
 
   const shouldRenderCohortView = hasOpenedCohortView || effectiveView === "cohort"
+
+  useEffect(() => {
+    if (effectiveView === "pdf-cohort") {
+      setHasOpenedPdfCohortView(true)
+    }
+  }, [effectiveView])
+
+  const shouldRenderPdfCohortView = hasOpenedPdfCohortView || isPdfViewPinned
 
   const userInitial = useMemo(() => {
     const base = (user?.name || "").trim()
@@ -138,10 +146,6 @@ export default function Home() {
   }
 
   const handleViewChange = (view: ViewType) => {
-    if (isPdfViewPinned && view !== "pdf-cohort") {
-      setMobileMenuOpen(false)
-      return
-    }
     setCurrentView(view)
     setMobileMenuOpen(false)
   }
@@ -278,7 +282,12 @@ export default function Home() {
               <CohortView />
             </section>
           )}
-          {effectiveView !== "query" && effectiveView !== "cohort" && renderView()}
+          {shouldRenderPdfCohortView && (
+            <section className={effectiveView === "pdf-cohort" ? "block" : "hidden"} aria-hidden={effectiveView !== "pdf-cohort"}>
+              <PdfCohortView onPinnedChange={setIsPdfViewPinned} />
+            </section>
+          )}
+          {effectiveView !== "query" && effectiveView !== "cohort" && effectiveView !== "pdf-cohort" && renderView()}
         </main>
       </div>
     </div>
