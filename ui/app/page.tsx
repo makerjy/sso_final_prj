@@ -30,10 +30,13 @@ export default function Home() {
   const router = useRouter()
   const { user, isHydrated, logout } = useAuth()
   const [currentView, setCurrentView] = useState<ViewType>("connection")
+  const [isPdfViewPinned, setIsPdfViewPinned] = useState(false)
   const [isViewRestored, setIsViewRestored] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [hasOpenedQueryView, setHasOpenedQueryView] = useState(false)
+  const [hasOpenedCohortView, setHasOpenedCohortView] = useState(false)
+  const effectiveView: ViewType = isPdfViewPinned ? "pdf-cohort" : currentView
 
   useEffect(() => {
     if (!isHydrated) return
@@ -43,12 +46,15 @@ export default function Home() {
   }, [isHydrated, user, router])
 
   useEffect(() => {
-    const openQueryView = () => setCurrentView("query")
+    const openQueryView = () => {
+      if (isPdfViewPinned) return
+      setCurrentView("query")
+    }
     window.addEventListener("ql-open-query-view", openQueryView)
     return () => {
       window.removeEventListener("ql-open-query-view", openQueryView)
     }
-  }, [])
+  }, [isPdfViewPinned])
 
   useEffect(() => {
     if (!isHydrated || !user) {
@@ -74,12 +80,20 @@ export default function Home() {
   }, [isHydrated, user, isViewRestored, currentView])
 
   useEffect(() => {
-    if (currentView === "query") {
+    if (effectiveView === "query") {
       setHasOpenedQueryView(true)
     }
-  }, [currentView])
+  }, [effectiveView])
 
-  const shouldRenderQueryView = hasOpenedQueryView || currentView === "query"
+  const shouldRenderQueryView = hasOpenedQueryView || effectiveView === "query"
+
+  useEffect(() => {
+    if (effectiveView === "cohort") {
+      setHasOpenedCohortView(true)
+    }
+  }, [effectiveView])
+
+  const shouldRenderCohortView = hasOpenedCohortView || effectiveView === "cohort"
 
   const userInitial = useMemo(() => {
     const base = (user?.name || "").trim()
@@ -92,7 +106,7 @@ export default function Home() {
   }
 
   const renderView = () => {
-    switch (currentView) {
+    switch (effectiveView) {
       case "connection":
         return <ConnectionView />
       // case "context":
@@ -104,14 +118,14 @@ export default function Home() {
       case "cohort":
         return <CohortView />
       case "pdf-cohort":
-        return <PdfCohortView />
+        return <PdfCohortView onPinnedChange={setIsPdfViewPinned} />
       default:
         return <ConnectionView />
     }
   }
 
   const getViewTitle = () => {
-    switch (currentView) {
+    switch (effectiveView) {
       case "connection": return "DB 연결/권한 설정"
       // case "context": return "컨텍스트 편집"
       case "query": return "쿼리 & 분석"
@@ -124,6 +138,10 @@ export default function Home() {
   }
 
   const handleViewChange = (view: ViewType) => {
+    if (isPdfViewPinned && view !== "pdf-cohort") {
+      setMobileMenuOpen(false)
+      return
+    }
     setCurrentView(view)
     setMobileMenuOpen(false)
   }
@@ -149,8 +167,8 @@ export default function Home() {
       {/* Desktop Sidebar */}
       <div className="hidden lg:block">
         <AppSidebar 
-          currentView={currentView}
-          onViewChange={setCurrentView}
+          currentView={effectiveView}
+          onViewChange={handleViewChange}
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         />
@@ -160,7 +178,7 @@ export default function Home() {
       <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
         <SheetContent side="left" className="p-0 w-64">
           <AppSidebar 
-            currentView={currentView}
+            currentView={effectiveView}
             onViewChange={handleViewChange}
             collapsed={false}
             onToggleCollapse={() => {}}
@@ -184,7 +202,7 @@ export default function Home() {
             </Button>
             
             <h1 className="text-sm sm:text-lg font-semibold text-foreground truncate">{getViewTitle()}</h1>
-            {currentView === "cohort" && (
+            {effectiveView === "cohort" && (
               <Badge variant="secondary" className="text-[10px] sm:text-xs hidden sm:inline-flex">부가 기능</Badge>
             )}
           </div>
@@ -251,11 +269,16 @@ export default function Home() {
         {/* Content Area */}
         <main className="flex-1 overflow-auto">
           {shouldRenderQueryView && (
-            <section className={currentView === "query" ? "block" : "hidden"} aria-hidden={currentView !== "query"}>
+            <section className={effectiveView === "query" ? "block" : "hidden"} aria-hidden={effectiveView !== "query"}>
               <QueryView />
             </section>
           )}
-          {currentView !== "query" && renderView()}
+          {shouldRenderCohortView && (
+            <section className={effectiveView === "cohort" ? "block" : "hidden"} aria-hidden={effectiveView !== "cohort"}>
+              <CohortView />
+            </section>
+          )}
+          {effectiveView !== "query" && effectiveView !== "cohort" && renderView()}
         </main>
       </div>
     </div>

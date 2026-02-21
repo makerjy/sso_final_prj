@@ -71,7 +71,21 @@ _SIGNAL_NAME_ALIASES: dict[str, str] = {
     "urine": "urine_output",
     "urine_out": "urine_output",
     "urine_volume": "urine_output",
+    "sex": "gender",
+    "hospital_length_of_stay": "hospital_los",
+    "length_of_hospital_stay": "hospital_los",
+    "hospital_los_days": "hospital_los",
+    "hosp_los": "hospital_los",
+    "icu_length_of_stay": "icu_los",
+    "length_of_icu_stay": "icu_los",
+    "icu_stay_length": "icu_los",
+    "icu_los_days": "icu_los",
+    "in_hospital_death": "in_hospital_mortality",
+    "inhospital_mortality": "in_hospital_mortality",
+    "hospital_expire_flag": "in_hospital_mortality",
 }
+
+_RESULT_IDENTIFIER_COLUMNS = {"SUBJECT_ID", "HADM_ID", "STAY_ID"}
 
 
 def _normalize_signal_name(value: Any) -> str:
@@ -220,6 +234,30 @@ def _fix_column_names_in_sql(sql: str) -> tuple[str, list[str]]:
     return fixed_sql, fixes
 
 
+def _normalize_result_columns(columns: Any) -> list[str]:
+    if not isinstance(columns, list):
+        return []
+    normalized: list[str] = []
+    for col in columns:
+        name = str(col or "").strip().upper()
+        if name:
+            normalized.append(name)
+    return normalized
+
+
+def _has_identifier_columns(columns: list[str]) -> bool:
+    return any(col in _RESULT_IDENTIFIER_COLUMNS for col in columns)
+
+
+def _append_warning_once(result: dict[str, Any], message: str) -> None:
+    warnings = result.get("warning")
+    if not isinstance(warnings, list):
+        warnings = []
+    if message not in warnings:
+        warnings.append(message)
+    result["warning"] = warnings
+
+
 def _load_reference_cohorts() -> str:
     """MongoDB에서 저장된 PDF 기반 코호트 정보를 읽어 RAG 예시로 활용"""
     try:
@@ -305,6 +343,7 @@ DEFAULT_CORE_SIGNALS = {
 DEFAULT_SIGNAL_METADATA = {
     "age": {"target_table": "PATIENTS", "itemid": "anchor_age"},
     "gender": {"target_table": "PATIENTS", "itemid": "gender"},
+    "sex": {"target_table": "PATIENTS", "itemid": "gender"},
     "sofa": {"target_table": "DERIVED", "itemid": "sofa_score"},
     "rox": {"target_table": "DERIVED", "itemid": "rox_index"},
     "oasis": {"target_table": "DERIVED", "itemid": "oasis_score"},
@@ -315,6 +354,9 @@ DEFAULT_SIGNAL_METADATA = {
     "ph": {"target_table": "LABEVENTS", "itemid": "50820"},
     "anion_gap": {"target_table": "LABEVENTS", "itemid": "50868"},
     "urine_output": {"target_table": "OUTPUTEVENTS", "itemid": "226559,226560,226561,226563,226564,226565,226567,226557,226558,226584,227488"},
+    "hospital_los": {"target_table": "ADMISSIONS", "itemid": "dischtime-admittime"},
+    "icu_los": {"target_table": "ICUSTAYS", "itemid": "los"},
+    "in_hospital_mortality": {"target_table": "ADMISSIONS", "itemid": "hospital_expire_flag"},
 }
 
 WINDOW_TEMPLATES = {
@@ -729,6 +771,9 @@ class PDFCohortService:
 5. **제외 로직 명시 (Exclusion)**: 제외 기준(Exclusion)에 해당하는 단계는 `"is_exclusion": true` 속성을 반드시 부여하세요.
 6. **필수/권장 여부 (Relaxation)**: 연구의 핵심이 아닌 보조적 조건(예: 특정 Lab 수치 범위 등)은 `"is_mandatory": false`로 설정하여, 0명일 때 자동 완화될 수 있게 하세요.
 7. **논리**: 신호들은 기본적으로 AND로 결합됩니다.
+8. **ICU 체류시간 규칙 (중요)**:
+   - "ICU stay < 24h 제외" 문구는 반드시 `type: "icu_stay"`, `params: {{"min_los": 1}}`, `is_exclusion: true`로 표현하세요.
+   - `min_los`는 0보다 큰 값으로 넣으세요(일 단위, 24h=1).
 
 ## 출력 JSON 형식
 {{
@@ -781,11 +826,40 @@ COHORT JSON:
         # vital, derived, icu_stay, chartevents, outputevents
         return "stay_id"
 
+    def _sanitize_step_slug(self, value: Any) -> str:
+        slug = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower())
+        slug = re.sub(r"_+", "_", slug).strip("_")
+        return slug or "unknown"
+
+    def _extract_select_keys(self, sql: str) -> set[str]:
+        sql_text = str(sql or "")
+        m = re.search(r"select\s+(.*?)\s+from\b", sql_text, flags=re.IGNORECASE | re.DOTALL)
+        select_part = m.group(1).lower() if m else sql_text.lower()
+        if "*" in select_part:
+            return {"subject_id", "hadm_id", "stay_id"}
+        available: set[str] = set()
+        for key in ("subject_id", "hadm_id", "stay_id"):
+            if re.search(rf"\b{key}\b", select_part):
+                available.add(key)
+        return available
+
+    def _resolve_join_key(self, preferred_key: str, signal_sql: str) -> str | None:
+        available = self._extract_select_keys(signal_sql)
+        if not available:
+            return None
+        if preferred_key in available:
+            return preferred_key
+        for fallback in ("hadm_id", "stay_id", "subject_id"):
+            if fallback in available:
+                return fallback
+        return next(iter(available))
+
     def compile_oracle_sql(self, intent: dict) -> dict:
         """Intent JSON을 바탕으로 실제 Oracle SQL(MIMIC-IV)을 조립합니다. (CTE 단계 누적)"""
         steps = intent.get("steps", [])
         ctes = []
-        step_names = []
+        step_labels = []
+        step_refs = []
         
         # 가이드라인 2 & 3: First-Stay 원칙 및 최소 재원 시간(24h) 필터 적용
         ctes.append("""population AS (
@@ -799,7 +873,8 @@ COHORT JSON:
     )
     WHERE rn = 1
 )""")
-        step_names.append("Initial Population (First ICU Stay & >24h)")
+        step_labels.append("Initial Population (First ICU Stay & >24h)")
+        step_refs.append("population")
         
         current_prev = "population"
         
@@ -807,7 +882,8 @@ COHORT JSON:
             s_type = step.get("type")
             s_params = step.get("params", {})
             window_key = step.get("window")
-            s_name = f"step_{i+1}_{s_type}"
+            s_name = f"step_{i+1}_{self._sanitize_step_slug(s_type)}"
+            is_exclusion = bool(step.get("is_exclusion", False))
             
             # Safe SQL Formatting with defaults (fixed KeyError by adding 'label')
             defaults = {"min": 0, "max": 150, "operator": "=", "value": 0, "min_los": 0, "drug": "", "gender": "all", "codes": "''", "label": ""}
@@ -833,13 +909,53 @@ COHORT JSON:
                     signal_sql = "SELECT stay_id, intime as charttime FROM SSO.ICUSTAYS WHERE stay_id IS NOT NULL"
             elif s_type in self.signal_map:
                 raw_sql = self.signal_map[s_type]
-                if s_type == "diagnosis":
-                    codes = s_params.get("codes", [])
-                    # Support multiple codes with IN clause
-                    if isinstance(codes, list):
-                        code_val = ", ".join([f"'{str(c).replace('.', '').strip()}'" for c in codes])
+                if s_type == "icu_stay":
+                    min_los_raw = s_params.get("min_los", safe_params.get("min_los", 0))
+                    try:
+                        min_los = float(str(min_los_raw).strip())
+                    except (TypeError, ValueError):
+                        min_los = 0.0
+
+                    # Exclusion with los<=0 degenerates to "exclude everyone".
+                    # Use a safe default (24h == 1 day) when threshold is missing/invalid.
+                    if is_exclusion and min_los <= 0:
+                        min_los = 1.0
+                        logger.warning(
+                            "Step '%s': exclusion icu_stay min_los is invalid (%s). Defaulting to 1 day.",
+                            s_name,
+                            min_los_raw,
+                        )
+
+                    if is_exclusion:
+                        signal_sql = (
+                            "SELECT stay_id, hadm_id, intime as charttime "
+                            f"FROM SSO.ICUSTAYS WHERE los < {min_los:g}"
+                        )
                     else:
-                        code_val = f"'{str(codes).replace('.', '').strip()}'"
+                        safe_params["min_los"] = min_los
+                        signal_sql = raw_sql.format(**safe_params)
+                elif s_type == "diagnosis":
+                    raw_codes = s_params.get("codes", [])
+                    if isinstance(raw_codes, list):
+                        code_candidates = raw_codes
+                    else:
+                        raw_text = str(raw_codes or "")
+                        code_candidates = raw_text.split(",") if "," in raw_text else [raw_text]
+
+                    cleaned_codes: list[str] = []
+                    for code in code_candidates:
+                        normalized = re.sub(r"[^A-Za-z0-9]+", "", str(code or "")).upper().strip()
+                        if normalized and normalized not in cleaned_codes:
+                            cleaned_codes.append(normalized)
+
+                    if not cleaned_codes:
+                        logger.warning(
+                            "Step '%s': diagnosis codes are empty. Skipping step to avoid invalid IN () SQL.",
+                            s_name,
+                        )
+                        continue
+
+                    code_val = ", ".join([f"'{code}'" for code in cleaned_codes])
                     signal_sql = raw_sql.format(codes=code_val)
                 else:
                     signal_sql = raw_sql.format(**safe_params)
@@ -849,17 +965,23 @@ COHORT JSON:
 
 
             # 가이드라인 3: 동적 조인 키 적용 및 무결성 검사
-            join_key = self._get_best_join_key(s_type, s_params)
-            
-            # 방어 로직: SQL 텍스트 내에 join_key가 실제로 존재하는지 확인
-            # 주의: 무조건 fallback하면 서브쿼리가 해당 컬럼을 반환하지 않을 경우 ORA-00904 발생함.
-            # 따라서 경고만 남기고, 원래 매핑된 키를 신뢰함.
-            if join_key not in signal_sql.lower() and "select *" not in signal_sql.lower():
-                logger.warning(f"Step '{s_name}': Join key '{join_key}' might be missing in generated SQL. Logic checks: {signal_sql[:50]}...")
-                # join_key = "hadm_id"  <-- DANGEROUS FALLBACK REMOVED
+            preferred_key = self._get_best_join_key(s_type, s_params)
+            join_key = self._resolve_join_key(preferred_key, signal_sql)
+            if not join_key:
+                logger.warning(
+                    "Step '%s': no identifier key (subject_id/hadm_id/stay_id) in SELECT list. Skipping step.",
+                    s_name,
+                )
+                continue
+            if join_key != preferred_key:
+                logger.info(
+                    "Step '%s': join key adjusted from '%s' to '%s' based on projected columns.",
+                    s_name,
+                    preferred_key,
+                    join_key,
+                )
 
             # 제외(Exclusion) 여부
-            is_exclusion = step.get("is_exclusion", False)
             operator_exists = "NOT EXISTS" if is_exclusion else "EXISTS"
 
             # 가이드라인 2 & 3: EXISTS 기반의 정교한 시간창 비교 및 조인
@@ -881,7 +1003,8 @@ WHERE {operator_exists} (
     WHERE {where_clause}
 )"""
             ctes.append(f"{s_name} AS ({cte_query})")
-            step_names.append(step.get("name", s_name))
+            step_labels.append(step.get("name") or s_name)
+            step_refs.append(s_name)
             current_prev = s_name
 
         # 최종 쿼리 조립
@@ -892,9 +1015,9 @@ WHERE {operator_exists} (
         
         # Funnel SQL (Step Counts)
         debug_parts = []
-        for i, name in enumerate(step_names):
-            cte_ref = "population" if i == 0 else f"step_{i}_{steps[i-1].get('type')}"
-            debug_parts.append(f"SELECT '{name}' as step_name, count(*) as cnt FROM {cte_ref}")
+        for label, cte_ref in zip(step_labels, step_refs):
+            safe_label = str(label or "").replace("'", "''")
+            debug_parts.append(f"SELECT '{safe_label}' as step_name, count(*) as cnt FROM {cte_ref}")
         debug_parts.append(f"SELECT 'Final Cohort' as step_name, count(*) as cnt FROM {current_prev}")
         
         debug_count_sql = f"WITH {cte_str}\n" + " UNION ALL ".join(debug_parts)
@@ -1038,7 +1161,7 @@ WHERE {operator_exists} (
         reuse_existing=True이면 동일 환경(Version/Mode/Hash)의 캐시를 즉시 반환합니다.
         False이면 캐시를 무시하고 강제로 재생성하여 업데이트합니다.
         """
-        pipeline_version = "v52"
+        pipeline_version = "v55"
         file_hash = hashlib.sha256(file_content).hexdigest()
         model_name = self.model
         prompt_hash = self._calculate_prompt_hash(relax_mode, deterministic)
@@ -1144,7 +1267,15 @@ WHERE {operator_exists} (
 
         # 4. DB 실행 (Auto-Relaxation Loop applied)
         logger.info("3단계: SQL 실행 및 결과 집계 (Auto-Relaxation)")
-        db_result = {"columns": [], "rows": [], "step_counts": [], "error": None, "warning": sql_result.get("warning", [])}
+        db_result = {
+            "columns": [],
+            "rows": [],
+            "step_counts": [],
+            "row_count": 0,
+            "total_count": None,
+            "error": None,
+            "warning": sql_result.get("warning", []),
+        }
         
         # Max retries for relaxation
         max_retries = 3
@@ -1163,13 +1294,15 @@ WHERE {operator_exists} (
                 # 여기서 Intent를 다시 생성하는 것은 비효율적이므로, 
                 # 추출된 intent 내에서 is_mandatory=False인 스텝을 제외한 SQL을 다시 compile하는 것이 이상적.
                 # 하지만 현재 구조 제한상, 사용자에게 "조건을 완화해보세요" 경고를 주는 것으로 1차 대응.
-                db_result["warning"].append("검색된 환자가 0명입니다. '완화 모드'를 켜거나 일부 조건을 제외해 보세요.")
+                _append_warning_once(db_result, "검색된 환자가 0명입니다. '완화 모드'를 켜거나 일부 조건을 제외해 보세요.")
             
             if "error" in main_res:
                 db_result["error"] = main_res["error"]
             else:
                 db_result["columns"] = main_res.get("columns", [])
                 db_result["rows"] = main_res.get("rows", [])[:100]
+                db_result["row_count"] = int(main_res.get("row_count") or 0)
+                db_result["total_count"] = main_res.get("total_count")
 
             # 단계별 카운트 조회
             debug_res = await asyncio.to_thread(execute_sql, sql_result["debug_count_sql"])
@@ -1210,6 +1343,9 @@ WHERE {operator_exists} (
                 f"   - **Window Functions**: MUST use `OVER (PARTITION BY ... ORDER BY ...)`.\n"
                 f"     - CORRECT: `ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY charttime ASC)`\n"
                 f"     - WRONG: `ROW_NUMBER() OVER (ORDER BY charttime)` (Missing PARTITION BY in strict mode causes ORA-00924)\n\n"
+                f"5. **Output Shape (CRITICAL)**:\n"
+                f"   - Final SELECT must return patient-level rows including `subject_id`, `hadm_id`, `stay_id`.\n"
+                f"   - Do NOT return aggregate-only metrics (COUNT/AVG/RATE only).\n\n"
                 f"## REFERENCE KNOWLEDGE (METADATA):\n{rag_hints}\n\n"
                 f"## DETECTED CLINICAL SIGNALS (FROM PDF):\n{mapped_str}\n\n"
                 f"연구 요약: {summary_ko}\n"
@@ -1233,27 +1369,24 @@ WHERE {operator_exists} (
                 
             if rag_final_sql:
                 logger.info("RAG 고도화 SQL 생성 성공")
-                # 기존 템플릿 SQL을 덮어씀
-                sql_result["cohort_sql"] = rag_final_sql
-                sql_result["count_sql"] = f"SELECT COUNT(*) FROM ({rag_final_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
-                
+                candidate_sql = rag_final_sql
+                candidate_count_sql = f"SELECT COUNT(*) FROM ({candidate_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
+
                 # DB 재실행 (고도화된 쿼리로)
-                rag_db_res = await asyncio.to_thread(execute_sql, rag_final_sql)
+                rag_db_res = await asyncio.to_thread(execute_sql, candidate_sql)
                 
                 # [Error Recovery Logic] If RAG SQL fails, try to auto-repair
                 if "error" in rag_db_res:
                     logger.warning(f"RAG SQL Execution Error: {rag_db_res['error']}. Attempting auto-repair...")
-                    fixed_sql = await self.fix_sql_with_error_async(rag_final_sql, rag_db_res["error"])
+                    fixed_sql = await self.fix_sql_with_error_async(candidate_sql, rag_db_res["error"])
                     if fixed_sql:
                         logger.info(f"Auto-Repaired SQL: {fixed_sql[:100]}...")
                         # 재실행
                         retry_res = await asyncio.to_thread(execute_sql, fixed_sql)
                         if "error" not in retry_res:
-                            rag_final_sql = fixed_sql
+                            candidate_sql = fixed_sql
+                            candidate_count_sql = f"SELECT COUNT(*) FROM ({fixed_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
                             rag_db_res = retry_res
-                            sql_result["cohort_sql"] = fixed_sql
-                            # count query also needs update
-                            sql_result["count_sql"] = f"SELECT COUNT(*) FROM ({fixed_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
                         else:
                             logger.error(f"Repair Failed: {retry_res['error']}")
                             
@@ -1271,27 +1404,70 @@ WHERE {operator_exists} (
                          f"Rewrite the SQL to be more inclusive."
                      )
                      # Reuse repair function for relaxation as it handles SQL generation
-                     relaxed_sql = await self.fix_sql_with_error_async(rag_final_sql, relax_prompt)
+                     relaxed_sql = await self.fix_sql_with_error_async(candidate_sql, relax_prompt)
                      if relaxed_sql:
                          logger.info("Executing Relaxed SQL...")
                          relaxed_res = await asyncio.to_thread(execute_sql, relaxed_sql)
                          if "error" not in relaxed_res and len(relaxed_res.get("rows", [])) > 0:
-                             rag_final_sql = relaxed_sql
+                             candidate_sql = relaxed_sql
+                             candidate_count_sql = f"SELECT COUNT(*) FROM ({relaxed_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
                              rag_db_res = relaxed_res
-                             sql_result["cohort_sql"] = relaxed_sql
-                             sql_result["count_sql"] = f"SELECT COUNT(*) FROM ({relaxed_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
                          elif "rows" in relaxed_res and len(relaxed_res["rows"]) == 0:
                              logger.warning("Relaxed SQL also returned 0 rows.")
 
 
                 if "error" in rag_db_res:
-                    db_result["error"] = rag_db_res["error"]
+                    logger.warning("RAG SQL 실행 오류로 인해 기본 코호트 SQL 결과를 유지합니다.")
+                    _append_warning_once(db_result, "RAG SQL 실행 오류로 기본 코호트 결과를 유지했습니다.")
                 else:
-                    db_result["error"] = None
-                    db_result["columns"] = rag_db_res.get("columns", [])
-                    db_result["rows"] = rag_db_res.get("rows", [])[:100]
-                    # step_counts는 파싱하기 어려울 수 있으므로 비움
-                    db_result["step_counts"] = [] 
+                    rag_columns = _normalize_result_columns(rag_db_res.get("columns", []))
+
+                    if not _has_identifier_columns(rag_columns):
+                        logger.warning("RAG SQL이 집계형 결과를 반환했습니다. 환자 단위 출력으로 자동 재작성 시도.")
+                        mapped_signal_names = sorted({
+                            _normalize_signal_name(v.get("signal_name"))
+                            for v in mapped_vars
+                            if isinstance(v, dict) and str(v.get("signal_name") or "").strip()
+                        })
+                        mapped_signal_names = [name for name in mapped_signal_names if name]
+                        rewrite_prompt = (
+                            "The previous SQL returned aggregate-only metrics without patient identifiers.\n"
+                            "Rewrite it to patient-level cohort output.\n"
+                            "Requirements:\n"
+                            "1. Include subject_id, hadm_id, stay_id in final SELECT.\n"
+                            "2. Do not return COUNT/AVG-only aggregate output.\n"
+                            "3. Include mapped clinical variable columns when possible.\n"
+                            "4. Keep Oracle-compatible SQL and use FETCH FIRST 200 ROWS ONLY."
+                        )
+                        if mapped_signal_names:
+                            rewrite_prompt += f"\nMapped clinical variables: {', '.join(mapped_signal_names)}"
+
+                        row_level_sql = await self.fix_sql_with_error_async(candidate_sql, rewrite_prompt)
+                        if row_level_sql:
+                            row_level_res = await asyncio.to_thread(execute_sql, row_level_sql)
+                            row_level_columns = _normalize_result_columns(row_level_res.get("columns", []))
+                            if "error" not in row_level_res and _has_identifier_columns(row_level_columns):
+                                logger.info("환자 단위 SQL 재작성 성공. 결과를 환자 행 기반으로 교체합니다.")
+                                candidate_sql = row_level_sql
+                                candidate_count_sql = f"SELECT COUNT(*) FROM ({row_level_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
+                                rag_db_res = row_level_res
+                                rag_columns = row_level_columns
+
+                        if not _has_identifier_columns(rag_columns):
+                            logger.warning("환자 식별자 컬럼이 없는 집계형 SQL로 판단되어 기본 코호트 결과를 유지합니다.")
+                            _append_warning_once(db_result, "집계형 SQL이 생성되어 환자 단위 기본 코호트 결과를 유지했습니다.")
+                            rag_db_res = {}
+
+                    if rag_db_res:
+                        sql_result["cohort_sql"] = candidate_sql
+                        sql_result["count_sql"] = candidate_count_sql
+                        db_result["error"] = None
+                        db_result["columns"] = rag_db_res.get("columns", [])
+                        db_result["rows"] = rag_db_res.get("rows", [])[:100]
+                        db_result["row_count"] = int(rag_db_res.get("row_count") or 0)
+                        db_result["total_count"] = rag_db_res.get("total_count")
+                        # step_counts는 파싱하기 어려울 수 있으므로 비움
+                        db_result["step_counts"] = []
             else:
                 logger.warning("RAG 고도화 SQL 생성 실패 (빈 결과)")
         except Exception as e:

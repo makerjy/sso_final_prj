@@ -70,7 +70,6 @@ interface PdfResultPanelProps {
     pdfResult: any
     charts: { title: string; data: { label: string; value: number }[] }[]
     onSave: () => void
-    onClose: () => void
     onCopySQL: (sql: string) => Promise<void>
     onDownloadCSV: () => void
     setMessage: (msg: string) => void
@@ -163,7 +162,6 @@ export default function PdfResultPanel({
     pdfResult,
     charts,
     onSave,
-    onClose,
     onCopySQL,
     onDownloadCSV,
     setMessage,
@@ -196,13 +194,49 @@ export default function PdfResultPanel({
     // 에러 핸들링: 최신 db_result.error를 우선하고, 전체 레벨 error나 구형 필드도 확인
     const resultError = cr.error || pdfResult.error || ""
 
-    // 환자 수 계산: step_counts의 마지막 값 또는 기존 필드 사용
+    // 환자 수 계산: step_counts -> count_result -> 결과 행 내 TOTAL_COUNT 류 컬럼 -> row_count 순
+    const toNumber = (value: any): number | null => {
+        if (typeof value === "number" && Number.isFinite(value)) return value
+        if (typeof value === "string") {
+            const parsed = Number(value.replace(/,/g, "").trim())
+            if (Number.isFinite(parsed)) return parsed
+        }
+        return null
+    }
+
     let patientCount = 0
-    if (cr.step_counts && cr.step_counts.length > 0) {
+    if (Array.isArray(cr.step_counts) && cr.step_counts.length > 0) {
         const lastStep = cr.step_counts[cr.step_counts.length - 1]
-        patientCount = lastStep[1]
+        const lastCount = Array.isArray(lastStep) ? toNumber(lastStep[1]) : null
+        patientCount = lastCount ?? 0
     } else {
-        patientCount = pdfResult.count_result?.patient_count || cr.row_count || 0
+        const countFromResult = toNumber(pdfResult.count_result?.patient_count)
+        if (countFromResult != null) {
+            patientCount = countFromResult
+        } else {
+            const columns = Array.isArray(cr.columns) ? cr.columns.map((c: any) => String(c || "").toUpperCase()) : []
+            const rows = Array.isArray(cr.rows) ? cr.rows : []
+            const firstRow = rows.length > 0 && Array.isArray(rows[0]) ? rows[0] : null
+            const preferredCountColumns = ["TOTAL_COUNT", "PATIENT_COUNT", "COHORT_SIZE", "N_PATIENTS", "N"]
+
+            if (firstRow) {
+                let extracted: number | null = null
+                for (const col of preferredCountColumns) {
+                    const idx = columns.indexOf(col)
+                    if (idx >= 0) {
+                        extracted = toNumber(firstRow[idx])
+                        if (extracted != null) break
+                    }
+                }
+                if (extracted == null) {
+                    const genericIdx = columns.findIndex((col: string) => col.endsWith("_COUNT") || col === "COUNT" || col === "CNT")
+                    if (genericIdx >= 0) extracted = toNumber(firstRow[genericIdx])
+                }
+                patientCount = extracted ?? toNumber(cr.row_count) ?? 0
+            } else {
+                patientCount = toNumber(cr.row_count) ?? 0
+            }
+        }
     }
 
     /* 카테고리별 그룹 */
@@ -243,9 +277,6 @@ export default function PdfResultPanel({
                     <div className="flex items-center gap-2 shrink-0">
                         <Button size="sm" className="h-9 gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm" onClick={onSave}>
                             <Sparkles className="w-4 h-4" /> 코호트 확정
-                        </Button>
-                        <Button variant="ghost" size="sm" className="h-9 text-xs text-muted-foreground hover:text-foreground" onClick={onClose}>
-                            닫기
                         </Button>
                     </div>
                 </div>

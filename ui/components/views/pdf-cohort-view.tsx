@@ -1,29 +1,142 @@
 "use client"
 
-import { useState, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Upload, FileText, Sparkles, Loader2, ArrowLeft } from "lucide-react"
+import { Progress } from "@/components/ui/progress"
+import { Upload, FileText, Sparkles, ArrowLeft } from "lucide-react"
 import PdfResultPanel from "./pdf-result-panel"
 import { useAuth } from "@/components/auth-provider"
 
-export function PdfCohortView() {
+const ACTIVE_PDF_TASK_KEY = "pdf-cohort-active-task"
+
+type ActivePdfTask = {
+    taskId: string
+}
+
+type PdfCohortViewProps = {
+    onPinnedChange?: (pinned: boolean) => void
+}
+
+export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
     const { user } = useAuth()
     const [isLoading, setIsLoading] = useState(false)
+    const [progressValue, setProgressValue] = useState(0)
     const [error, setError] = useState<string | null>(null)
     const [message, setMessage] = useState<string | null>(null)
 
     // PDF 분석 결과 상태
     const [pdfResult, setPdfResult] = useState<any>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
+    const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const mountedRef = useRef(true)
     const pdfUser = (user?.id || user?.username || user?.name || "").trim()
+
+    const clearPollTimer = () => {
+        if (pollTimerRef.current) {
+            clearTimeout(pollTimerRef.current)
+            pollTimerRef.current = null
+        }
+    }
+
+    const saveActiveTask = (taskId: string) => {
+        if (typeof window === "undefined") return
+        const payload: ActivePdfTask = { taskId }
+        window.localStorage.setItem(ACTIVE_PDF_TASK_KEY, JSON.stringify(payload))
+    }
+
+    const clearActiveTask = () => {
+        if (typeof window === "undefined") return
+        window.localStorage.removeItem(ACTIVE_PDF_TASK_KEY)
+    }
+
+    const buildStatusUrl = (taskId: string) => {
+        const statusQuery = new URLSearchParams()
+        if (pdfUser) statusQuery.set("user", pdfUser)
+        return statusQuery.toString()
+            ? `/pdf/status/${taskId}?${statusQuery.toString()}`
+            : `/pdf/status/${taskId}`
+    }
+
+    const pollTaskStatus = async (taskId: string) => {
+        try {
+            const statusRes = await fetch(buildStatusUrl(taskId))
+            if (!statusRes.ok) throw new Error("분석 상태 확인 실패")
+
+            const statusData = await statusRes.json()
+            console.log("Task Status:", statusData)
+            if (!mountedRef.current) return
+
+            if (statusData.status === "completed") {
+                clearPollTimer()
+                clearActiveTask()
+                setProgressValue(100)
+                setPdfResult(statusData.result)
+                setMessage("분석이 완료되었습니다.")
+                setIsLoading(false)
+                return
+            }
+
+            if (statusData.status === "failed") {
+                clearPollTimer()
+                clearActiveTask()
+                setError(statusData.error || "분석 실패")
+                setIsLoading(false)
+                return
+            }
+
+            setProgressValue((prev) => Math.min(95, Math.max(prev + 8, 35)))
+            setMessage(statusData.message || "분석 중...")
+            pollTimerRef.current = setTimeout(() => {
+                void pollTaskStatus(taskId)
+            }, 2000)
+        } catch {
+            if (!mountedRef.current) return
+            setMessage("연결 재시도 중...")
+            pollTimerRef.current = setTimeout(() => {
+                void pollTaskStatus(taskId)
+            }, 2000)
+        }
+    }
+
+    useEffect(() => {
+        mountedRef.current = true
+        if (typeof window === "undefined") return () => {}
+
+        const raw = window.localStorage.getItem(ACTIVE_PDF_TASK_KEY)
+        if (!raw) {
+            return () => {
+                mountedRef.current = false
+                clearPollTimer()
+            }
+        }
+
+        try {
+            const parsed = JSON.parse(raw) as ActivePdfTask
+            if (parsed?.taskId) {
+                setIsLoading(true)
+                setProgressValue(35)
+                setMessage("분석 상태를 다시 확인 중...")
+                void pollTaskStatus(parsed.taskId)
+            }
+        } catch {
+            window.localStorage.removeItem(ACTIVE_PDF_TASK_KEY)
+        }
+
+        return () => {
+            mountedRef.current = false
+            clearPollTimer()
+        }
+    }, [])
 
     const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
         if (!file) return
 
+        clearPollTimer()
         setIsLoading(true)
+        setProgressValue(8)
         setError(null)
         setMessage(null)
         setPdfResult(null)
@@ -47,40 +160,12 @@ export function PdfCohortView() {
             }
 
             const { task_id } = await res.json()
-            setMessage("PDF 분석이 시작되었습니다. 잠시만 기다려주세요...")
-
-            const poll = async () => {
-                try {
-                    const statusQuery = new URLSearchParams()
-                    if (pdfUser) statusQuery.set("user", pdfUser)
-                    const statusUrl = statusQuery.toString()
-                        ? `/pdf/status/${task_id}?${statusQuery.toString()}`
-                        : `/pdf/status/${task_id}`
-                    const statusRes = await fetch(statusUrl)
-                    if (!statusRes.ok) throw new Error("분석 상태 확인 실패")
-
-                    const statusData = await statusRes.json()
-                    console.log("Task Status:", statusData)
-
-                    if (statusData.status === "completed") {
-                        setPdfResult(statusData.result)
-                        setMessage("분석이 완료되었습니다.")
-                        setIsLoading(false)
-                    } else if (statusData.status === "failed") {
-                        setError(statusData.error || "분석 실패")
-                        setIsLoading(false)
-                    } else {
-                        setTimeout(poll, 2000)
-                        setMessage(`분석 중... (${statusData.message || "처리 중"})`)
-                    }
-                } catch (pollErr) {
-                    setError(pollErr instanceof Error ? pollErr.message : "분석 중 오류 발생")
-                    setIsLoading(false)
-                }
-            }
-            poll()
-
+            saveActiveTask(task_id)
+            setMessage("PDF 분석이 시작되었습니다.")
+            setProgressValue(15)
+            void pollTaskStatus(task_id)
         } catch (err) {
+            clearActiveTask()
             setError(err instanceof Error ? err.message : "업로드 중 오류가 발생했습니다.")
             setIsLoading(false)
         } finally {
@@ -91,10 +176,18 @@ export function PdfCohortView() {
     }
 
     const handleReset = () => {
+        clearPollTimer()
+        clearActiveTask()
         setPdfResult(null)
         setError(null)
         setMessage(null)
+        setProgressValue(0)
+        setIsLoading(false)
     }
+
+    useEffect(() => {
+        onPinnedChange?.(Boolean(pdfResult))
+    }, [pdfResult, onPinnedChange])
 
     const handleConfirmPdf = async () => {
         try {
@@ -161,7 +254,6 @@ export function PdfCohortView() {
                         pdfResult={pdfResult}
                         charts={[]} // 차트 데이터가 있다면 pdfResult에서 가공해서 전달
                         onSave={handleConfirmPdf}
-                        onClose={() => { }}
                         onCopySQL={handleCopySQL}
                         onDownloadCSV={handleDownloadCSV}
                         setMessage={setMessage}
@@ -186,13 +278,9 @@ export function PdfCohortView() {
                 </div>
 
                 <Card className="border-2 border-dashed border-muted-foreground/25 hover:border-primary/50 transition-colors bg-muted/50">
-                    <CardContent className="flex flex-col items-center justify-center py-12 space-y-4 text-center">
-                        <div className="p-4 rounded-full bg-background border shadow-sm">
-                            {isLoading ? (
-                                <Loader2 className="w-10 h-10 text-primary animate-spin" />
-                            ) : (
-                                <FileText className="w-10 h-10 text-muted-foreground" />
-                            )}
+                    <CardContent className="flex flex-col items-center justify-center py-8 sm:py-9 space-y-3 text-center">
+                        <div className="p-3 rounded-full bg-background border shadow-sm">
+                            <FileText className="w-9 h-9 text-muted-foreground" />
                         </div>
 
                         <div className="space-y-1">
@@ -208,13 +296,22 @@ export function PdfCohortView() {
                             </div>
                         )}
 
-                        {message && !error && (
+                        {isLoading && !error && (
+                            <div className="w-full max-w-md px-2 space-y-2">
+                                <Progress value={progressValue} className="h-3" />
+                                <div className="text-sm text-primary font-medium">
+                                    {message || "분석 중..."}
+                                </div>
+                            </div>
+                        )}
+
+                        {!isLoading && message && !error && (
                             <div className="text-sm text-primary font-medium bg-primary/10 px-3 py-1 rounded-md">
                                 {message}
                             </div>
                         )}
 
-                        <div className="relative mt-4">
+                        <div className="relative mt-2">
                             <input
                                 type="file"
                                 accept=".pdf"
@@ -223,17 +320,15 @@ export function PdfCohortView() {
                                 ref={fileInputRef}
                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
                             />
-                            <Button disabled={isLoading} className="gap-2 pointer-events-none">
-                                {isLoading ? "분석 중..." : (
-                                    <>
-                                        <Upload className="w-4 h-4" />
-                                        PDF 파일 선택
-                                    </>
-                                )}
-                            </Button>
+                            {!isLoading && (
+                                <Button className="gap-2 pointer-events-none">
+                                    <Upload className="w-4 h-4" />
+                                    PDF 파일 선택
+                                </Button>
+                            )}
                         </div>
 
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-4 bg-background/50 px-3 py-1.5 rounded-full border">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-2 bg-background/50 px-3 py-1 rounded-full border">
                             <Sparkles className="w-3 h-3 text-amber-500" />
                             <span>AI가 Inclusion/Exclusion Criteria를 자동 분석합니다</span>
                         </div>
