@@ -1975,8 +1975,9 @@ export function QueryView() {
       content: trimmed,
       timestamp: new Date()
     }
-    const shouldUseClarificationContext = response?.payload?.mode === "clarify"
-    const conversationSeed = shouldUseClarificationContext ? [...messages, newMessage] : [newMessage]
+    // Preserve recent conversational context so follow-up questions
+    // ("그 결과에서...", "그 조건으로...") are interpreted correctly.
+    const conversationSeed = [...messages, newMessage]
     const conversation = conversationSeed
       .slice(-10)
       .map((item) => ({ role: item.role, content: item.content }))
@@ -2383,6 +2384,9 @@ export function QueryView() {
     }
     if (sql?.trim()) {
       body.sql = sql.trim()
+    }
+    if (questionForSuggestions?.trim()) {
+      body.question = questionForSuggestions.trim()
     }
 
     const res = await fetchWithTimeout(apiUrl("/query/run"), {

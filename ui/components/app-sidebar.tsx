@@ -51,7 +51,7 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
         )}>
           <div className={cn("flex items-center justify-center shrink-0", collapsed ? "w-8 h-8" : "w-9 h-9")}>
             <Image
-              src="/query-lens-logo.svg"
+              src="/query-lens-logo-v2.svg"
               alt="Query LENs"
               width={collapsed ? 32 : 36}
               height={collapsed ? 32 : 36}
