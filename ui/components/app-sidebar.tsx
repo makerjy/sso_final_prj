@@ -1,13 +1,13 @@
 "use client"
 
 import { cn } from "@/lib/utils"
+import Image from "next/image"
 import {
   Database,
   // Settings2,
   MessageSquare,
   LayoutDashboard,
   FileText,
-  Heart,
   ChevronLeft,
   ChevronRight,
   Users
@@ -47,10 +47,16 @@ export function AppSidebar({ currentView, onViewChange, collapsed, onToggleColla
         {/* Logo */}
         <div className={cn(
           "flex items-center h-16 border-b border-border px-4",
-          collapsed ? "justify-center" : "gap-3"
+          collapsed ? "justify-center" : "gap-1"
         )}>
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary shrink-0">
-            <Heart className="w-4 h-4 text-primary-foreground" />
+          <div className={cn("flex items-center justify-center shrink-0", collapsed ? "w-8 h-8" : "w-9 h-9")}>
+            <Image
+              src="/query-lens-logo.svg"
+              alt="Query LENs"
+              width={collapsed ? 32 : 36}
+              height={collapsed ? 32 : 36}
+              priority
+            />
           </div>
           {!collapsed && (
             <div className="overflow-hidden">

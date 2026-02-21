@@ -14,21 +14,9 @@ export const metadata: Metadata = {
   description: '자연어로 MIMIC-IV 데이터베이스를 쿼리하고 Kaplan-Meier 생존 분석을 수행하세요',
   generator: 'v0.app',
   icons: {
-    icon: [
-      {
-        url: '/icon-light-32x32.png',
-        media: '(prefers-color-scheme: light)',
-      },
-      {
-        url: '/icon-dark-32x32.png',
-        media: '(prefers-color-scheme: dark)',
-      },
-      {
-        url: '/icon.svg',
-        type: 'image/svg+xml',
-      },
-    ],
-    apple: '/apple-icon.png',
+    icon: '/query-lens-favicon.svg',
+    shortcut: '/query-lens-favicon.svg',
+    apple: '/query-lens-logo.svg',
   },
 }
 
