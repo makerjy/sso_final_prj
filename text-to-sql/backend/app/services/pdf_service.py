@@ -89,6 +89,19 @@ _RESULT_IDENTIFIER_COLUMNS = {"SUBJECT_ID", "HADM_ID", "STAY_ID"}
 
 
 def _normalize_signal_name(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            normalized = _normalize_signal_name(item)
+            if normalized:
+                return normalized
+        return ""
+    if isinstance(value, dict):
+        for key in ("signal", "name", "label", "value", "text"):
+            if key in value:
+                normalized = _normalize_signal_name(value.get(key))
+                if normalized:
+                    return normalized
+        return ""
     raw = str(value or "").strip().lower()
     if not raw:
         return ""
@@ -831,6 +844,155 @@ COHORT JSON:
         slug = re.sub(r"_+", "_", slug).strip("_")
         return slug or "unknown"
 
+    def _pick_first_text(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                picked = self._pick_first_text(item)
+                if picked:
+                    return picked
+            return ""
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _normalize_step_type(self, raw_type: Any) -> str:
+        step_type = self._pick_first_text(raw_type).lower()
+        aliases = {
+            "vitals": "vital",
+            "vital_sign": "vital",
+            "vital_signs": "vital",
+            "icu_los": "icu_stay",
+            "icu_los_days": "icu_stay",
+            "diagnoses": "diagnosis",
+            "dx": "diagnosis",
+        }
+        return aliases.get(step_type, step_type)
+
+    def _normalize_window_key(self, raw_window: Any) -> str:
+        window = self._pick_first_text(raw_window)
+        if not window:
+            return ""
+        aliases = {
+            "first_24h": "icu_first_24h",
+            "icu_24h": "icu_first_24h",
+            "admission_24h": "admission_first_24h",
+            "pre_discharge_24h": "icu_discharge_last_24h",
+        }
+        normalized = aliases.get(window, window)
+        if normalized in WINDOW_TEMPLATES:
+            return normalized
+        return ""
+
+    def _sanitize_sql_params(self, raw_params: Any) -> dict[str, Any]:
+        defaults: dict[str, Any] = {
+            "min": 0,
+            "max": 150,
+            "operator": "=",
+            "value": 0,
+            "min_los": 0,
+            "drug": "",
+            "gender": "all",
+            "codes": "''",
+            "label": "",
+        }
+        params = raw_params if isinstance(raw_params, dict) else {}
+        safe: dict[str, Any] = {**defaults}
+        safe.update(params)
+
+        def _coerce_num(value: Any, default: float) -> float:
+            if isinstance(value, (int, float)):
+                return float(value)
+            text = str(value or "").strip().replace(",", "")
+            if not text:
+                return default
+            try:
+                return float(text)
+            except (TypeError, ValueError):
+                return default
+
+        safe["min"] = _coerce_num(safe.get("min"), 0.0)
+        safe["max"] = _coerce_num(safe.get("max"), 150.0)
+        safe["value"] = _coerce_num(safe.get("value"), 0.0)
+        safe["min_los"] = _coerce_num(safe.get("min_los"), 0.0)
+        if safe["min"] > safe["max"]:
+            safe["min"], safe["max"] = safe["max"], safe["min"]
+
+        operator = str(safe.get("operator") or "").strip()
+        if operator not in {">", ">=", "<", "<=", "=", "!=", "<>"}:
+            operator = "="
+        safe["operator"] = operator
+
+        safe["drug"] = re.sub(r"[\"'`]", "", str(safe.get("drug") or "").strip())
+        safe["gender"] = str(safe.get("gender") or "all").strip().lower() or "all"
+        safe["label"] = re.sub(r"[\"'`]", "", str(safe.get("label") or "").strip())
+        return safe
+
+    def _normalize_gender_filter(self, raw_gender: Any) -> str | None:
+        """Normalize gender filter to Oracle PATIENTS.gender codes.
+        Returns:
+            - 'M' or 'F' for a concrete filter
+            - None for broad/no-op filters (all/any/both/unknown)
+        """
+        broad_tokens = {
+            "",
+            "all",
+            "any",
+            "both",
+            "both_sexes",
+            "male_and_female",
+            "m_f",
+            "f_m",
+            "na",
+            "n_a",
+            "n/a",
+            "none",
+            "unknown",
+            "전체",
+            "남녀",
+            "모두",
+        }
+        male_tokens = {"m", "male", "man", "boy", "남", "남성"}
+        female_tokens = {"f", "female", "woman", "girl", "여", "여성"}
+
+        def _flatten(value: Any) -> list[str]:
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return []
+                parts = re.split(r"[,/|]+", text)
+                return [p.strip() for p in parts if p and p.strip()]
+            if isinstance(value, (list, tuple, set)):
+                out: list[str] = []
+                for item in value:
+                    out.extend(_flatten(item))
+                return out
+            if value is None:
+                return []
+            return _flatten(str(value))
+
+        normalized_codes: set[str] = set()
+        for token in _flatten(raw_gender):
+            key = re.sub(r"[^a-zA-Z0-9가-힣]+", "_", token.strip().lower()).strip("_")
+            if key in broad_tokens:
+                continue
+            if key in male_tokens:
+                normalized_codes.add("M")
+                continue
+            if key in female_tokens:
+                normalized_codes.add("F")
+                continue
+            if key in {"m", "f"}:
+                normalized_codes.add(key.upper())
+
+        if not normalized_codes:
+            return None
+        if len(normalized_codes) > 1:
+            # Requested both sexes -> equivalent to no filter
+            return None
+        return next(iter(normalized_codes))
+
     def _extract_select_keys(self, sql: str) -> set[str]:
         sql_text = str(sql or "")
         m = re.search(r"select\s+(.*?)\s+from\b", sql_text, flags=re.IGNORECASE | re.DOTALL)
@@ -860,6 +1022,24 @@ COHORT JSON:
         ctes = []
         step_labels = []
         step_refs = []
+
+        def _safe_render_sql_template(
+            template: str,
+            params: dict[str, Any],
+            *,
+            step_name: str,
+            signal_name: str,
+        ) -> str | None:
+            try:
+                return str(template).format(**params)
+            except (KeyError, ValueError, IndexError) as exc:
+                logger.warning(
+                    "Step '%s': SQL template render failed for '%s' (%s). Skipping step.",
+                    step_name,
+                    signal_name,
+                    exc,
+                )
+                return None
         
         # 가이드라인 2 & 3: First-Stay 원칙 및 최소 재원 시간(24h) 필터 적용
         ctes.append("""population AS (
@@ -879,29 +1059,53 @@ COHORT JSON:
         current_prev = "population"
         
         for i, step in enumerate(steps):
-            s_type = step.get("type")
+            s_type = self._normalize_step_type(step.get("type"))
+            if not s_type:
+                logger.warning("Step '%s': missing type. Skipping step.", i + 1)
+                continue
             s_params = step.get("params", {})
-            window_key = step.get("window")
+            window_key = self._normalize_window_key(step.get("window"))
             s_name = f"step_{i+1}_{self._sanitize_step_slug(s_type)}"
             is_exclusion = bool(step.get("is_exclusion", False))
             
-            # Safe SQL Formatting with defaults (fixed KeyError by adding 'label')
-            defaults = {"min": 0, "max": 150, "operator": "=", "value": 0, "min_los": 0, "drug": "", "gender": "all", "codes": "''", "label": ""}
-            safe_params = {**defaults, **s_params}
+            # Guard against malformed/empty params from LLM intent JSON.
+            safe_params = self._sanitize_sql_params(s_params)
             
             # 가드레일: Vital은 ChartEvents 우선
             if s_type == "vital":
-                v_signal = s_params.get("signal")
+                v_signal = _normalize_signal_name(safe_params.get("signal"))
+                if not isinstance(v_signal, str):
+                    v_signal = _normalize_signal_name(self._pick_first_text(v_signal))
+                if not isinstance(v_signal, str):
+                    v_signal = str(v_signal or "").strip()
                 if v_signal in self.signal_map:
                     raw_sql = self.signal_map[v_signal]
-                    signal_sql = raw_sql.format(**safe_params)
+                    signal_sql = _safe_render_sql_template(
+                        raw_sql,
+                        safe_params,
+                        step_name=s_name,
+                        signal_name=str(v_signal or s_type),
+                    )
+                    if not signal_sql:
+                        continue
                 else:
                     logger.warning(f"Unknown vital signal: {v_signal}")
                     continue
             elif s_type == "derived":
-                d_name = s_params.get("name", "").lower()
+                d_name = _normalize_signal_name(safe_params.get("name"))
+                if not isinstance(d_name, str):
+                    d_name = _normalize_signal_name(self._pick_first_text(d_name))
+                if not isinstance(d_name, str):
+                    d_name = str(d_name or "").strip()
                 if d_name in self.signal_map:
-                    signal_sql = self.signal_map[d_name].format(**safe_params)
+                    signal_sql = _safe_render_sql_template(
+                        self.signal_map[d_name],
+                        safe_params,
+                        step_name=s_name,
+                        signal_name=d_name or s_type,
+                    )
+                    if not signal_sql:
+                        continue
                 else:
                     # 유효하지 않은 derived 변수의 경우, SSO 스키마를 붙여 admissions 조인으로 우회 (에러 방지)
                     logger.warning(f"Unknown derived signal: {d_name}. Falling back to admissions.")
@@ -909,6 +1113,18 @@ COHORT JSON:
                     signal_sql = "SELECT stay_id, intime as charttime FROM SSO.ICUSTAYS WHERE stay_id IS NOT NULL"
             elif s_type in self.signal_map:
                 raw_sql = self.signal_map[s_type]
+                if s_type in {"gender", "sex"}:
+                    normalized_gender = self._normalize_gender_filter(
+                        s_params.get("gender", safe_params.get("gender"))
+                    )
+                    if not normalized_gender:
+                        logger.info(
+                            "Step '%s': broad/empty gender filter detected (%s). Skipping no-op gender step.",
+                            s_name,
+                            s_params.get("gender", safe_params.get("gender")),
+                        )
+                        continue
+                    safe_params["gender"] = normalized_gender
                 if s_type == "icu_stay":
                     min_los_raw = s_params.get("min_los", safe_params.get("min_los", 0))
                     try:
@@ -933,11 +1149,25 @@ COHORT JSON:
                         )
                     else:
                         safe_params["min_los"] = min_los
-                        signal_sql = raw_sql.format(**safe_params)
+                        signal_sql = _safe_render_sql_template(
+                            raw_sql,
+                            safe_params,
+                            step_name=s_name,
+                            signal_name=s_type,
+                        )
+                        if not signal_sql:
+                            continue
                 elif s_type == "diagnosis":
                     raw_codes = s_params.get("codes", [])
                     if isinstance(raw_codes, list):
-                        code_candidates = raw_codes
+                        code_candidates: list[Any] = []
+                        stack = list(raw_codes)
+                        while stack:
+                            item = stack.pop(0)
+                            if isinstance(item, (list, tuple, set)):
+                                stack.extend(list(item))
+                            else:
+                                code_candidates.append(item)
                     else:
                         raw_text = str(raw_codes or "")
                         code_candidates = raw_text.split(",") if "," in raw_text else [raw_text]
@@ -956,9 +1186,25 @@ COHORT JSON:
                         continue
 
                     code_val = ", ".join([f"'{code}'" for code in cleaned_codes])
-                    signal_sql = raw_sql.format(codes=code_val)
+                    # Keep sanitized SQL literal list; do not let raw list params overwrite it.
+                    format_params = {**safe_params, "codes": code_val}
+                    signal_sql = _safe_render_sql_template(
+                        raw_sql,
+                        format_params,
+                        step_name=s_name,
+                        signal_name=s_type,
+                    )
+                    if not signal_sql:
+                        continue
                 else:
-                    signal_sql = raw_sql.format(**safe_params)
+                    signal_sql = _safe_render_sql_template(
+                        raw_sql,
+                        safe_params,
+                        step_name=s_name,
+                        signal_name=s_type,
+                    )
+                    if not signal_sql:
+                        continue
             else:
                 continue
 
@@ -988,7 +1234,7 @@ COHORT JSON:
             condition_parts = [f"s.{join_key} = p.{join_key}"]
             
             # 시간 정보(charttime)가 있는 경우에만 윈도우 필터 적용 (가드 로직)
-            if window_key and window_key in WINDOW_TEMPLATES:
+            if window_key:
                 if "charttime" in signal_sql.lower():
                     condition_parts.append(WINDOW_TEMPLATES[window_key])
                 else:
@@ -1003,7 +1249,7 @@ WHERE {operator_exists} (
     WHERE {where_clause}
 )"""
             ctes.append(f"{s_name} AS ({cte_query})")
-            step_labels.append(step.get("name") or s_name)
+            step_labels.append(self._pick_first_text(step.get("name")) or s_name)
             step_refs.append(s_name)
             current_prev = s_name
 
@@ -1161,7 +1407,8 @@ WHERE {operator_exists} (
         reuse_existing=True이면 동일 환경(Version/Mode/Hash)의 캐시를 즉시 반환합니다.
         False이면 캐시를 무시하고 강제로 재생성하여 업데이트합니다.
         """
-        pipeline_version = "v55"
+        # Bump cache version when SQL assembly logic changes to avoid stale results.
+        pipeline_version = "v56"
         file_hash = hashlib.sha256(file_content).hexdigest()
         model_name = self.model
         prompt_hash = self._calculate_prompt_hash(relax_mode, deterministic)
@@ -1310,6 +1557,10 @@ WHERE {operator_exists} (
                 db_result["step_counts"] = debug_res.get("rows", [])
         except Exception as e:
             logger.error(f"DB 실행 중 오류: {e}")
+            logger.error(
+                "cohort_sql preview (first 800 chars): %s",
+                str(sql_result.get("cohort_sql") or "")[:800],
+            )
             db_result["error"] = str(e)
 
         # === 4.5 AI RAG 고도화 (Automatic) ===

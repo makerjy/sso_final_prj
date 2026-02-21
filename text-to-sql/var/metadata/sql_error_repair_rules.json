@@ -279,6 +279,113 @@
       ],
       "success_count": 1,
       "updated_at": 1771558874
+    },
+    {
+      "created_at": 1771680112,
+      "error_signature": "ORA-03156",
+      "failed_sql_hash": "a49773485a9ae29e7d87ca71420d49c9fd982d2ebca6ff7c84ecaf72eaeaf0da",
+      "failed_sql_sample": "SELECT EXTRACT(YEAR FROM i.INTIME) AS year, COUNT(DISTINCT i.SUBJECT_ID) AS CNT FROM ICUSTAYS i JOIN EMAR e ON i.SUBJECT_ID = e.SUBJECT_ID AND i.HADM_ID = e.HADM_ID WHERE LOWER(e.MEDICATION) LIKE '%epinephrine%' GROUP BY EXTRACT(YEAR FROM i.INTIME) ORDER BY year",
+      "fixed_sql": "SELECT EXTRACT(YEAR FROM i.INTIME) AS year, COUNT(DISTINCT i.SUBJECT_ID) AS CNT FROM (SELECT SUBJECT_ID, HADM_ID, INTIME FROM ICUSTAYS WHERE ROWNUM <= 10000) i JOIN (SELECT SUBJECT_ID, HADM_ID, MEDICATION FROM EMAR WHERE LOWER(MEDICATION) LIKE '%epinephrine%' AND ROWNUM <= 10000) e ON i.SUBJECT_ID = e.SUBJECT_ID AND i.HADM_ID = e.HADM_ID GROUP BY EXTRACT(YEAR FROM i.INTIME) ORDER BY year",
+      "fixed_sql_hash": "2682f7581ced0bf35328928eae8e75dd86814c3a379f4f8bd4e99bd96e635863",
+      "hit_count": 0,
+      "id": "03f31e03ede2476790e4d64d72159fc4",
+      "last_used_at": 1771680112,
+      "success_count": 1,
+      "updated_at": 1771680112
+    },
+    {
+      "created_at": 1771680300,
+      "error_signature": "ORA-00911",
+      "failed_sql_hash": "720f74626e3911b7e7faff79cc4890a834dbafc5a645b85e4f24b8ba14296caf",
+      "failed_sql_sample": "SELECT COUNT(DISTINCT HADM_ID) AS CNT FROM DIAGNOSES_ICD WHERE ICD_VERSION = 9 AND ICD_CODE LIKE 585%",
+      "fixed_sql": "SELECT COUNT(DISTINCT HADM_ID) AS CNT FROM DIAGNOSES_ICD WHERE ICD_VERSION = 9 AND ICD_CODE LIKE '585%'",
+      "fixed_sql_hash": "d8fc44ba461bdea48d51fff3fd4daf7015f1256e825f9dd272af6b5905dccc45",
+      "hit_count": 0,
+      "id": "8506e51683d34634b54114178d6eec81",
+      "last_used_at": 1771680300,
+      "success_count": 1,
+      "updated_at": 1771680300
+    },
+    {
+      "created_at": 1771680300,
+      "error_signature": "ORA-00911",
+      "failed_sql_hash": "a629473e2aada349c1d4cdf5466f0bd65fdb88174f0a3285e0a699aadfdc1680",
+      "failed_sql_sample": "SELECT COUNT(DISTINCT HADM_ID) AS CNT FROM DIAGNOSES_ICD WHERE ICD_VERSION = 10 AND ICD_CODE LIKE I50%",
+      "fixed_sql": "SELECT COUNT(DISTINCT HADM_ID) AS CNT FROM DIAGNOSES_ICD WHERE ICD_VERSION = 10 AND ICD_CODE LIKE 'I50%'",
+      "fixed_sql_hash": "8cb993985e11d98cced5a36d2be25e6053e9a4f4a0819d2778d38d23cb7a8c48",
+      "hit_count": 0,
+      "id": "cb1068c21d134d93a4130b8b5afcf24f",
+      "last_used_at": 1771680300,
+      "success_count": 1,
+      "updated_at": 1771680300
+    },
+    {
+      "created_at": 1771680301,
+      "error_signature": "ORA-00911",
+      "failed_sql_hash": "586478ab5ca615a1b0441bb80bc5bf2b12c07744e3867787f793ee23e675fa33",
+      "failed_sql_sample": "SELECT COUNT(DISTINCT d1.HADM_ID) AS CNT FROM DIAGNOSES_ICD d1 JOIN DIAGNOSES_ICD d2 ON d1.HADM_ID = d2.HADM_ID WHERE (d1.ICD_CODE LIKE I50% AND d1.ICD_VERSION = 10) AND (d2.ICD_CODE LIKE 585% AND d2.ICD_VERSION = 9)",
+      "fixed_sql": "SELECT COUNT(DISTINCT d1.HADM_ID) AS CNT FROM DIAGNOSES_ICD d1 JOIN DIAGNOSES_ICD d2 ON d1.HADM_ID = d2.HADM_ID WHERE (d1.ICD_CODE LIKE 'I50%' AND d1.ICD_VERSION = 10) AND (d2.ICD_CODE LIKE '585%' AND d2.ICD_VERSION = 9) AND D1.HADM_ID IS NOT NULL",
+      "fixed_sql_hash": "4e46b3db4b63d786c35ba5c72ca9b9d7b56c64118f2fc514a04ed52d6678c511",
+      "hit_count": 0,
+      "id": "b904f0b9130c45d39cc7ced0e05c390d",
+      "last_used_at": 1771680301,
+      "resolution_notes": [
+        "hadm_not_null_distinct:D1"
+      ],
+      "success_count": 1,
+      "updated_at": 1771680301
+    },
+    {
+      "created_at": 1771680301,
+      "error_signature": "ORA-00911",
+      "failed_sql_hash": "e36876bd0d3c7a164e75565fee968e425980c08575f80d985a74165e992a25a3",
+      "failed_sql_sample": "SELECT COUNT(DISTINCT HADM_ID) AS CNT FROM DIAGNOSES_ICD WHERE (ICD_VERSION = 10 AND ICD_CODE LIKE I50%) OR (ICD_VERSION = 9 AND ICD_CODE LIKE 428%)",
+      "fixed_sql": "SELECT COUNT(DISTINCT HADM_ID) AS CNT FROM DIAGNOSES_ICD WHERE (ICD_VERSION = 10 AND ICD_CODE LIKE 'I50%') OR (ICD_VERSION = 9 AND ICD_CODE LIKE '428%')",
+      "fixed_sql_hash": "34f904d3e39f6a78423ab6f1bf09888db29824099efb679810143636c7c28264",
+      "hit_count": 0,
+      "id": "44b59a9c99e34bc3a6918087795508f1",
+      "last_used_at": 1771680301,
+      "success_count": 1,
+      "updated_at": 1771680301
+    },
+    {
+      "created_at": 1771680319,
+      "error_signature": "ORA-00911",
+      "failed_sql_hash": "195a2a05a59dd703d734fe944aa9dfa7ae06e34eae369fb6099b8c9ec2c3563d",
+      "failed_sql_sample": "WITH hf AS (SELECT DISTINCT hadm_id FROM diagnoses_icd WHERE (icd_version = 9 AND icd_code LIKE 428%) OR (icd_version = 10 AND icd_code LIKE I50%)), ckd AS (SELECT DISTINCT hadm_id FROM diagnoses_icd WHERE (icd_version = 9 AND icd_code LIKE 585%) OR (icd_version = 10 AND icd_code LIKE N18%)) SELECT COUNT(*) AS cnt FROM hf JOIN ckd ON hf.hadm_id = ckd.hadm_id",
+      "fixed_sql": "WITH hf AS (SELECT DISTINCT hadm_id FROM diagnoses_icd WHERE (icd_version = 9 AND icd_code LIKE '428%') OR (icd_version = 10 AND icd_code LIKE 'I50%')), ckd AS (SELECT DISTINCT hadm_id FROM diagnoses_icd WHERE (icd_version = 9 AND icd_code LIKE '585%') OR (icd_version = 10 AND icd_code LIKE 'N18%')) SELECT COUNT(*) AS cnt FROM hf JOIN ckd ON hf.hadm_id = ckd.hadm_id",
+      "fixed_sql_hash": "94f4dc7139d785871db1203572bdd4cd25b94cd1b62f9a156513a40fca8ed927",
+      "hit_count": 0,
+      "id": "2acf092f78f842128da5dfbc67ea1363",
+      "last_used_at": 1771680319,
+      "success_count": 1,
+      "updated_at": 1771680319
+    },
+    {
+      "created_at": 1771680320,
+      "error_signature": "ORA-00911",
+      "failed_sql_hash": "3745365f5a09ebec05f3eaacc5136f4cc1e6fd452578dd6de0691d86e9753aef",
+      "failed_sql_sample": "WITH hf_ckd AS ( SELECT d.hadm_id FROM diagnoses_icd d WHERE ( (d.icd_version = 9 AND (d.icd_code LIKE 428% OR d.icd_code LIKE 585%)) OR (d.icd_version = 10 AND (d.icd_code LIKE I50% OR d.icd_code LIKE N18%)) ) GROUP BY d.hadm_id HAVING COUNT(DISTINCT CASE WHEN (d.icd_version = 9 AND d.icd_code LIKE 428%) OR (d.icd_version = 10 AND d.icd_code LIKE I50%) THEN 1 END) > 0 AND COUNT(DISTINCT CASE WHEN (d.icd_version = 9 AND d.icd_code LIKE 585%) OR (d.icd_version = 10 AND d.icd_code LIKE N18%) THEN ",
+      "fixed_sql": "WITH hf_ckd AS ( SELECT d.hadm_id FROM diagnoses_icd d WHERE ( (d.icd_version = 9 AND (d.icd_code LIKE '428%' OR d.icd_code LIKE '585%')) OR (d.icd_version = 10 AND (d.icd_code LIKE 'I50%' OR d.icd_code LIKE 'N18%')) ) GROUP BY d.hadm_id HAVING COUNT(DISTINCT CASE WHEN (d.icd_version = 9 AND d.icd_code LIKE '428%') OR (d.icd_version = 10 AND d.icd_code LIKE 'I50%') THEN 1 END) > 0 AND COUNT(DISTINCT CASE WHEN (d.icd_version = 9 AND d.icd_code LIKE '585%') OR (d.icd_version = 10 AND d.icd_code LIKE 'N18%') THEN 1 END) > 0 ) SELECT EXTRACT(YEAR FROM a.admittime) AS year, ROUND(AVG(CAST(a.dischtime AS DATE) - CAST(a.admittime AS DATE)),2) AS avg_los_days, COUNT(*) AS n FROM admissions a JOIN hf_ckd x ON a.hadm_id = x.hadm_id GROUP BY EXTRACT(YEAR FROM a.admittime) ORDER BY year",
+      "fixed_sql_hash": "52bad940e1b22ea4e402b341a013d43de36df695dca34635a014beee6c0ed42d",
+      "hit_count": 0,
+      "id": "99fe20c0213449bb823dfcc4e22034f7",
+      "last_used_at": 1771680320,
+      "success_count": 1,
+      "updated_at": 1771680320
+    },
+    {
+      "created_at": 1771681728,
+      "error_signature": "ORA-01476",
+      "failed_sql_hash": "4f14cce38ce699a97f410f2d4239c41f6c940dee9e6f82a9d7c70ca36259aa11",
+      "failed_sql_sample": "WITH sepsis_patients AS ( SELECT DISTINCT icu.HADM_ID FROM ICUSTAYS icu JOIN PROCEDURES_ICD proc ON icu.HADM_ID = proc.HADM_ID JOIN DIAGNOSES_ICD diag ON icu.HADM_ID = diag.HADM_ID JOIN D_ICD_DIAGNOSES dict ON diag.ICD_CODE = dict.ICD_CODE AND diag.ICD_VERSION = dict.ICD_VERSION WHERE proc.ICD_CODE = '3895' AND proc.ICD_VERSION = 9 AND ((diag.ICD_VERSION = 10 AND diag.ICD_CODE LIKE 'A40%') OR (diag.ICD_VERSION = 10 AND diag.ICD_CODE LIKE 'A41%') OR (diag.ICD_VERSION = 10 AND diag.ICD_CODE LIKE '",
+      "fixed_sql": "WITH sepsis_patients AS ( \n    SELECT DISTINCT icu.HADM_ID \n    FROM ICUSTAYS icu \n    JOIN PROCEDURES_ICD proc ON icu.HADM_ID = proc.HADM_ID \n    JOIN DIAGNOSES_ICD diag ON icu.HADM_ID = diag.HADM_ID \n    JOIN D_ICD_DIAGNOSES dict ON diag.ICD_CODE = dict.ICD_CODE AND diag.ICD_VERSION = dict.ICD_VERSION \n    WHERE proc.ICD_CODE = '3895' AND proc.ICD_VERSION = 9 \n    AND ((diag.ICD_VERSION = 10 AND diag.ICD_CODE LIKE 'A40%') \n         OR (diag.ICD_VERSION = 10 AND diag.ICD_CODE LIKE 'A41%') \n         OR (diag.ICD_VERSION = 10 AND diag.ICD_CODE LIKE 'R652%')) \n    AND proc.CHARTDATE BETWEEN icu.INTIME AND icu.INTIME + INTERVAL '48' HOUR \n), \nsepsis_mortality AS ( \n    SELECT COUNT(DISTINCT icu.HADM_ID) AS sepsis_deaths \n    FROM sepsis_patients sp \n    JOIN ICUSTAYS icu ON sp.HADM_ID = icu.HADM_ID \n    JOIN ADMISSIONS adm ON adm.SUBJECT_ID = icu.SUBJECT_ID AND adm.HADM_ID = icu.HADM_ID \n    WHERE adm.DEATHTIME BETWEEN icu.INTIME AND icu.OUTTIME \n), \nnon_sepsis_mortality AS ( \n    SELECT COUNT(DISTINCT icu.HADM_ID) AS non_sepsis_deaths \n    FROM ICUSTAYS icu \n    JOIN ADMISSIONS adm ON icu.HADM_ID = adm.HADM_ID \n    WHERE icu.HADM_ID NOT IN (SELECT HADM_ID FROM sepsis_patients) \n    AND adm.DEATHTIME BETWEEN icu.INTIME AND icu.OUTTIME \n), \ntotal_sepsis AS ( \n    SELECT COUNT(DISTINCT HADM_ID) AS total_sepsis \n    FROM sepsis_patients \n), \ntotal_non_sepsis AS ( \n    SELECT COUNT(DISTINCT icu.HADM_ID) AS total_non_sepsis \n    FROM ICUSTAYS icu \n    WHERE icu.HADM_ID NOT IN (SELECT HADM_ID FROM sepsis_patients) \n) \nSELECT \n    CASE WHEN ts.total_sepsis > 0 THEN sm.sepsis_deaths / ts.total_sepsis ELSE 0 END AS sepsis_mortality_rate, \n    CASE WHEN tns.total_non_sepsis > 0 THEN nsm.non_sepsis_deaths / tns.total_non_sepsis ELSE 0 END AS non_sepsis_mortality_rate \nFROM sepsis_mortality sm \nJOIN non_sepsis_mortality nsm ON 1=1 \nJOIN total_sepsis ts ON 1=1 \nJOIN total_non_sepsis tns ON 1=1",
+      "fixed_sql_hash": "796fe9f42348ba5864cc4575d310c63a74fe916de66407a24214cf4da0cb7615",
+      "hit_count": 0,
+      "id": "1876790cf3624c9d964336bf7a7f6319",
+      "last_used_at": 1771681728,
+      "success_count": 1,
+      "updated_at": 1771681728
     }
   ]
 }

@@ -278,7 +278,14 @@ def precheck_sql(sql: str, question: str | None = None) -> dict[str, object]:
     if not has_where and not where_optional:
         raise HTTPException(status_code=403, detail="WHERE clause required")
 
-    allowed_tables = {name.lower() for name in load_table_scope() if name}
+    # Keep table-scope enforcement stable across per-user/global settings:
+    # when user-specific scope is absent, fall back to global scope instead
+    # of treating scope as unrestricted.
+    allowed_tables = {
+        name.lower()
+        for name in load_table_scope(include_global_fallback=True)
+        if name
+    }
     if allowed_tables:
         # Oracle pseudo-table used in scalar SELECT patterns; safe to allow even with scope enabled.
         allowed_tables.add("dual")

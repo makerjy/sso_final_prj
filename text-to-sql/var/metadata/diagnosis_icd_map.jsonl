@@ -1,6 +1,6 @@
 {"term": "COPD", "aliases": ["만성폐쇄성폐질환", "chronic obstructive pulmonary disease"], "icd_prefixes": ["J44", "491", "492", "496"]}
 {"term": "고혈압", "aliases": ["hypertension", "HTN"], "icd_prefixes": ["I10"]}
-{"term": "심부전", "aliases": ["heart failure", "CHF"], "icd_prefixes": ["I50"]}
+{"term": "심부전", "aliases": ["heart failure", "CHF"], "icd_prefixes": ["I50", "428"]}
 {"term": "폐렴", "aliases": ["pneumonia"], "icd_prefixes": ["J18"]}
 {"term": "당뇨", "aliases": ["diabetes", "diabetes mellitus", "T1DM", "T2DM", "type 1 diabetes", "type 2 diabetes"], "icd_prefixes": ["E10", "E11", "E12", "E13", "E14", "250"]}
 {"term": "급성 신부전", "aliases": ["acute kidney injury", "AKI", "acute renal failure"], "icd_prefixes": ["N17", "584"]}

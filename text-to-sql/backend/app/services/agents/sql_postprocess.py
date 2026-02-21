@@ -19,6 +19,8 @@ _DISTINCT_RE = re.compile(
     r"^List distinct values of ([A-Za-z0-9_]+) in ([A-Za-z0-9_]+) \(sample\)$",
     re.IGNORECASE,
 )
+_SAMPLE_KO_TABLE_PAREN_RE = re.compile(r"\(([A-Za-z0-9_]+)\)")
+_SAMPLE_KO_LIMIT_RE = re.compile(r"(?:샘플\s*([0-9][0-9,]*)\s*(?:건|개|명|행|줄)|([0-9][0-9,]*)\s*(?:건|개|명|행|줄)\s*샘플)")
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
 _LIMIT_RE = re.compile(r"\blimit\s+(\d+)\s*;?\s*$", re.IGNORECASE)
 _FETCH_RE = re.compile(r"\bfetch\s+first\s+(\d+)\s+rows\s+only\s*;?\s*$", re.IGNORECASE)
@@ -130,6 +132,10 @@ _MORTALITY_QUERY_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _ICU_QUERY_INTENT_RE = re.compile(r"(중환자실|\bicu\b)", re.IGNORECASE)
+_MONTHLY_TREND_INTENT_RE = re.compile(
+    r"(월별|monthly|month[-\s]*by[-\s]*month|추세|trend|변화|변했|how\s+.*change|time\s+trend|시계열)",
+    re.IGNORECASE,
+)
 _FIRST_ICU_INTENT_RE = re.compile(
     r"(first\s+icu|first[-\s]*stay|initial\s+icu|index\s+icu|"
     r"첫\s*icu|첫번째\s*icu|최초\s*icu|처음\s*icu|첫\s*중환자실|최초\s*중환자실|처음\s*중환자실)",
@@ -235,6 +241,7 @@ _POST_WINDOW_KO_RE = re.compile(r"후\s*(\d+)\s*일|(\d+)\s*일\s*이내")
 _POST_WINDOW_EN_RE = re.compile(r"(?:within|after)\s+(\d+)\s+day", re.IGNORECASE)
 _TOP_N_EN_RE = re.compile(r"\btop\s+(\d+)\b", re.IGNORECASE)
 _TOP_N_KO_RE = re.compile(r"(?:상위|탑)\s*(\d+)")
+_TOP_N_KO_ONLY_RE = re.compile(r"(?<!\d)([0-9][0-9,]*)\s*(?:개|건|명|행|줄)\s*만")
 _COUNT_BY_GENDER_EN_RE = re.compile(r"\bcount\b.*\bby\s+gender\b", re.IGNORECASE)
 _COUNT_BY_GENDER_KO_RE = re.compile(r"성별.*(건수|건|수|카운트)|.*(건수|건|수|카운트).*성별")
 _AGE_GROUP_INTENT_RE = re.compile(r"(연령대|나이대|age\s*(group|band|range)|연령\s*구간)", re.IGNORECASE)
@@ -258,6 +265,9 @@ _ICD_CODE_VERSION_AND_RE = re.compile(
     r"(?P<ver_col>(?:[A-Za-z0-9_]+\.)?ICD_VERSION)\s*=\s*(?P<version>9|10)",
     re.IGNORECASE,
 )
+_COMORBIDITY_HINT_RE = re.compile(r"(동반|comorbid|co[-\s]*morbid|\+|\band\b|및|함께|with)", re.IGNORECASE)
+_EXPLICIT_ICD_PREFIX_RE = re.compile(r"\b(?:[A-TV-Z][0-9][0-9A-Z]{1,3}|[0-9]{3})\b", re.IGNORECASE)
+_ICD_CODE_HINT_RE = re.compile(r"(icd|진단\s*코드|진단코드|코드)", re.IGNORECASE)
 _ADM_ICU_IN_RE = re.compile(
     r"(?P<adm>[A-Za-z0-9_]+)\.HADM_ID\s+IN\s*\(\s*SELECT\s+HADM_ID\s+FROM\s+ICUSTAYS\s*\)",
     re.IGNORECASE,
@@ -351,6 +361,43 @@ def _find_final_select_from_span(sql: str) -> tuple[str, int, int] | None:
     if from_idx < 0:
         return None
     return core, last_select, from_idx
+
+
+def _find_first_top_level_keyword(sql: str, start_idx: int, keywords: tuple[str, ...]) -> int:
+    if not sql or start_idx < 0 or start_idx >= len(sql):
+        return -1
+    upper = sql.upper()
+    depth = 0
+    in_single = False
+    i = start_idx
+    while i < len(upper):
+        ch = upper[i]
+        if in_single:
+            if ch == "'":
+                if i + 1 < len(upper) and upper[i + 1] == "'":
+                    i += 2
+                    continue
+                in_single = False
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if depth == 0:
+            for keyword in keywords:
+                if _token_at(upper, i, keyword.upper()):
+                    return i
+        i += 1
+    return -1
 
 
 def _split_top_level_csv(text: str) -> list[str]:
@@ -584,6 +631,82 @@ def _parse_columns(text: str) -> list[str]:
     if any(not _IDENT_RE.fullmatch(c) for c in cols):
         return []
     return cols
+
+
+def _extract_sample_table_from_question(question: str) -> str | None:
+    q = str(question or "")
+    if not q:
+        return None
+
+    paren_match = _SAMPLE_KO_TABLE_PAREN_RE.search(q)
+    if paren_match:
+        candidate = str(paren_match.group(1) or "").strip().upper()
+        if _IDENT_RE.fullmatch(candidate):
+            return candidate
+
+    q_upper = q.upper()
+    table_candidates = sorted(
+        set(_tables_with_subject_id()) | set(_tables_with_hadm_id()) | {"PATIENTS"},
+        key=lambda name: (-len(name), name),
+    )
+    for table in table_candidates:
+        if not table:
+            continue
+        if re.search(rf"(?<![A-Z0-9_]){re.escape(table)}(?![A-Z0-9_])", q_upper):
+            return table
+    return None
+
+
+def _extract_sample_limit_from_question(question: str, default: int = 100) -> int:
+    q = str(question or "")
+    if not q:
+        return default
+    match = _SAMPLE_KO_LIMIT_RE.search(q)
+    if not match:
+        return default
+    raw = str(match.group(1) or match.group(2) or "").replace(",", "").strip()
+    if not raw.isdigit():
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    return value if value > 0 else default
+
+
+def _build_ko_sample_template(question: str) -> tuple[str | None, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").strip()
+    if not q:
+        return None, rules
+    q_lower = q.lower()
+    if "샘플" not in q_lower:
+        return None, rules
+    if any(token in q_lower for token in ("column", "columns", "with ", "컬럼", "열", "항목", "포함")):
+        return None, rules
+
+    table = _extract_sample_table_from_question(q)
+    if not table:
+        return None, rules
+
+    columns: list[str] = []
+    if table == "PATIENTS":
+        columns = ["SUBJECT_ID", "GENDER"]
+    elif table == "POE":
+        columns = ["POE_ID", "POE_SEQ"]
+    elif table in _tables_with_subject_id():
+        columns = ["SUBJECT_ID"]
+        if table in _tables_with_hadm_id():
+            columns.append("HADM_ID")
+
+    first = _first(columns)
+    if not columns or not first:
+        return None, rules
+
+    limit = _extract_sample_limit_from_question(q, default=100)
+    cols_sql = ", ".join(columns)
+    rules.append("sample_rows_template_ko")
+    return f"SELECT {cols_sql} FROM {table} WHERE {first} IS NOT NULL AND ROWNUM <= {limit}", rules
 
 
 def _first(items: Iterable[str]) -> str | None:
@@ -2192,6 +2315,10 @@ def _rewrite_birth_year_age(sql: str) -> tuple[str, list[str]]:
 def _normalize_count_aliases(sql: str) -> tuple[str, list[str]]:
     rules: list[str] = []
     text = sql
+    if re.match(r"^\s*WITH\b", text, re.IGNORECASE):
+        # Keep CTE-local aggregate aliases intact because outer SELECT scopes
+        # often reference them by name.
+        return text, rules
     if re.search(r"\bFROM\s*\(\s*SELECT\b", text, re.IGNORECASE):
         # Avoid alias rewrite inside derived tables; outer scopes may reference inner aliases.
         return text, rules
@@ -2391,21 +2518,32 @@ def _fix_order_by_count_suffix(sql: str) -> tuple[str, list[str]]:
 
 
 def _extract_top_n_from_question(question: str) -> int | None:
+    def _parse_pos_int(value: str | None) -> int | None:
+        if value is None:
+            return None
+        raw = str(value).strip().replace(",", "")
+        if not raw or not raw.isdigit():
+            return None
+        try:
+            return max(1, int(raw))
+        except Exception:
+            return None
+
     q = str(question or "").strip().lower()
     if not q:
         return None
     m = _TOP_N_EN_RE.search(q)
     if m:
-        try:
-            return max(1, int(m.group(1)))
-        except Exception:
-            return 10
+        parsed = _parse_pos_int(m.group(1))
+        return parsed if parsed is not None else 10
     m = _TOP_N_KO_RE.search(q)
     if m:
-        try:
-            return max(1, int(m.group(1)))
-        except Exception:
-            return 10
+        parsed = _parse_pos_int(m.group(1))
+        return parsed if parsed is not None else 10
+    m = _TOP_N_KO_ONLY_RE.search(q)
+    if m:
+        parsed = _parse_pos_int(m.group(1))
+        return parsed if parsed is not None else 10
     if "top" in q or "상위" in q or "탑" in q:
         return 10
     return None
@@ -2505,24 +2643,137 @@ def _enforce_top_n_wrapper(question: str, sql: str) -> tuple[str, list[str]]:
     return wrapped, rules
 
 
+def _apply_monthly_trend_default_cap(question: str, sql: str, default_n: int = 120) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = str(sql or "").strip().rstrip(";")
+    if not text or default_n <= 0:
+        return sql, rules
+
+    if _extract_top_n_from_question(question) is not None:
+        return text, rules
+    if not _MONTHLY_TREND_INTENT_RE.search(str(question or "")):
+        return text, rules
+
+    upper = text.upper()
+    if "GROUP BY" not in upper or "ORDER BY" not in upper:
+        return text, rules
+    if "ROWNUM" in upper or _LIMIT_RE.search(text) or _FETCH_RE.search(text):
+        return text, rules
+
+    has_month_bucket = bool(
+        re.search(r"TRUNC\s*\(\s*[^,]+,\s*'MM'\s*\)", text, re.IGNORECASE)
+        or re.search(r"TO_CHAR\s*\(\s*[^,]+,\s*'YYYY[-_/]?MM'\s*\)", text, re.IGNORECASE)
+        or re.search(r"EXTRACT\s*\(\s*MONTH\s+FROM\s+[^)]+\)", text, re.IGNORECASE)
+    )
+    if not has_month_bucket:
+        return text, rules
+
+    wrapped = _wrap_with_rownum(text, default_n)
+    if wrapped != text:
+        rules.append(f"default_monthly_trend_cap:{default_n}")
+    return wrapped, rules
+
+
+def _strip_first_icu_rownum_for_careunit_counts(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = str(sql or "").strip().rstrip(";")
+    if not text:
+        return sql, rules
+
+    q = str(question or "").lower()
+    first_careunit_intent = bool(
+        re.search(r"(first\s+care\s*unit|first\s+careunit|icu\s+stays\s+by\s+first\s+careunit|첫\s*careunit|첫\s*병동)", q)
+    )
+    if not first_careunit_intent:
+        return text, rules
+    if _FIRST_ICU_INTENT_RE.search(q):
+        return text, rules
+
+    upper = text.upper()
+    if "ICUSTAYS" not in upper or "ROW_NUMBER(" not in upper:
+        return text, rules
+    if "GROUP BY" not in upper or "FIRST_CAREUNIT" not in upper:
+        return text, rules
+    if not re.search(r"\b(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\b", text, re.IGNORECASE):
+        return text, rules
+
+    rewritten = text
+    rewritten = re.sub(
+        r"\bWHERE\s+\(*\s*(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\s*\)*\s+AND\s+",
+        "WHERE ",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r"\bAND\s+\(*\s*(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\s*\)*",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r"\bWHERE\s+\(*\s*(?:[A-Za-z0-9_]+\.)?(?:RN_FIRST_ICU|RN)\s*=\s*1\s*\)*\s*(?=\bGROUP\b|\bORDER\b|\bHAVING\b|$)",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(r"\bWHERE\s*(?=\bGROUP\b|\bORDER\b|\bHAVING\b|$)", "", rewritten, flags=re.IGNORECASE)
+    rewritten = re.sub(r"\s{2,}", " ", rewritten).strip()
+    if rewritten != text:
+        rules.append("strip_first_icu_rownum_for_careunit_counts")
+        return rewritten, rules
+    return text, rules
+
+
+def _apply_first_careunit_default_cap(question: str, sql: str, default_n: int = 10) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = str(sql or "").strip().rstrip(";")
+    if not text or default_n <= 0:
+        return sql, rules
+    if _extract_top_n_from_question(question) is not None:
+        return text, rules
+
+    q = str(question or "").lower()
+    first_careunit_intent = bool(
+        re.search(r"(icu\s+stays\s+by\s+first\s+careunit|first\s+care\s*unit|first\s+careunit|첫\s*병동|첫\s*careunit)", q)
+    )
+    if not first_careunit_intent:
+        return text, rules
+
+    upper = text.upper()
+    if "ROWNUM" in upper or _LIMIT_RE.search(text) or _FETCH_RE.search(text):
+        return text, rules
+    if "ICUSTAYS" not in upper or "GROUP BY" not in upper or "ORDER BY" not in upper:
+        return text, rules
+    if "FIRST_CAREUNIT" not in upper or "COUNT(" not in upper:
+        return text, rules
+
+    wrapped = _wrap_with_rownum(text, default_n)
+    if wrapped != text:
+        rules.append(f"default_first_careunit_cap:{default_n}")
+    return wrapped, rules
+
+
 def _append_where_predicate(sql: str, predicate: str) -> str:
     text = str(sql or "").strip().rstrip(";")
     if not text or not predicate:
         return text
-    upper = text.upper()
-    if "WHERE" in upper:
-        m = re.search(r"\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b", text, re.IGNORECASE)
-        if m:
-            head = text[:m.start()].rstrip()
-            tail = text[m.start():]
+    span = _find_final_select_from_span(text)
+    if not span:
+        return f"{text} WHERE {predicate}"
+    core, _, from_idx = span
+    where_idx = _find_first_top_level_keyword(core, from_idx, ("WHERE",))
+    clause_idx = _find_first_top_level_keyword(core, from_idx, ("GROUP BY", "HAVING", "ORDER BY"))
+    if where_idx >= 0 and (clause_idx < 0 or where_idx < clause_idx):
+        if clause_idx >= 0:
+            head = core[:clause_idx].rstrip()
+            tail = core[clause_idx:]
             return f"{head} AND {predicate} {tail}".strip()
-        return f"{text} AND {predicate}"
-    m = re.search(r"\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b", text, re.IGNORECASE)
-    if m:
-        head = text[:m.start()].rstrip()
-        tail = text[m.start():]
+        return f"{core} AND {predicate}".strip()
+    if clause_idx >= 0:
+        head = core[:clause_idx].rstrip()
+        tail = core[clause_idx:]
         return f"{head} WHERE {predicate} {tail}".strip()
-    return f"{text} WHERE {predicate}"
+    return f"{core} WHERE {predicate}".strip()
 
 
 def _collect_table_aliases(sql: str) -> dict[str, str]:
@@ -2546,6 +2797,10 @@ def _ensure_hadm_not_null_for_distinct_counts(sql: str) -> tuple[str, list[str]]
     rules: list[str] = []
     text = str(sql or "").strip()
     if not text:
+        return text, rules
+    if re.match(r"^\s*WITH\b", text, re.IGNORECASE):
+        # Appending a single predicate to the outer query can reference aliases
+        # that exist only inside CTEs and cause ORA-00904.
         return text, rules
 
     alias_tables = _collect_table_aliases(text)
@@ -2926,7 +3181,7 @@ def _rewrite_unrequested_first_icu_window(question: str, sql: str) -> tuple[str,
     if not re.search(r"\bROW_NUMBER\s*\(", text, re.IGNORECASE):
         return sql, rules
     if not re.search(
-        r"ROW_NUMBER\s*\(\s*\)\s*OVER\s*\(\s*PARTITION\s+BY\s+[A-Za-z0-9_\.]*SUBJECT_ID\s+ORDER\s+BY\s+[A-Za-z0-9_\.]*INTIME",
+        r"ROW_NUMBER\s*\(\s*\)\s*OVER\s*\(\s*PARTITION\s+BY\s+[^)]*SUBJECT_ID[^)]*ORDER\s+BY\s+[A-Za-z0-9_\.]*INTIME",
         text,
         re.IGNORECASE,
     ):
@@ -3324,6 +3579,52 @@ def _strip_transfers_eventtype_filter(question: str, sql: str) -> tuple[str, lis
     text = re.sub(r"\s{2,}", " ", text).strip()
     if text != sql:
         rules.append("strip_transfers_eventtype_filter")
+    return text, rules
+
+
+def _strip_invalid_eventtype_filter_for_non_transfers(sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    text = str(sql or "").strip()
+    if not text:
+        return sql, rules
+    if "EVENTTYPE" not in text.upper():
+        return text, rules
+    if re.search(r"\bTRANSFERS\b", text, re.IGNORECASE):
+        return text, rules
+
+    column_pattern = r"(?:[A-Za-z0-9_]+\.)?EVENTTYPE"
+    value_pattern = r"'[^']*'"
+
+    text = re.sub(
+        rf"\bWHERE\s+{column_pattern}\s*=\s*{value_pattern}\s+AND\s+",
+        "WHERE ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        rf"\s+AND\s+{column_pattern}\s*=\s*{value_pattern}",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        rf"\bWHERE\s+{column_pattern}\s*=\s*{value_pattern}\s+(GROUP\s+BY|ORDER\s+BY|HAVING)\b",
+        r" \1",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        rf"\bWHERE\s+{column_pattern}\s*=\s*{value_pattern}\s*(;)?\s*$",
+        r"\1",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bWHERE\s+AND\b", "WHERE", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bAND\s+AND\b", "AND", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bWHERE\s*(?=\bGROUP\b|\bORDER\b|\bHAVING\b|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if text != sql:
+        rules.append("strip_nontransfers_eventtype_filter")
     return text, rules
 
 
@@ -4040,6 +4341,19 @@ def recommend_postprocess_profile(
             join_cond = on_clause.group(1).upper()
             if "HADM_ID" in join_cond and "SUBJECT_ID" not in join_cond:
                 reasons.append("admissions_icu_partial_join_key")
+
+    first_last_careunit_intent = bool(
+        re.search(r"(first|last)\s*care\s*unit|(first|last)\s*careunit|첫\s*careunit|마지막\s*careunit", q, re.IGNORECASE)
+    )
+    if first_last_careunit_intent:
+        has_transfers = bool(re.search(r"\bTRANSFERS\b", upper))
+        has_icustays = bool(re.search(r"\bICUSTAYS\b", upper))
+        has_bare_careunit = bool(re.search(r"\bCAREUNIT\b", upper))
+        has_first_last_col = bool(re.search(r"\b(FIRST_CAREUNIT|LAST_CAREUNIT)\b", upper))
+        if has_transfers and has_bare_careunit and not has_icustays:
+            reasons.append("first_last_careunit_intent_on_transfers")
+        elif has_icustays and has_bare_careunit and not has_first_last_col:
+            reasons.append("first_last_careunit_missing_specific_column")
 
     if reasons:
         return "aggressive", reasons
@@ -5019,6 +5333,129 @@ def _fix_icd_version_prefix_mismatch(sql: str) -> tuple[str, list[str]]:
     return text, rules
 
 
+def _expand_diagnosis_prefixes_from_question(question: str, sql: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+    q = str(question or "").strip()
+    text = str(sql or "")
+    if not q or not text:
+        return text, rules
+    if not re.search(r"\bDIAGNOSES_ICD\b", text, re.IGNORECASE):
+        return text, rules
+
+    # Respect explicit user-specified code queries (e.g., "I50 코드").
+    if _ICD_CODE_HINT_RE.search(q) and _EXPLICIT_ICD_PREFIX_RE.search(q):
+        return text, rules
+
+    mapped = match_diagnosis_mappings(q)
+    if not mapped:
+        return text, rules
+    if len(mapped) < 2 and not _COMORBIDITY_HINT_RE.search(q):
+        return text, rules
+
+    version_cfg = load_sql_postprocess_rules().get("icd_version_inference", {})
+    try:
+        letter_version = int(version_cfg.get("letter_prefix_version", 10))
+    except Exception:
+        letter_version = 10
+    try:
+        digit_version = int(version_cfg.get("digit_prefix_version", 9))
+    except Exception:
+        digit_version = 9
+    overrides_cfg = version_cfg.get("prefix_version_overrides")
+    prefix_version_overrides: dict[str, int] = {}
+    if isinstance(overrides_cfg, dict):
+        for key, value in overrides_cfg.items():
+            normalized_key = str(key).strip().upper()
+            if not normalized_key:
+                continue
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            prefix_version_overrides[normalized_key] = parsed
+
+    def expected_version(prefix: str) -> int | None:
+        normalized = str(prefix or "").strip().upper().replace(".", "")
+        if not normalized:
+            return None
+        for key in sorted(prefix_version_overrides.keys(), key=len, reverse=True):
+            if normalized.startswith(key):
+                return prefix_version_overrides[key]
+        head = normalized[0]
+        if head.isalpha():
+            return letter_version
+        if head.isdigit():
+            return digit_version
+        return None
+
+    prefix_to_entry: dict[str, dict[str, Any]] = {}
+    for entry in mapped:
+        prefixes = [
+            str(prefix).strip().upper().replace(".", "")
+            for prefix in entry.get("icd_prefixes", [])
+            if str(prefix).strip()
+        ]
+        deduped: list[str] = []
+        for prefix in prefixes:
+            if prefix not in deduped:
+                deduped.append(prefix)
+        if len(deduped) <= 1:
+            continue
+        for prefix in deduped:
+            prefix_to_entry.setdefault(prefix, {"term": entry.get("term"), "prefixes": deduped})
+    if not prefix_to_entry:
+        return text, rules
+
+    changed = False
+    expanded_terms: list[str] = []
+
+    def _expand_clause(version_col: str, code_col: str, prefix: str) -> str | None:
+        nonlocal changed
+        normalized_prefix = str(prefix or "").strip().upper().replace(".", "")
+        entry = prefix_to_entry.get(normalized_prefix)
+        if not entry:
+            return None
+        prefixes = [str(item).strip().upper().replace(".", "") for item in entry.get("prefixes", []) if str(item).strip()]
+        if normalized_prefix not in prefixes or len(prefixes) <= 1:
+            return None
+
+        predicates: list[str] = []
+        for mapped_prefix in prefixes:
+            version = expected_version(mapped_prefix)
+            if version is None:
+                predicate = f"{code_col} LIKE '{mapped_prefix}%'"
+            else:
+                predicate = f"({version_col} = {version} AND {code_col} LIKE '{mapped_prefix}%')"
+            if predicate not in predicates:
+                predicates.append(predicate)
+        if len(predicates) <= 1:
+            return None
+
+        term = str(entry.get("term") or "").strip()
+        if term and term not in expanded_terms:
+            expanded_terms.append(term)
+        changed = True
+        return "(" + " OR ".join(predicates) + ")"
+
+    def repl_vc(match: re.Match) -> str:
+        rewritten = _expand_clause(match.group("ver_col"), match.group("code_col"), match.group("prefix"))
+        return rewritten or match.group(0)
+
+    def repl_cv(match: re.Match) -> str:
+        rewritten = _expand_clause(match.group("ver_col"), match.group("code_col"), match.group("prefix"))
+        return rewritten or match.group(0)
+
+    rewritten = _ICD_VERSION_CODE_AND_RE.sub(repl_vc, text)
+    rewritten2 = _ICD_CODE_VERSION_AND_RE.sub(repl_cv, rewritten)
+    if changed and rewritten2 != text:
+        suffix = ""
+        if expanded_terms:
+            suffix = ":" + ",".join(expanded_terms[:3])
+        rules.append("expand_diagnosis_prefixes_from_question" + suffix)
+        return rewritten2, rules
+    return text, rules
+
+
 def _extract_post_window_days(question: str) -> int | None:
     match_ko = _POST_WINDOW_KO_RE.search(question)
     if match_ko:
@@ -5166,7 +5603,15 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     transfers_eventtype_fixed, transfers_eventtype_rules = _strip_transfers_eventtype_filter(q, hadm_group_fixed)
     rules.extend(transfers_eventtype_rules)
 
-    ordered_count_fixed, ordered_count_rules = _ensure_order_by_count(q, transfers_eventtype_fixed)
+    nontransfers_eventtype_fixed, nontransfers_eventtype_rules = _strip_invalid_eventtype_filter_for_non_transfers(
+        transfers_eventtype_fixed
+    )
+    rules.extend(nontransfers_eventtype_rules)
+
+    admission_type_fixed, admission_type_rules = _strip_inpatient_admission_type_filter(q, nontransfers_eventtype_fixed)
+    rules.extend(admission_type_rules)
+
+    ordered_count_fixed, ordered_count_rules = _ensure_order_by_count(q, admission_type_fixed)
     rules.extend(ordered_count_rules)
 
     ordered, order_rules = _fix_order_by_bad_alias(ordered_count_fixed)
@@ -5196,9 +5641,17 @@ def _postprocess_sql_relaxed(question: str, sql: str) -> tuple[str, list[str]]:
     uncapped, uncap_rules = _strip_unrequested_top_n_cap(q, rewritten)
     rules.extend(uncap_rules)
 
-    top_fixed, top_rules = _enforce_top_n_wrapper(q, uncapped)
+    first_icu_window_fixed, first_icu_window_rules = _strip_first_icu_rownum_for_careunit_counts(q, uncapped)
+    rules.extend(first_icu_window_rules)
+
+    top_fixed, top_rules = _enforce_top_n_wrapper(q, first_icu_window_fixed)
     rules.extend(top_rules)
-    return top_fixed, rules
+
+    monthly_capped, monthly_cap_rules = _apply_monthly_trend_default_cap(q, top_fixed)
+    rules.extend(monthly_cap_rules)
+    careunit_capped, careunit_cap_rules = _apply_first_careunit_default_cap(q, monthly_capped)
+    rules.extend(careunit_cap_rules)
+    return careunit_capped, rules
 
 
 def _postprocess_sql_conservative(question: str, sql: str) -> tuple[str, list[str]]:
@@ -5213,7 +5666,13 @@ def _postprocess_sql_conservative(question: str, sql: str) -> tuple[str, list[st
     procedure_map_fixed, procedure_map_rules = _rewrite_procedure_title_filter_with_icd_map(q, diagnosis_map_fixed)
     rules.extend(procedure_map_rules)
 
-    icd_version_consistent, icd_version_consistent_rules = _fix_icd_version_prefix_mismatch(procedure_map_fixed)
+    diagnosis_prefix_expanded, diagnosis_prefix_expand_rules = _expand_diagnosis_prefixes_from_question(
+        q,
+        procedure_map_fixed,
+    )
+    rules.extend(diagnosis_prefix_expand_rules)
+
+    icd_version_consistent, icd_version_consistent_rules = _fix_icd_version_prefix_mismatch(diagnosis_prefix_expanded)
     rules.extend(icd_version_consistent_rules)
 
     icd_version_fixed, icd_version_rules = _add_icd_version_for_prefix_filters(icd_version_consistent)
@@ -5237,7 +5696,14 @@ def _postprocess_sql_conservative(question: str, sql: str) -> tuple[str, list[st
     )
     rules.extend(age_gender_extrema_rules)
 
-    return age_gender_extrema_fixed, rules
+    first_icu_window_fixed, first_icu_window_rules = _strip_first_icu_rownum_for_careunit_counts(q, age_gender_extrema_fixed)
+    rules.extend(first_icu_window_rules)
+
+    monthly_capped, monthly_cap_rules = _apply_monthly_trend_default_cap(q, first_icu_window_fixed)
+    rules.extend(monthly_cap_rules)
+    careunit_capped, careunit_cap_rules = _apply_first_careunit_default_cap(q, monthly_capped)
+    rules.extend(careunit_cap_rules)
+    return careunit_capped, rules
 
 
 def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tuple[str, list[str]]:
@@ -5284,6 +5750,11 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
                 f"SELECT {cols_sql} FROM {table} WHERE {first} IS NOT NULL AND ROWNUM <= 100",
                 rules,
             )
+
+    ko_sample_sql, ko_sample_rules = _build_ko_sample_template(q)
+    if ko_sample_sql:
+        rules.extend(ko_sample_rules)
+        return ko_sample_sql, rules
 
     execution_cfg = load_sql_postprocess_rules().get("execution", {})
     mode = str(execution_cfg.get("mode") or "conservative").strip().lower()
@@ -5444,7 +5915,13 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     procedure_map_fixed, procedure_map_rules = _rewrite_procedure_title_filter_with_icd_map(q, diagnosis_map_fixed)
     rules.extend(procedure_map_rules)
 
-    icd_version_consistent, icd_version_consistent_rules = _fix_icd_version_prefix_mismatch(procedure_map_fixed)
+    diagnosis_prefix_expanded, diagnosis_prefix_expand_rules = _expand_diagnosis_prefixes_from_question(
+        q,
+        procedure_map_fixed,
+    )
+    rules.extend(diagnosis_prefix_expand_rules)
+
+    icd_version_consistent, icd_version_consistent_rules = _fix_icd_version_prefix_mismatch(diagnosis_prefix_expanded)
     rules.extend(icd_version_consistent_rules)
 
     icd_version_fixed, icd_version_rules = _add_icd_version_for_prefix_filters(icd_version_consistent)
@@ -5608,7 +6085,12 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     transfers_eventtype_final, transfers_eventtype_final_rules = _strip_transfers_eventtype_filter(q, categorical_fixed)
     rules.extend(transfers_eventtype_final_rules)
 
-    d_items_title_fixed, d_items_title_rules = _rewrite_d_items_long_title_to_label(transfers_eventtype_final)
+    nontransfers_eventtype_final, nontransfers_eventtype_final_rules = _strip_invalid_eventtype_filter_for_non_transfers(
+        transfers_eventtype_final
+    )
+    rules.extend(nontransfers_eventtype_final_rules)
+
+    d_items_title_fixed, d_items_title_rules = _rewrite_d_items_long_title_to_label(nontransfers_eventtype_final)
     rules.extend(d_items_title_rules)
 
     scalar_itemid_fixed, scalar_itemid_rules = _rewrite_itemid_scalar_subquery_to_safe_in(d_items_title_fixed)
@@ -5632,6 +6114,14 @@ def postprocess_sql(question: str, sql: str, profile: str | None = None) -> tupl
     rules.extend(ratio_rules)
     uncapped, uncap_rules = _strip_unrequested_top_n_cap(q, ratio_fixed)
     rules.extend(uncap_rules)
-    top_fixed, top_rules = _enforce_top_n_wrapper(q, uncapped)
+    first_icu_window_fixed, first_icu_window_rules = _strip_first_icu_rownum_for_careunit_counts(q, uncapped)
+    rules.extend(first_icu_window_rules)
+
+    top_fixed, top_rules = _enforce_top_n_wrapper(q, first_icu_window_fixed)
     rules.extend(top_rules)
-    return top_fixed, rules
+
+    monthly_capped, monthly_cap_rules = _apply_monthly_trend_default_cap(q, top_fixed)
+    rules.extend(monthly_cap_rules)
+    careunit_capped, careunit_cap_rules = _apply_first_careunit_default_cap(q, monthly_capped)
+    rules.extend(careunit_cap_rules)
+    return careunit_capped, rules

@@ -1,8 +1,11 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from app.services.pdf_service import PDFCohortService
+from app.services.logging_store.store import append_event
+from app.core.config import get_settings
 import logging
 import uuid
-import asyncio
+import time
+from datetime import datetime
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -12,31 +15,134 @@ logger = logging.getLogger(__name__)
 # 프로덕션 환경에서는 Redis나 DB를 사용하는 것이 좋습니다.
 jobs = {}
 
-async def process_pdf_task(task_id: str, content: bytes, relax_mode: bool = False, deterministic: bool = True, reuse_existing: bool = True):
+def _fmt_ts(ts: int) -> str:
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _sec(ms: int) -> float:
+    return round(float(ms) / 1000.0, 3)
+
+
+async def process_pdf_task(
+    task_id: str,
+    content: bytes,
+    file_hash: str,
+    filename: str,
+    relax_mode: bool = False,
+    deterministic: bool = True,
+    reuse_existing: bool = True,
+):
     """
     백그라운드에서 실행되는 PDF 처리 작업
     """
+    submitted_at_ts = int(jobs.get(task_id, {}).get("submitted_at_ts") or time.time())
+    started_at_ts = int(time.time())
+    queue_wait_ms = max(0, int((started_at_ts - submitted_at_ts) * 1000))
+    started_perf = time.perf_counter()
+
     try:
         logger.info(f"Starting PDF processing for task {task_id} (Relax: {relax_mode}, Deterministic: {deterministic}, Reuse: {reuse_existing})")
-        jobs[task_id] = {"status": "processing", "message": "분석 중..."}
+        jobs[task_id] = {
+            "status": "processing",
+            "message": "분석 중...",
+            "task_id": task_id,
+            "pdf_hash": file_hash,
+            "filename": filename,
+            "submitted_at_ts": submitted_at_ts,
+            "submitted_at": _fmt_ts(submitted_at_ts),
+            "started_at_ts": started_at_ts,
+            "started_at": _fmt_ts(started_at_ts),
+            "queue_wait_ms": queue_wait_ms,
+            "queue_wait_sec": _sec(queue_wait_ms),
+        }
         
         service = PDFCohortService()
-        result = await service.analyze_and_generate_sql(content, relax_mode=relax_mode, deterministic=deterministic, reuse_existing=reuse_existing)
+        result = await service.analyze_and_generate_sql(
+            content,
+            filename=filename,
+            relax_mode=relax_mode,
+            deterministic=deterministic,
+            reuse_existing=reuse_existing,
+        )
+
+        completed_at_ts = int(time.time())
+        analysis_duration_ms = max(0, int((time.perf_counter() - started_perf) * 1000))
+        total_elapsed_ms = max(analysis_duration_ms, int((completed_at_ts - submitted_at_ts) * 1000))
         
         jobs[task_id] = {
             "status": "completed", 
             "result": result,
-            "message": "분석 완료"
+            "message": "분석 완료",
+            "task_id": task_id,
+            "pdf_hash": file_hash,
+            "filename": filename,
+            "submitted_at_ts": submitted_at_ts,
+            "submitted_at": _fmt_ts(submitted_at_ts),
+            "started_at_ts": started_at_ts,
+            "started_at": _fmt_ts(started_at_ts),
+            "completed_at_ts": completed_at_ts,
+            "completed_at": _fmt_ts(completed_at_ts),
+            "queue_wait_ms": queue_wait_ms,
+            "queue_wait_sec": _sec(queue_wait_ms),
+            "analysis_duration_ms": analysis_duration_ms,
+            "analysis_duration_sec": _sec(analysis_duration_ms),
+            "total_elapsed_ms": total_elapsed_ms,
+            "total_elapsed_sec": _sec(total_elapsed_ms),
         }
+        append_event(get_settings().events_log_path, {
+            "type": "audit",
+            "event": "pdf_analysis",
+            "status": "success",
+            "task_id": task_id,
+            "pdf_hash": file_hash,
+            "filename": filename,
+            "duration_ms": analysis_duration_ms,
+            "queue_wait_ms": queue_wait_ms,
+            "total_elapsed_ms": total_elapsed_ms,
+            "rows_returned": int(((result.get("db_result") or {}).get("row_count") or 0)),
+        })
         logger.info(f"Completed PDF processing for task {task_id}")
         
     except Exception as e:
-        logger.error(f"Error processing PDF task {task_id}: {e}")
+        completed_at_ts = int(time.time())
+        analysis_duration_ms = max(0, int((time.perf_counter() - started_perf) * 1000))
+        total_elapsed_ms = max(analysis_duration_ms, int((completed_at_ts - submitted_at_ts) * 1000))
+        logger.exception("Error processing PDF task %s", task_id)
         jobs[task_id] = {
             "status": "failed", 
             "error": str(e),
-            "message": "분석 실패"
+            "message": "분석 실패",
+            "task_id": task_id,
+            "pdf_hash": file_hash,
+            "filename": filename,
+            "submitted_at_ts": submitted_at_ts,
+            "submitted_at": _fmt_ts(submitted_at_ts),
+            "started_at_ts": started_at_ts,
+            "started_at": _fmt_ts(started_at_ts),
+            "completed_at_ts": completed_at_ts,
+            "completed_at": _fmt_ts(completed_at_ts),
+            "queue_wait_ms": queue_wait_ms,
+            "queue_wait_sec": _sec(queue_wait_ms),
+            "analysis_duration_ms": analysis_duration_ms,
+            "analysis_duration_sec": _sec(analysis_duration_ms),
+            "total_elapsed_ms": total_elapsed_ms,
+            "total_elapsed_sec": _sec(total_elapsed_ms),
         }
+        append_event(get_settings().events_log_path, {
+            "type": "audit",
+            "event": "pdf_analysis",
+            "status": "error",
+            "task_id": task_id,
+            "pdf_hash": file_hash,
+            "filename": filename,
+            "duration_ms": analysis_duration_ms,
+            "queue_wait_ms": queue_wait_ms,
+            "total_elapsed_ms": total_elapsed_ms,
+            "error": str(e),
+        })
 
 @router.post("/upload")
 async def upload_pdf(
@@ -46,7 +152,8 @@ async def upload_pdf(
     deterministic: bool = True,
     reuse_existing: bool = True
 ):
-    if not file.filename.lower().endswith('.pdf'):
+    filename = str(file.filename or "").strip()
+    if not filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
     
     try:
@@ -57,21 +164,38 @@ async def upload_pdf(
         import hashlib
         file_hash = hashlib.sha256(content).hexdigest()
         task_id = str(uuid.uuid4())
+        submitted_at_ts = int(time.time())
         
         # 초기 상태 설정
         jobs[task_id] = {
             "status": "pending",
             "message": "대기 중...",
-            "pdf_hash": file_hash
+            "task_id": task_id,
+            "pdf_hash": file_hash,
+            "filename": filename or "uploaded.pdf",
+            "file_size_bytes": len(content),
+            "submitted_at_ts": submitted_at_ts,
+            "submitted_at": _fmt_ts(submitted_at_ts),
         }
         
         # 백그라운드 작업 등록
-        background_tasks.add_task(process_pdf_task, task_id, content, relax_mode, deterministic, reuse_existing)
+        background_tasks.add_task(
+            process_pdf_task,
+            task_id,
+            content,
+            file_hash,
+            filename or "uploaded.pdf",
+            relax_mode,
+            deterministic,
+            reuse_existing,
+        )
         
         return {
             "task_id": task_id,
             "status": "pending",
             "pdf_hash": file_hash,
+            "filename": filename or "uploaded.pdf",
+            "submitted_at": _fmt_ts(submitted_at_ts),
             "message": "PDF 분석이 시작되었습니다. 잠시 후 결과를 확인해주세요."
         }
 

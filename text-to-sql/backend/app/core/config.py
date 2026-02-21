@@ -95,6 +95,7 @@ class Settings:
     oneshot_postprocess_enabled: bool
     oneshot_intent_guard_enabled: bool
     oneshot_intent_realign_enabled: bool
+    default_scope_autofill_enabled: bool
 
     max_retry_attempts: int
     expert_trigger_mode: str
@@ -103,6 +104,7 @@ class Settings:
     max_db_joins: int
     row_cap: int
     db_timeout_sec: int
+    db_precount_enabled: bool
     sql_auto_repair_enabled: bool
     sql_auto_repair_max_attempts: int
     sql_zero_result_repair_enabled: bool
@@ -188,12 +190,14 @@ def load_settings() -> Settings:
         oneshot_postprocess_enabled=_bool(os.getenv("ONESHOT_POSTPROCESS_ENABLED"), True),
         oneshot_intent_guard_enabled=_bool(os.getenv("ONESHOT_INTENT_GUARD_ENABLED"), True),
         oneshot_intent_realign_enabled=_bool(os.getenv("ONESHOT_INTENT_REALIGN_ENABLED"), True),
+        default_scope_autofill_enabled=_bool(os.getenv("DEFAULT_SCOPE_AUTOFILL_ENABLED"), False),
         max_retry_attempts=_int(os.getenv("MAX_RETRY_ATTEMPTS"), 1),
         expert_trigger_mode=_str(os.getenv("EXPERT_TRIGGER_MODE"), "score"),
         expert_score_threshold=_int(os.getenv("EXPERT_SCORE_THRESHOLD"), 3),
         max_db_joins=_int(os.getenv("MAX_DB_JOINS"), 12),
         row_cap=_int(os.getenv("ROW_CAP"), 5000),
         db_timeout_sec=_int(os.getenv("DB_TIMEOUT_SEC"), 30),
+        db_precount_enabled=_bool(os.getenv("DB_PRECOUNT_ENABLED"), False),
         sql_auto_repair_enabled=_bool(os.getenv("SQL_AUTO_REPAIR_ENABLED"), True),
         sql_auto_repair_max_attempts=_int(os.getenv("SQL_AUTO_REPAIR_MAX_ATTEMPTS"), 1),
         sql_zero_result_repair_enabled=_bool(os.getenv("SQL_ZERO_RESULT_REPAIR_ENABLED"), False),

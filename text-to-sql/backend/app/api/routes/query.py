@@ -34,6 +34,7 @@ from app.core.paths import project_path
 router = APIRouter()
 
 _QUERY_STORE: dict[str, dict] = {}
+_QUERY_STORE_MAX_ENTRIES = 500
 _ZERO_RESULT_HINTS = (
     "ratio",
     "rate",
@@ -49,7 +50,9 @@ _ZERO_RESULT_HINTS = (
     "대비",
     "차이",
 )
-_ENABLE_RUNTIME_REWRITE_ON_RETRY = False
+# Retry rounds can safely use runtime SQL rewrite/intent-guard to recover
+# from first-pass execution errors without affecting initial generation fidelity.
+_ENABLE_RUNTIME_REWRITE_ON_RETRY = True
 _TEMPLATE_REPAIR_ERROR_CODES = {
     "ORA-00904",
     "ORA-00905",
@@ -68,6 +71,11 @@ _TEMPLATE_REPAIR_ERROR_MARKERS = (
 )
 _IN_SCOPE_CLINICAL_TOKEN_RE = re.compile(
     r"(환자|입원|퇴원|중환자|icu|진단|질환|약물|처방|검사|재입원|사망률|코호트|admission|patient|diagnos|disease|medication|prescription|lab|readmission|mortality)",
+    re.IGNORECASE,
+)
+_FOLLOWUP_QUERY_HINT_RE = re.compile(
+    r"(그\s*조건|그\s*결과|해당\s*조건|이전\s*질문|앞선\s*질문|같은\s*조건|방금|"
+    r"\b(then|previous|above|same condition|based on that|what about that)\b)",
     re.IGNORECASE,
 )
 
@@ -184,12 +192,34 @@ def _with_answer_opening(text: str, *, kind: str = "default") -> str:
     return f"{opening}\n{body}"
 
 
-def _llm_scope_guidance(question: str, user_id: str | None) -> dict[str, Any] | None:
+def _llm_scope_guidance(
+    question: str,
+    user_id: str | None,
+    conversation: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     q = str(question or "").strip()
     if not q:
         return None
+    has_prior_user_turn = any(
+        str(turn.get("role") or "").strip().lower() == "user"
+        and str(turn.get("content") or "").strip()
+        for turn in (conversation or [])
+    )
+    if _FOLLOWUP_QUERY_HINT_RE.search(q) and has_prior_user_turn:
+        # Follow-up utterances rely on previous turns; avoid scope false-positives
+        # from single-turn gating.
+        return None
     settings = get_settings()
     tables = _load_available_table_names(user_id)
+    convo_rows: list[dict[str, str]] = []
+    for turn in (conversation or [])[-6:]:
+        role = str(turn.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        convo_rows.append({"role": role, "content": content[:500]})
     messages = [
         {
             "role": "system",
@@ -210,6 +240,7 @@ def _llm_scope_guidance(question: str, user_id: str | None) -> dict[str, Any] | 
                 {
                     "service_scope": "임상연구용 text-to-sql/sql-to-plot",
                     "question": q,
+                    "conversation": convo_rows,
                     "available_tables": tables[:24],
                 },
                 ensure_ascii=False,
@@ -402,6 +433,53 @@ def _resolve_user_id(user_id: str | None, user_name: str | None) -> str:
     if normalized:
         return normalized
     return normalize_user_id(user_name)
+
+
+def _pack_query_store_entry(payload: dict[str, Any], owner_user_id: str) -> dict[str, Any]:
+    return {
+        "payload": payload,
+        "owner_user_id": str(owner_user_id or "").strip(),
+    }
+
+
+def _unpack_query_store_entry(entry: Any) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(entry, dict):
+        return None, ""
+    packed_payload = entry.get("payload")
+    if isinstance(packed_payload, dict):
+        owner = str(entry.get("owner_user_id") or "").strip()
+        return packed_payload, owner
+
+    # Backward-compatibility with legacy raw payload entries.
+    owner = str(entry.get("__owner_user_id") or "").strip()
+    if "__owner_user_id" in entry:
+        return {k: v for k, v in entry.items() if k != "__owner_user_id"}, owner
+    return entry, owner
+
+
+def _get_query_payload_for_user(qid: str, requester_user_id: str) -> dict[str, Any] | None:
+    entry = _QUERY_STORE.get(qid)
+    payload, owner_user_id = _unpack_query_store_entry(entry)
+    if not payload:
+        return None
+    owner = str(owner_user_id or "").strip()
+    requester = str(requester_user_id or "").strip()
+    if owner and requester and owner != requester:
+        raise HTTPException(status_code=404, detail="Query not found")
+    if owner and not requester:
+        raise HTTPException(status_code=403, detail="user identity required")
+    return payload
+
+
+def _store_query_payload(qid: str, payload: dict[str, Any], owner_user_id: str) -> None:
+    _QUERY_STORE[qid] = _pack_query_store_entry(payload, owner_user_id)
+    overflow = len(_QUERY_STORE) - _QUERY_STORE_MAX_ENTRIES
+    while overflow > 0:
+        oldest_qid = next(iter(_QUERY_STORE), None)
+        if oldest_qid is None:
+            break
+        _QUERY_STORE.pop(oldest_qid, None)
+        overflow -= 1
 
 
 def _fallback_query_answer(*, total_rows: int | None, fetched_rows: int) -> str:
@@ -690,11 +768,11 @@ def oneshot(req: OneShotRequest):
     status = "success"
     error_detail = None
     try:
-        scope_guidance = _llm_scope_guidance(req.question, user_id)
+        scope_guidance = _llm_scope_guidance(req.question, user_id, req.conversation)
         if scope_guidance:
             payload = _attach_oneshot_assistant_message(req.question, scope_guidance)
             qid = str(uuid.uuid4())
-            _QUERY_STORE[qid] = payload
+            _store_query_payload(qid, payload, user_id)
             return {"qid": qid, "payload": payload}
         payload = run_oneshot(
             req.question,
@@ -705,7 +783,7 @@ def oneshot(req: OneShotRequest):
         )
         payload = _attach_oneshot_assistant_message(req.question, payload)
         qid = str(uuid.uuid4())
-        _QUERY_STORE[qid] = payload
+        _store_query_payload(qid, payload, user_id)
         return {"qid": qid, "payload": payload}
     except HTTPException as exc:
         status = "error"
@@ -759,8 +837,9 @@ def oneshot(req: OneShotRequest):
 
 
 @router.get("/get")
-def get_query(qid: str):
-    payload = _QUERY_STORE.get(qid)
+def get_query(qid: str, user_id: str | None = None, user_name: str | None = None):
+    requester_user_id = _resolve_user_id(user_id, user_name)
+    payload = _get_query_payload_for_user(qid, requester_user_id)
     if not payload:
         raise HTTPException(status_code=404, detail="Query not found")
     return {"qid": qid, "payload": payload}
@@ -772,23 +851,30 @@ def run_query(req: RunRequest):
         raise HTTPException(status_code=400, detail="user_ack is required")
 
     settings = get_settings()
+    user_name = req.user_name or "사용자"
+    user_role = req.user_role or "연구원"
+    user_id = _resolve_user_id(req.user_id, req.user_name)
 
     sql = req.sql
     stored = None
     if req.qid:
-        stored = _QUERY_STORE.get(req.qid)
+        stored = _get_query_payload_for_user(req.qid, user_id)
     if not sql and stored and "final" in stored:
         sql = stored["final"].get("final_sql")
 
     if not sql:
         raise HTTPException(status_code=400, detail="SQL not provided")
 
-    question = None
+    req_question = str(req.question or "").strip()
+    question = req_question or None
     question_en = None
     context: dict[str, Any] = {}
     planner_intent: dict[str, Any] | None = None
+    stored_question = None
     if isinstance(stored, dict):
-        question = stored.get("question") or stored.get("question_en")
+        stored_question = stored.get("question") or stored.get("question_en")
+        if not question:
+            question = stored_question
         question_en_value = stored.get("question_en")
         if isinstance(question_en_value, str):
             question_en = question_en_value
@@ -800,19 +886,17 @@ def run_query(req: RunRequest):
             intent_value = planner_value.get("intent")
             if isinstance(intent_value, dict):
                 planner_intent = intent_value
-    if not question:
-        req_question = str(req.question or "").strip()
-        if req_question:
-            question = req_question
+    if req_question and stored_question and req_question.strip() != str(stored_question).strip():
+        # Explicit question override should not inherit stale planner/context from older QID.
+        question_en = None
+        context = {}
+        planner_intent = None
     if not question:
         question = ""
     has_original_question = bool(str(question).strip())
     allow_template_repair = has_original_question
     allow_llm_repair = has_original_question
 
-    user_name = req.user_name or "사용자"
-    user_role = req.user_role or "연구원"
-    user_id = _resolve_user_id(req.user_id, req.user_name)
     user_token = set_request_user(user_id)
 
     status = "success"
@@ -990,8 +1074,16 @@ def run_query(req: RunRequest):
                                         }
                                     )
                                     continue
-                        except Exception:
-                            pass
+                        except Exception as repair_exc:
+                            auto_repair_history.append(
+                                {
+                                    "attempt": repair_round + 1,
+                                    "source": "zero_result_llm_repair_failed",
+                                    "error": f"NO_ROWS_RETURNED_REPAIR_FAILED: {repair_exc}",
+                                    "risk_score": None,
+                                    "postprocess": [],
+                                }
+                            )
                 if row_cap and rows_returned >= row_cap:
                     status = "warning"
                 for pair in llm_repair_pairs:

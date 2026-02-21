@@ -26,6 +26,11 @@ from app.services.runtime.risk_classifier import classify
 _SQL_EXAMPLES_CACHE: dict[str, Any] | None = None
 _SQL_EXAMPLES_CACHE_PATH: str | None = None
 _SQL_EXACT_KEEP_RE = re.compile(r"[^0-9a-z가-힣]+")
+_FOLLOWUP_CUE_RE = re.compile(
+    r"(그\s*조건|그\s*결과|해당\s*조건|이전\s*질문|앞선\s*질문|같은\s*조건|방금|"
+    r"\b(then|previous|above|same condition|based on that|what about that)\b)",
+    re.IGNORECASE,
+)
 
 
 _DEFERRED_SCOPE_TABLES = {"dual"}
@@ -627,6 +632,66 @@ def _normalize_conversation(conversation: list[dict[str, Any]] | None) -> list[d
     return normalized
 
 
+def _looks_like_followup_question(question: str) -> bool:
+    text = _MULTI_SPACE_RE.sub(" ", str(question or "").strip())
+    if not text:
+        return False
+    if _FOLLOWUP_CUE_RE.search(text):
+        return True
+    lowered = text.lower()
+    if len(lowered) <= 24 and lowered in {
+        "그럼",
+        "then",
+        "and then",
+        "what about this",
+        "what about that",
+    }:
+        return True
+    if len(lowered) <= 48 and re.match(r"^(그럼|그 조건|해당 조건|then|what about)\b", lowered):
+        return True
+    return False
+
+
+def _previous_user_question(
+    question: str,
+    conversation: list[dict[str, Any]] | None,
+) -> str:
+    turns = _normalize_conversation(conversation)
+    if not turns:
+        return ""
+    current = _MULTI_SPACE_RE.sub(" ", str(question or "").strip())
+    seen_current = False
+    for turn in reversed(turns):
+        if turn.get("role") != "user":
+            continue
+        text = _MULTI_SPACE_RE.sub(" ", str(turn.get("content") or "").strip())
+        if not text:
+            continue
+        if not seen_current and text == current:
+            seen_current = True
+            continue
+        if text != current:
+            return text
+    return ""
+
+
+def _inject_followup_context(
+    question: str,
+    conversation: list[dict[str, Any]] | None,
+) -> str:
+    q = str(question or "").strip()
+    if not q:
+        return q
+    if not _looks_like_followup_question(q):
+        return q
+    previous = _previous_user_question(q, conversation)
+    if not previous:
+        return q
+    tag = "[후속 질문]" if contains_korean(q) else "[follow-up]"
+    merged = f"{previous}\n{tag} {q}".strip()
+    return merged if merged else q
+
+
 def _is_clarification_prompt_text(text: str) -> bool:
     normalized = _MULTI_SPACE_RE.sub(" ", text).strip().lower()
     if not normalized:
@@ -1225,7 +1290,11 @@ def _normalize_clarifier_payload(
 ) -> dict[str, Any]:
     base_question, _, raw_answers = _collect_clarification_memory(question, conversation)
     resolved_question = base_question or question
-    default_scope = _build_default_scope(base_question=resolved_question, raw_answers=raw_answers)
+    settings = get_settings()
+    if bool(getattr(settings, "default_scope_autofill_enabled", False)):
+        default_scope = _build_default_scope(base_question=resolved_question, raw_answers=raw_answers)
+    else:
+        default_scope = {"applied": False}
     ambiguity_rule = _detect_definition_ambiguity_rule(resolved_question)
 
     need_clarification = bool(payload.get("need_clarification"))
@@ -1286,7 +1355,14 @@ def _normalize_clarifier_payload(
         example_inputs=example_inputs,
     )
     if need_clarification and not definition_signal:
-        need_clarification = False
+        # Accept non-definition clarifications if payload is still actionable.
+        has_actionable_prompt = bool(
+            clarification_question.strip()
+            or options
+            or example_inputs
+        )
+        if not has_actionable_prompt:
+            need_clarification = False
     if need_clarification:
         if not reason:
             reason = (
@@ -1341,6 +1417,7 @@ def run_oneshot(
 ) -> dict[str, Any]:
     settings = get_settings()
     original_question = question
+    question = _inject_followup_context(question, conversation)
     translated_question = None
     scope_assumptions: dict[str, Any] = {"applied": False}
     use_translate = settings.translate_ko_to_en if translate is None else translate
@@ -1398,7 +1475,9 @@ def run_oneshot(
             if question != refined:
                 question_changed = True
             question = refined
-        if bool(scope_assumptions.get("applied", False)):
+        if bool(scope_assumptions.get("applied", False)) and bool(
+            getattr(settings, "default_scope_autofill_enabled", False)
+        ):
             scoped_question = _inject_default_scope_into_question(question, scope_assumptions)
             if scoped_question != question:
                 question_changed = True
@@ -1481,7 +1560,7 @@ def run_oneshot(
                 final_payload["intent_alignment_issues"] = unresolved_issues
             policy_result = None
             if not skip_policy and matched_sql:
-                policy_result = _precheck_oneshot_sql(matched_sql, original_question)
+                policy_result = _precheck_oneshot_sql(matched_sql, question)
             return {
                 "mode": "advanced",
                 "question": original_question,
@@ -1681,7 +1760,7 @@ def run_oneshot(
 
             policy_result = None
             if not skip_policy and final_sql:
-                policy_result = _precheck_oneshot_sql(final_sql, original_question)
+                policy_result = _precheck_oneshot_sql(final_sql, question)
             return {
                 "mode": "advanced",
                 "question": original_question,

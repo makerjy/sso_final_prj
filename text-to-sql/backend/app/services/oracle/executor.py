@@ -119,27 +119,36 @@ def execute_sql(sql: str) -> dict[str, Any]:
 
             # Best-effort full result count for UI badges.
             total_count: int | None = None
-            count_cur = conn.cursor()
-            try:
-                count_cur.execute(f"SELECT COUNT(*) FROM ({sql_text})")
-                count_row = count_cur.fetchone()
-                if count_row and len(count_row) > 0 and count_row[0] is not None:
-                    total_count = int(count_row[0])
-            except Exception:
-                total_count = None
-            finally:
-                _safe_close(count_cur)
+            if bool(getattr(settings, "db_precount_enabled", False)):
+                count_cur = conn.cursor()
+                try:
+                    count_cur.execute(f"SELECT COUNT(*) FROM ({sql_text})")
+                    count_row = count_cur.fetchone()
+                    if count_row and len(count_row) > 0 and count_row[0] is not None:
+                        total_count = int(count_row[0])
+                except Exception:
+                    total_count = None
+                finally:
+                    _safe_close(count_cur)
 
             run_cur = conn.cursor()
             try:
                 run_cur.execute(sql_text)
                 columns = [d[0] for d in run_cur.description] if run_cur.description else []
-                rows = run_cur.fetchall()
+                row_cap_limit = max(0, int(getattr(settings, "row_cap", 0) or 0))
+                row_cap_reached = False
+                if row_cap_limit > 0:
+                    rows = run_cur.fetchmany(row_cap_limit + 1)
+                    if len(rows) > row_cap_limit:
+                        rows = rows[:row_cap_limit]
+                        row_cap_reached = True
+                else:
+                    rows = run_cur.fetchall()
                 return {
                     "columns": columns,
                     "rows": rows,
                     "row_count": len(rows),
-                    "row_cap": None,
+                    "row_cap": row_cap_limit if row_cap_reached else None,
                     "total_count": total_count,
                 }
             finally:

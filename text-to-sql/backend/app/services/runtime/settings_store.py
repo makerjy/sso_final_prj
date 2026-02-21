@@ -106,29 +106,31 @@ def load_table_scope(
         if resolved_user:
             user_key = scoped_state_key(TABLE_SCOPE_KEY, resolved_user)
             data = store.get(user_key)
-            if isinstance(data, dict):
-                raw = data.get("selected_ids", [])
+            if isinstance(data, dict) and "selected_ids" in data:
+                raw = data.get("selected_ids")
                 if isinstance(raw, list):
                     return [str(item) for item in raw if isinstance(item, (str, int))]
             if include_global_fallback:
                 data = store.get(TABLE_SCOPE_KEY)
-                if isinstance(data, dict):
-                    raw = data.get("selected_ids", [])
+                if isinstance(data, dict) and "selected_ids" in data:
+                    raw = data.get("selected_ids")
                     if isinstance(raw, list):
                         return [str(item) for item in raw if isinstance(item, (str, int))]
         else:
             data = store.get(TABLE_SCOPE_KEY)
-            if isinstance(data, dict):
-                raw = data.get("selected_ids", [])
+            if isinstance(data, dict) and "selected_ids" in data:
+                raw = data.get("selected_ids")
                 if isinstance(raw, list):
                     return [str(item) for item in raw if isinstance(item, (str, int))]
 
     if resolved_user:
-        data = _load_json(_scoped_path(TABLE_SCOPE_PATH, resolved_user))
-        if isinstance(data, dict):
-            raw = data.get("selected_ids", [])
-            if isinstance(raw, list):
-                return [str(item) for item in raw if isinstance(item, (str, int))]
+        scoped_path = _scoped_path(TABLE_SCOPE_PATH, resolved_user)
+        if scoped_path.exists():
+            data = _load_json(scoped_path)
+            if isinstance(data, dict) and "selected_ids" in data:
+                raw = data.get("selected_ids")
+                if isinstance(raw, list):
+                    return [str(item) for item in raw if isinstance(item, (str, int))]
         if not include_global_fallback:
             return []
         data = _load_json(TABLE_SCOPE_PATH)
