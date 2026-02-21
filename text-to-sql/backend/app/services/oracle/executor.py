@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import re
+import time
 from typing import Any
 from pathlib import Path
 
@@ -9,13 +12,16 @@ from fastapi import HTTPException
 
 from app.core.config import get_settings
 from app.core.paths import project_path
-from app.services.oracle.connection import acquire_connection
+from app.services.oracle.connection import acquire_connection, resolve_call_timeout_ms
 from app.services.runtime.settings_store import load_connection_settings
 
 _FROM_JOIN_TABLE_WITH_SCHEMA_RE = re.compile(
     r"\b(from|join)\s+(\"?[A-Za-z0-9_$#]+\"?)\s*\.\s*(\"?[A-Za-z0-9_$#]+\"?)",
     re.IGNORECASE,
 )
+_CLIENT_TIMEOUT_MARKERS = ("DPY-4024", "DPI-1067", "ORA-03156")
+
+logger = logging.getLogger(__name__)
 
 
 def _sanitize_sql(sql: str) -> str:
@@ -85,10 +91,33 @@ def _strip_non_target_schema_prefixes(
     return rewritten, changed
 
 
-def execute_sql(sql: str) -> dict[str, Any]:
+def _classify_db_error(exc: Exception) -> str:
+    message = str(exc).upper()
+    if any(marker in message for marker in _CLIENT_TIMEOUT_MARKERS):
+        return "CLIENT_TIMEOUT"
+    if "ORA-" in message:
+        return "DB_ERROR"
+    return "EXEC_ERROR"
+
+
+def execute_sql(
+    sql: str,
+    *,
+    accuracy_mode: bool = False,
+    db_call_timeout_ms: int | None = None,
+    query_tag: str | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
     overrides = load_connection_settings()
     text = _sanitize_sql(sql)
+    query_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    effective_timeout_ms = (
+        max(1_000, int(db_call_timeout_ms))
+        if db_call_timeout_ms is not None
+        else resolve_call_timeout_ms(accuracy_mode=accuracy_mode)
+    )
+    started = time.perf_counter()
+    tag = str(query_tag or "default").strip() or "default"
     # Keep executor policy aligned with precheck_sql:
     # allow plain SELECT and CTE-based read-only queries (WITH ... SELECT ...).
     if not re.match(r"^\s*(select|with)\b", text, re.IGNORECASE):
@@ -96,10 +125,17 @@ def execute_sql(sql: str) -> dict[str, Any]:
     if re.match(r"^\s*with\b", text, re.IGNORECASE) and not re.search(r"\bselect\b", text, re.IGNORECASE):
         raise HTTPException(status_code=400, detail="CTE query must include SELECT")
 
-    conn = acquire_connection()
+    logger.info(
+        "Oracle SQL start tag=%s qh=%s timeout_ms=%s accuracy_mode=%s",
+        tag,
+        query_hash,
+        effective_timeout_ms,
+        bool(accuracy_mode),
+    )
+    conn = acquire_connection(accuracy_mode=accuracy_mode)
     try:
         try:
-            conn.call_timeout = settings.db_timeout_sec * 1000
+            conn.call_timeout = effective_timeout_ms
         except Exception:
             pass
         session_schema = str(
@@ -150,12 +186,28 @@ def execute_sql(sql: str) -> dict[str, Any]:
                     "row_count": len(rows),
                     "row_cap": row_cap_limit if row_cap_reached else None,
                     "total_count": total_count,
+                    "query_hash": query_hash,
+                    "db_call_timeout_ms": effective_timeout_ms,
+                    "accuracy_mode": bool(accuracy_mode),
                 }
             finally:
                 _safe_close(run_cur)
 
         try:
-            return _run_once(session_schema, text)
+            result = _run_once(session_schema, text)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info(
+                "Oracle SQL ok tag=%s qh=%s elapsed_ms=%s rows=%s total_count=%s timeout_ms=%s accuracy_mode=%s",
+                tag,
+                query_hash,
+                elapsed_ms,
+                int(result.get("row_count") or 0),
+                result.get("total_count"),
+                effective_timeout_ms,
+                bool(accuracy_mode),
+            )
+            result["elapsed_ms"] = elapsed_ms
+            return result
         except Exception as exc:
             # If default schema is stale/misconfigured, retry once with
             # the metadata owner inferred during table sync. Also handle
@@ -178,13 +230,59 @@ def execute_sql(sql: str) -> dict[str, Any]:
                 if changed:
                     try:
                         rewrite_schema = fallback_schema or session_schema
-                        return _run_once(rewrite_schema, rewritten_sql)
+                        result = _run_once(rewrite_schema, rewritten_sql)
+                        elapsed_ms = int((time.perf_counter() - started) * 1000)
+                        logger.info(
+                            "Oracle SQL ok(rewrite) tag=%s qh=%s elapsed_ms=%s rows=%s total_count=%s timeout_ms=%s accuracy_mode=%s",
+                            tag,
+                            query_hash,
+                            elapsed_ms,
+                            int(result.get("row_count") or 0),
+                            result.get("total_count"),
+                            effective_timeout_ms,
+                            bool(accuracy_mode),
+                        )
+                        result["elapsed_ms"] = elapsed_ms
+                        return result
                     except Exception as rewrite_exc:
-                        raise HTTPException(status_code=400, detail=str(rewrite_exc)) from rewrite_exc
-            raise HTTPException(status_code=400, detail=str(last_exc)) from last_exc
+                        last_exc = rewrite_exc
+            raise last_exc
     except Exception as exc:  # pragma: no cover - depends on driver
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        raw_exc: Exception
         if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raw_exc = Exception(str(exc.detail))
+            message = str(exc.detail)
+        else:
+            raw_exc = exc
+            message = str(exc)
+        error_class = _classify_db_error(raw_exc)
+        if error_class == "CLIENT_TIMEOUT" and elapsed_ms >= int(effective_timeout_ms * 0.9):
+            logger.warning(
+                "Oracle SQL timeout_near_limit tag=%s qh=%s elapsed_ms=%s timeout_ms=%s accuracy_mode=%s error=%s",
+                tag,
+                query_hash,
+                elapsed_ms,
+                effective_timeout_ms,
+                bool(accuracy_mode),
+                message,
+            )
+        logger.error(
+            "Oracle SQL failed tag=%s qh=%s class=%s elapsed_ms=%s timeout_ms=%s accuracy_mode=%s error=%s",
+            tag,
+            query_hash,
+            error_class,
+            elapsed_ms,
+            effective_timeout_ms,
+            bool(accuracy_mode),
+            message,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{error_class}: {message} "
+                f"(query_hash={query_hash}, elapsed_ms={elapsed_ms}, timeout_ms={effective_timeout_ms})"
+            ),
+        ) from exc
     finally:
         _safe_close(conn)

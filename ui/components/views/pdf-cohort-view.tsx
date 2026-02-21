@@ -5,9 +5,27 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog"
 import { Upload, FileText, Sparkles, ArrowLeft } from "lucide-react"
 import PdfResultPanel from "./pdf-result-panel"
 import { useAuth } from "@/components/auth-provider"
+import { CohortLibraryDialog } from "@/components/cohort-library-dialog"
+import {
+    type ActiveCohortContext,
+    type SavedCohort,
+    persistPendingActiveCohortContext,
+    toActiveCohortContext,
+    toSavedCohort,
+} from "@/lib/cohort-library"
 
 const ACTIVE_PDF_TASK_KEY = "pdf-cohort-active-task"
 
@@ -32,6 +50,13 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
     const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const mountedRef = useRef(true)
     const pdfUser = (user?.id || user?.username || user?.name || "").trim()
+    const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false)
+    const [saveName, setSaveName] = useState("")
+    const [saveDescription, setSaveDescription] = useState("")
+    const [isSavingCohort, setIsSavingCohort] = useState(false)
+    const [isLibraryOpen, setIsLibraryOpen] = useState(false)
+    const [libraryItems, setLibraryItems] = useState<SavedCohort[]>([])
+    const [isLibraryLoading, setIsLibraryLoading] = useState(false)
 
     const clearPollTimer = () => {
         if (pollTimerRef.current) {
@@ -43,6 +68,111 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
     const toNumber = (value: any, fallback = 0) => {
         const n = Number(value)
         return Number.isFinite(n) ? n : fallback
+    }
+
+    const apiPathWithUser = (path: string) => {
+        if (!pdfUser) return path
+        const separator = path.includes("?") ? "&" : "?"
+        return `${path}${separator}user=${encodeURIComponent(pdfUser)}`
+    }
+
+    const normalizeLibraryItems = (rawItems: unknown[]): SavedCohort[] =>
+        rawItems
+            .map((item) => toSavedCohort(item))
+            .filter((item): item is SavedCohort => item !== null)
+
+    const loadLibraryItems = async () => {
+        setIsLibraryLoading(true)
+        try {
+            const res = await fetch(apiPathWithUser("/cohort/library?limit=200"))
+            if (!res.ok) {
+                setLibraryItems([])
+                return
+            }
+            const payload = await res.json()
+            const items = Array.isArray(payload?.items)
+                ? payload.items
+                : Array.isArray(payload?.cohorts)
+                    ? payload.cohorts
+                    : []
+            setLibraryItems(normalizeLibraryItems(items))
+        } catch {
+            setLibraryItems([])
+        } finally {
+            setIsLibraryLoading(false)
+        }
+    }
+
+    const buildPdfActiveContext = (result: any): ActiveCohortContext | null => {
+        const hash = String(result?.pdf_hash || "").trim()
+        const cd = result?.cohort_definition || {}
+        const cohortSql = String(result?.generated_sql?.cohort_sql || result?.cohort_sql || "").trim()
+        if (!cohortSql) return null
+        const inclusionExclusion = Array.isArray(cd?.inclusion_exclusion)
+            ? cd.inclusion_exclusion
+                .map((item: any, idx: number) => {
+                    const title = String(item?.title || item?.name || `조건 ${idx + 1}`).trim()
+                    const operationalDefinition = String(
+                        item?.operational_definition ||
+                        item?.definition ||
+                        item?.description ||
+                        item?.criteria ||
+                        ""
+                    ).trim()
+                    if (!operationalDefinition) return null
+                    return {
+                        id: String(item?.id || `ie-${idx + 1}`).trim(),
+                        title,
+                        operationalDefinition,
+                        evidence: String(item?.evidence || "").trim() || undefined,
+                    }
+                })
+                .filter((item: unknown): item is {
+                    id: string
+                    title: string
+                    operationalDefinition: string
+                    evidence?: string
+                } => item !== null)
+            : []
+        const variableNames = Array.isArray(cd?.variables)
+            ? cd.variables
+                .map((item: any) =>
+                    String(
+                        item?.label ||
+                        item?.name ||
+                        item?.alias ||
+                        item?.column_name ||
+                        item?.description ||
+                        ""
+                    ).trim()
+                )
+                .filter((name: string) => Boolean(name))
+                .slice(0, 24)
+            : []
+        const dbResult = result?.db_result || result?.cohort_result || {}
+        const rawCount =
+            dbResult?.total_count ??
+            dbResult?.row_count ??
+            result?.count_result?.patient_count
+        const patientCount = Number(rawCount)
+        return {
+            cohortId: hash || `pdf-${Date.now()}`,
+            cohortName: String(result?.filename || "PDF 기반 코호트").trim() || "PDF 기반 코호트",
+            type: "PDF_DERIVED",
+            cohortSql,
+            patientCount: Number.isFinite(patientCount) ? patientCount : null,
+            sqlFilterSummary: String(cd?.criteria_summary_ko || "").trim(),
+            summaryKo: String(cd?.summary_ko || result?.summary_ko || "").trim(),
+            criteriaSummaryKo: String(cd?.criteria_summary_ko || "").trim(),
+            variables: variableNames,
+            badgeLabel: "PDF 코호트",
+            source: "pdf-cohort-confirm",
+            ts: Date.now(),
+            filename: String(result?.filename || "").trim(),
+            pdfHash: hash,
+            paperSummary: String(cd?.summary_ko || result?.summary_ko || "").trim() || undefined,
+            inclusionExclusion: inclusionExclusion.length ? inclusionExclusion : undefined,
+        }
     }
 
     const saveActiveTask = (taskId: string) => {
@@ -67,13 +197,33 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
     const pollTaskStatus = async (taskId: string) => {
         try {
             const statusRes = await fetch(buildStatusUrl(taskId))
-            if (!statusRes.ok) throw new Error("분석 상태 확인 실패")
+            if (!statusRes.ok) {
+                // 서버 재시작 후 메모리 기반 task 저장소가 초기화되면 404가 발생할 수 있음.
+                // 이 경우 무한 재시도하지 말고 사용자에게 재업로드를 안내한다.
+                if (statusRes.status === 404) {
+                    clearPollTimer()
+                    clearActiveTask()
+                    setIsLoading(false)
+                    setProgressValue(0)
+                    setMessage("이전 분석 작업이 만료되었습니다. PDF를 다시 업로드해주세요.")
+                    setError(null)
+                    return
+                }
+                throw new Error("분석 상태 확인 실패")
+            }
 
             const statusData = await statusRes.json()
             console.log("Task Status:", statusData)
             if (!mountedRef.current) return
 
-            if (statusData.status === "completed") {
+            const terminalStatuses = new Set([
+                "completed",
+                "completed_with_ambiguities",
+                "validation_failed",
+                "needs_user_input",
+            ])
+
+            if (terminalStatuses.has(String(statusData.status || ""))) {
                 clearPollTimer()
                 clearActiveTask()
                 setProgressValue(100)
@@ -94,7 +244,15 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
                     task_id: statusData.task_id || "",
                     performance,
                 })
-                setMessage("분석이 완료되었습니다.")
+                if (statusData.status === "needs_user_input") {
+                    setMessage(statusData.message || "모호성 해결이 필요합니다.")
+                } else if (statusData.status === "validation_failed") {
+                    setMessage(statusData.message || "검증 실패 (리포트를 확인하세요).")
+                } else if (statusData.status === "completed_with_ambiguities") {
+                    setMessage(statusData.message || "분석 완료 (모호성 포함).")
+                } else {
+                    setMessage("분석이 완료되었습니다.")
+                }
                 setIsLoading(false)
                 return
             }
@@ -204,11 +362,18 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
         setMessage(null)
         setProgressValue(0)
         setIsLoading(false)
+        setIsSaveDialogOpen(false)
+        setIsLibraryOpen(false)
     }
 
     useEffect(() => {
         onPinnedChange?.(Boolean(pdfResult))
     }, [pdfResult, onPinnedChange])
+
+    useEffect(() => {
+        if (!pdfResult) return
+        void loadLibraryItems()
+    }, [pdfResult])
 
     const handleConfirmPdf = async () => {
         try {
@@ -234,10 +399,175 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
                 throw new Error(errData.detail || "서버 저장 실패")
             }
 
-            setMessage("코호트 분석 결과가 최종 확정되어 시스템에 영구 저장되었습니다.")
-            // 저장 후 초기화 할지, 유지할지 선택. 일단 유지.
+            const context = buildPdfActiveContext(pdfResult)
+            if (!context) {
+                setError("코호트 SQL 정보가 없어 쿼리 화면에 컨텍스트를 전달할 수 없습니다.")
+                return
+            }
+            persistPendingActiveCohortContext(context, pdfUser)
+            if (typeof window !== "undefined") {
+                window.dispatchEvent(new Event("ql-open-query-view"))
+            }
+
+            setMessage("코호트가 확정되었습니다. text-to-llm 새 채팅으로 이동해 질의를 이어서 시작할 수 있습니다.")
         } catch (err: any) {
             setError(`확정 저장 중 오류 발생: ${err.message}`)
+        }
+    }
+
+    const handleOpenSaveDialog = () => {
+        const defaultName = String(pdfResult?.filename || "PDF 기반 코호트").trim() || "PDF 기반 코호트"
+        setSaveName(defaultName)
+        setSaveDescription("")
+        setIsSaveDialogOpen(true)
+    }
+
+    const handleSavePdfCohort = async (queryAfterSave: boolean) => {
+        const cohortSql = String(pdfResult?.generated_sql?.cohort_sql || pdfResult?.cohort_sql || "").trim()
+        if (!cohortSql) {
+            setError("저장할 코호트 SQL이 없습니다.")
+            return
+        }
+        const name = saveName.trim()
+        if (!name) {
+            setError("저장 이름을 입력하세요.")
+            return
+        }
+
+        const cd = pdfResult?.cohort_definition || {}
+        const extractionDetails = cd?.extraction_details || {}
+        const populationCriteria = Array.isArray(extractionDetails?.cohort_criteria?.population)
+            ? extractionDetails.cohort_criteria.population
+            : []
+        const inclusionExclusion = populationCriteria
+            .map((item: any, idx: number) => {
+                if (typeof item === "string") {
+                    const text = String(item).trim()
+                    if (!text) return null
+                    return {
+                        id: `ie-${idx + 1}`,
+                        title: `조건 ${idx + 1}`,
+                        operational_definition: text,
+                    }
+                }
+                const title = String(item?.title || item?.label || item?.name || `조건 ${idx + 1}`).trim()
+                const operationalDefinition = String(
+                    item?.operational_definition ||
+                    item?.operationalDefinition ||
+                    item?.definition ||
+                    item?.description ||
+                    item?.criteria ||
+                    ""
+                ).trim()
+                if (!operationalDefinition) return null
+                return {
+                    id: String(item?.id || `ie-${idx + 1}`).trim(),
+                    title,
+                    operational_definition: operationalDefinition,
+                    evidence: String(item?.evidence || "").trim() || undefined,
+                }
+            })
+            .filter(
+                (item: unknown): item is {
+                    id: string
+                    title: string
+                    operational_definition: string
+                    evidence?: string
+                } => item !== null
+            )
+
+        const variables = Array.isArray(cd?.variables)
+            ? cd.variables
+                .map((item: any) => {
+                    const key = String(item?.key || item?.name || item?.alias || item?.column_name || "").trim()
+                    const label = String(item?.label || item?.name || item?.description || key).trim()
+                    if (!key && !label) return null
+                    return {
+                        key: key || label,
+                        label: label || key,
+                        table: String(item?.table || item?.table_name || "").trim() || undefined,
+                        mapping_id: String(item?.mapping_id || item?.mappingId || "").trim() || undefined,
+                    }
+                })
+                .filter(
+                    (item: unknown): item is {
+                        key: string
+                        label: string
+                        table?: string
+                        mapping_id?: string
+                    } => item !== null
+                )
+            : []
+
+        const dbResult = pdfResult?.db_result || pdfResult?.cohort_result || {}
+        const rawCount =
+            dbResult?.total_count ??
+            dbResult?.row_count ??
+            pdfResult?.count_result?.patient_count
+        const numericCount = Number(rawCount)
+        const patientCount = Number.isFinite(numericCount) ? numericCount : undefined
+
+        setIsSavingCohort(true)
+        try {
+            const res = await fetch("/cohort/library", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    user: pdfUser || null,
+                    type: "PDF_DERIVED",
+                    name,
+                    description: saveDescription.trim() || null,
+                    cohort_sql: cohortSql,
+                    count: patientCount,
+                    sql_filter_summary: String(cd?.criteria_summary_ko || "").trim() || null,
+                    human_summary: String(cd?.summary_ko || pdfResult?.summary_ko || "").trim() || null,
+                    source: {
+                        created_from: "PDF_ANALYSIS_PAGE",
+                        pdf_name: String(pdfResult?.filename || "").trim() || null,
+                        pdf_analysis_id: String(pdfResult?.task_id || "").trim() || null,
+                    },
+                    pdf_details: {
+                        paper_summary: String(cd?.summary_ko || pdfResult?.summary_ko || "").trim() || null,
+                        inclusion_exclusion: inclusionExclusion,
+                        variables,
+                    },
+                    status: "active",
+                }),
+            })
+            if (!res.ok) {
+                const detail = await res.text()
+                throw new Error(detail || "코호트 저장 실패")
+            }
+            const payload = await res.json()
+            const saved = toSavedCohort(payload)
+            if (saved && queryAfterSave) {
+                const context = toActiveCohortContext(saved, "pdf-library-save")
+                persistPendingActiveCohortContext(context, pdfUser)
+                if (typeof window !== "undefined") {
+                    window.dispatchEvent(new Event("ql-open-query-view"))
+                }
+            }
+            setIsSaveDialogOpen(false)
+            setMessage(
+                queryAfterSave
+                    ? "코호트를 저장하고 쿼리 화면으로 이동했습니다."
+                    : "코호트를 라이브러리에 저장했습니다."
+            )
+            setError(null)
+            await loadLibraryItems()
+        } catch (err: any) {
+            setError(`코호트 저장 중 오류 발생: ${String(err?.message || err)}`)
+        } finally {
+            setIsSavingCohort(false)
+        }
+    }
+
+    const handleQuerySavedCohort = (item: SavedCohort) => {
+        const context = toActiveCohortContext(item, "pdf-library")
+        persistPendingActiveCohortContext(context, pdfUser)
+        setIsLibraryOpen(false)
+        if (typeof window !== "undefined") {
+            window.dispatchEvent(new Event("ql-open-query-view"))
         }
     }
 
@@ -259,11 +589,7 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
     if (pdfResult) {
         return (
             <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 h-full flex flex-col">
-                <div className="flex items-center justify-between">
-                    <div>
-                        <h2 className="text-xl sm:text-2xl font-bold text-foreground">PDF 코호트 분석 결과</h2>
-                        <p className="text-sm text-muted-foreground mt-1">논문에서 추출된 코호트 기준을 검토하고 SQL을 생성합니다.</p>
-                    </div>
+                <div className="flex justify-end">
                     <Button variant="outline" onClick={handleReset} className="gap-2">
                         <ArrowLeft className="w-4 h-4" />
                         다른 PDF 분석하기
@@ -275,6 +601,12 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
                         pdfResult={pdfResult}
                         charts={[]} // 차트 데이터가 있다면 pdfResult에서 가공해서 전달
                         onSave={handleConfirmPdf}
+                        onSaveToLibrary={handleOpenSaveDialog}
+                        onOpenLibrary={() => {
+                            void loadLibraryItems()
+                            setIsLibraryOpen(true)
+                        }}
+                        isSavingCohort={isSavingCohort}
                         onCopySQL={handleCopySQL}
                         onDownloadCSV={handleDownloadCSV}
                         setMessage={setMessage}
@@ -282,6 +614,73 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
                         setPdfResult={setPdfResult}
                     />
                 </div>
+
+                <Dialog open={isSaveDialogOpen} onOpenChange={setIsSaveDialogOpen}>
+                    <DialogContent className="sm:max-w-lg">
+                        <DialogHeader>
+                            <DialogTitle>PDF 코호트 저장</DialogTitle>
+                            <DialogDescription>
+                                저장 이름을 입력하면 코호트 라이브러리에 추가됩니다.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <div className="space-y-3">
+                            <div className="space-y-1">
+                                <label className="text-xs font-medium text-foreground">저장 이름</label>
+                                <Input
+                                    value={saveName}
+                                    onChange={(e) => setSaveName(e.target.value)}
+                                    placeholder="예: 외상성 뇌손상 코호트"
+                                />
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-xs font-medium text-foreground">설명 (선택)</label>
+                                <Textarea
+                                    value={saveDescription}
+                                    onChange={(e) => setSaveDescription(e.target.value)}
+                                    placeholder="코호트 용도/메모를 입력하세요."
+                                    className="min-h-[80px]"
+                                />
+                            </div>
+                        </div>
+                        <DialogFooter>
+                            <Button
+                                variant="outline"
+                                onClick={() => setIsSaveDialogOpen(false)}
+                                disabled={isSavingCohort}
+                            >
+                                취소
+                            </Button>
+                            <Button
+                                variant="secondary"
+                                onClick={() => {
+                                    void handleSavePdfCohort(false)
+                                }}
+                                disabled={isSavingCohort || !saveName.trim()}
+                            >
+                                {isSavingCohort ? "저장 중..." : "저장"}
+                            </Button>
+                            <Button
+                                onClick={() => {
+                                    void handleSavePdfCohort(true)
+                                }}
+                                disabled={isSavingCohort || !saveName.trim()}
+                            >
+                                {isSavingCohort ? "처리 중..." : "저장 후 쿼리하기"}
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+
+                <CohortLibraryDialog
+                    open={isLibraryOpen}
+                    onOpenChange={setIsLibraryOpen}
+                    cohorts={libraryItems}
+                    loading={isLibraryLoading}
+                    onRefresh={() => {
+                        void loadLibraryItems()
+                    }}
+                    onSelectForQuery={handleQuerySavedCohort}
+                />
             </div>
         )
     }
@@ -289,15 +688,7 @@ export function PdfCohortView({ onPinnedChange }: PdfCohortViewProps) {
     // 초기 화면: 업로드
     return (
         <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 h-full flex flex-col items-center justify-center">
-            <div className="max-w-2xl w-full space-y-8">
-                <div className="text-center space-y-2">
-                    <h2 className="text-2xl sm:text-3xl font-bold text-foreground">PDF 코호트 분석</h2>
-                    <p className="text-muted-foreground">
-                        의학 논문(PDF)을 업로드하면 AI가 코호트 선정 기준을 자동 추출하고<br className="hidden sm:inline" />
-                        MIMIC-IV 데이터베이스에 맞는 SQL 쿼리를 생성합니다.
-                    </p>
-                </div>
-
+            <div className="max-w-2xl w-full space-y-6">
                 <Card className="border-2 border-dashed border-muted-foreground/25 hover:border-primary/50 transition-colors bg-muted/50">
                     <CardContent className="flex flex-col items-center justify-center py-8 sm:py-9 space-y-3 text-center">
                         <div className="p-3 rounded-full bg-background border shadow-sm">

@@ -18,6 +18,7 @@ services:
 
   # [Service 2] Text-to-SQL API
   text-sql:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: text-to-sql/deploy/docker/Dockerfile.api
@@ -27,6 +28,7 @@ services:
     env_file:
       - text-to-sql/.env
     environment:
+      - ORACLE_DRIVER_MODE=${ORACLE_DRIVER_MODE:-thick}
       - ORACLE_LIB_DIR=/opt/oracle/instantclient
       - LD_LIBRARY_PATH=/opt/oracle/instantclient
       - ANONYMIZED_TELEMETRY=false

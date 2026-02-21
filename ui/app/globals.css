@@ -123,3 +123,42 @@
     @apply bg-background text-foreground;
   }
 }
+
+@layer components {
+  .ql-user-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 9999px;
+    border: 1px solid transparent;
+    background: transparent;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      box-shadow 0.2s ease;
+    white-space: nowrap;
+  }
+
+  .ql-user-pill:hover {
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in oklch, var(--primary) 13%, var(--card)) 0%,
+        color-mix(in oklch, var(--primary) 8%, var(--secondary)) 100%
+      );
+    border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+    box-shadow:
+      0 6px 14px color-mix(in oklch, var(--primary) 16%, transparent),
+      inset 0 1px 0 color-mix(in oklch, var(--card) 70%, transparent);
+  }
+
+  .ql-user-pill:hover > div:first-child {
+    background: color-mix(in oklch, var(--primary) 24%, var(--card));
+  }
+
+  .ql-user-pill:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}

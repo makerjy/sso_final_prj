@@ -35,9 +35,18 @@ import {
   Trash2,
   ChevronDown,
   ChevronRight,
+  Search,
+  Maximize2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/components/auth-provider"
+import {
+  type SavedCohort as CohortLibraryItem,
+  cohortTypeLabel,
+  persistPendingActiveCohortContext,
+  toActiveCohortContext,
+  toSavedCohort,
+} from "@/lib/cohort-library"
 
 type TabType = "whatif" | "cohorts"
 
@@ -123,15 +132,30 @@ type SimulationPayload = {
   survival: SurvivalPoint[]
   confidence: ConfidencePayload | null
   subgroups: SubgroupPayload
+  insight: string
+  insightSource: "llm" | "fallback"
 }
 
 type SavedCohort = {
   id: string
+  type: "CROSS_SECTIONAL" | "PDF_DERIVED"
   name: string
+  description?: string
   createdAt: string
+  updatedAt: string
   status: "active" | "archived"
-  params: CohortParams
+  count?: number
+  cohortSql: string
+  sqlFilterSummary?: string
+  humanSummary?: string
+  pdfName?: string
+  params: CohortParams | null
   metrics: CohortMetrics
+  source: {
+    createdFrom: string
+    pdfName?: string
+    pdfAnalysisId?: string
+  }
 }
 
 const DEFAULT_PARAMS: CohortParams = {
@@ -260,13 +284,51 @@ function fromApiSubgroups(value: any): SubgroupPayload {
 }
 
 function toViewSavedCohort(item: any): SavedCohort {
+  const parsed = toSavedCohort(item as CohortLibraryItem | null)
+  if (!parsed) {
+    return {
+      id: String(item?.id || ""),
+      type: "CROSS_SECTIONAL",
+      name: String(item?.name || "이름 없는 코호트"),
+      description: undefined,
+      createdAt: String(item?.created_at || ""),
+      updatedAt: String(item?.updated_at || item?.created_at || ""),
+      status: item?.status === "archived" ? "archived" : "active",
+      count: Number(item?.count ?? 0) || undefined,
+      cohortSql: String(item?.cohort_sql || ""),
+      sqlFilterSummary: String(item?.sql_filter_summary || ""),
+      humanSummary: String(item?.human_summary || ""),
+      pdfName: undefined,
+      params: item?.params ? fromApiParams(item.params) : null,
+      metrics: fromApiMetrics(item?.metrics),
+      source: {
+        createdFrom: "CROSS_SECTIONAL_PAGE",
+      },
+    }
+  }
+  const source = parsed.source || { createdFrom: "IMPORT" as const }
+  const params = parsed.params ? fromApiParams(parsed.params) : null
+  const metrics = fromApiMetrics(parsed.metrics)
   return {
-    id: String(item?.id || ""),
-    name: String(item?.name || "이름 없는 코호트"),
-    createdAt: String(item?.created_at || ""),
-    status: item?.status === "archived" ? "archived" : "active",
-    params: fromApiParams(item?.params),
-    metrics: fromApiMetrics(item?.metrics),
+    id: parsed.id,
+    type: parsed.type,
+    name: parsed.name,
+    description: parsed.description,
+    createdAt: parsed.createdAt,
+    updatedAt: parsed.updatedAt,
+    status: parsed.status === "archived" ? "archived" : "active",
+    count: parsed.count,
+    cohortSql: parsed.cohortSql,
+    sqlFilterSummary: parsed.sqlFilterSummary,
+    humanSummary: parsed.humanSummary,
+    pdfName: parsed.source.pdfName,
+    params,
+    metrics,
+    source: {
+      createdFrom: source.createdFrom,
+      pdfName: source.pdfName,
+      pdfAnalysisId: source.pdfAnalysisId,
+    },
   }
 }
 
@@ -326,12 +388,15 @@ export function CohortView() {
 
   const [simulation, setSimulation] = useState<SimulationPayload | null>(null)
   const [savedCohorts, setSavedCohorts] = useState<SavedCohort[]>([])
+  const [savedSearch, setSavedSearch] = useState("")
+  const [savedTypeFilter, setSavedTypeFilter] = useState<"ALL" | "CROSS_SECTIONAL" | "PDF_DERIVED">("ALL")
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false)
   const [cohortNameInput, setCohortNameInput] = useState("")
   const [isSqlDialogOpen, setIsSqlDialogOpen] = useState(false)
   const [isSqlLoading, setIsSqlLoading] = useState(false)
   const [cohortSqlText, setCohortSqlText] = useState("")
   const [isConditionSummaryOpen, setIsConditionSummaryOpen] = useState(true)
+  const [isSurvivalZoomOpen, setIsSurvivalZoomOpen] = useState(false)
 
   const currentParams = useMemo<CohortParams>(
     () => ({
@@ -379,6 +444,8 @@ export function CohortView() {
           : [],
         confidence: fromApiConfidence(payload?.confidence),
         subgroups: fromApiSubgroups(payload?.subgroups),
+        insight: String(payload?.insight ?? "").trim(),
+        insightSource: payload?.insight_source === "llm" ? "llm" : "fallback",
       })
     } catch (err) {
       setError("시뮬레이션 실행 중 오류가 발생했습니다.")
@@ -389,12 +456,16 @@ export function CohortView() {
 
   const loadSavedCohorts = useCallback(async () => {
     try {
-      const res = await fetch(apiUrlWithUser("/cohort/saved"))
+      const res = await fetch(apiUrlWithUser("/cohort/library?limit=200"))
       if (!res.ok) {
         return
       }
       const payload = await res.json()
-      const items = Array.isArray(payload?.cohorts) ? payload.cohorts : []
+      const items = Array.isArray(payload?.items)
+        ? payload.items
+        : Array.isArray(payload?.cohorts)
+          ? payload.cohorts
+          : []
       setSavedCohorts(items.map(toViewSavedCohort))
     } catch {
       // Keep UI usable even when saved cohort loading fails.
@@ -515,7 +586,7 @@ export function CohortView() {
     setError(null)
     setMessage(null)
     try {
-      const res = await fetch(apiUrlWithUser(`/cohort/saved/${cohortId}`), {
+      const res = await fetch(apiUrlWithUser(`/cohort/library/${cohortId}`), {
         method: "DELETE",
       })
       if (!res.ok) {
@@ -530,6 +601,10 @@ export function CohortView() {
   }
 
   const handleAnalyzeSavedCohort = async (cohort: SavedCohort) => {
+    if (!cohort.params) {
+      setError("이 코호트는 단면 시뮬레이션 파라미터가 없어 재분석할 수 없습니다.")
+      return
+    }
     setReadmitDays([cohort.params.readmitDays])
     setAgeThreshold([cohort.params.ageThreshold])
     setLosThreshold([cohort.params.losThreshold])
@@ -539,6 +614,42 @@ export function CohortView() {
     setOutcomeFilter(cohort.params.outcomeFilter)
     setActiveTab("whatif")
     await runSimulation(cohort.params)
+  }
+
+  const handleQuerySavedCohort = (cohort: SavedCohort) => {
+    const source = cohort.source || { createdFrom: "IMPORT" }
+    const libraryItem: CohortLibraryItem = {
+      id: cohort.id,
+      type: cohort.type,
+      name: cohort.name,
+      description: cohort.description,
+      cohortSql: cohort.cohortSql,
+      count: cohort.count,
+      sqlFilterSummary: cohort.sqlFilterSummary,
+      humanSummary: cohort.humanSummary,
+      source: {
+        createdFrom:
+          source.createdFrom === "CROSS_SECTIONAL_PAGE" ||
+          source.createdFrom === "PDF_ANALYSIS_PAGE" ||
+          source.createdFrom === "IMPORT"
+            ? source.createdFrom
+            : "IMPORT",
+        pdfName: source.pdfName,
+        pdfAnalysisId: source.pdfAnalysisId,
+      },
+      createdAt: cohort.createdAt,
+      updatedAt: cohort.updatedAt,
+      status: cohort.status,
+      params: cohort.params,
+      metrics: cohort.metrics as Record<string, unknown>,
+    }
+    const context = toActiveCohortContext(libraryItem, "cross-sectional-library")
+    persistPendingActiveCohortContext(context, cohortUser)
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("ql-open-query-view"))
+    }
+    setMessage(`"${cohort.name}" 코호트를 쿼리 컨텍스트로 적용했습니다.`)
+    setError(null)
   }
 
   const handleExportSavedCohort = (cohort: SavedCohort) => {
@@ -554,6 +665,30 @@ export function CohortView() {
     URL.revokeObjectURL(url)
   }
 
+  const filteredSavedCohorts = useMemo(() => {
+    const needle = savedSearch.trim().toLowerCase()
+    return savedCohorts
+      .filter((item) => (savedTypeFilter === "ALL" ? true : item.type === savedTypeFilter))
+      .filter((item) => {
+        if (!needle) return true
+        const corpus = [
+          item.name,
+          item.description || "",
+          item.pdfName || "",
+          item.humanSummary || "",
+          item.sqlFilterSummary || "",
+        ]
+          .join(" ")
+          .toLowerCase()
+        return corpus.includes(needle)
+      })
+      .sort((a, b) => {
+        const aTs = Date.parse(a.updatedAt || a.createdAt || "") || 0
+        const bTs = Date.parse(b.updatedAt || b.createdAt || "") || 0
+        return bTs - aTs
+      })
+  }, [savedCohorts, savedSearch, savedTypeFilter])
+
   const currentMetrics = simulation?.current ?? EMPTY_METRICS
   const simulatedMetrics = simulation?.simulated ?? EMPTY_METRICS
   const survivalData = simulation?.survival ?? []
@@ -568,7 +703,7 @@ export function CohortView() {
           x: survivalData.map((d) => d.time),
           y: survivalData.map((d) => d.current),
           name: "Current",
-          line: { color: "#64748b", width: 2, shape: "hv", dash: "dash" },
+          line: { color: "#0A4174", width: 2, shape: "hv", dash: "dash" },
           hovertemplate: "day %{x}<br>%{y:.1f}%<extra></extra>",
         },
         {
@@ -577,7 +712,7 @@ export function CohortView() {
           x: survivalData.map((d) => d.time),
           y: survivalData.map((d) => d.simulated),
           name: "Simulated",
-          line: { color: "#22c55e", width: 2, shape: "hv" },
+          line: { color: "#0A4174", width: 2, shape: "hv" },
           hovertemplate: "day %{x}<br>%{y:.1f}%<extra></extra>",
         },
       ],
@@ -692,17 +827,90 @@ export function CohortView() {
     { key: "comorbidity", title: "기저질환", rows: subgroupData.comorbidity },
   ]
 
+  const splitLineIntoSentences = useCallback((line: string): string[] => {
+    const sentences: string[] = []
+    let buffer = ""
+    for (let idx = 0; idx < line.length; idx += 1) {
+      const ch = line[idx]
+      buffer += ch
+      if (!/[.!?]/.test(ch)) continue
+      const prev = idx > 0 ? line[idx - 1] : ""
+      const next = idx + 1 < line.length ? line[idx + 1] : ""
+      if (/\d/.test(prev) && /\d/.test(next)) continue
+      if (/[.!?]/.test(next)) continue
+      if (next && !/[\s"')\]}]/.test(next)) continue
+      const sentence = buffer.trim()
+      if (sentence) sentences.push(sentence)
+      buffer = ""
+    }
+    const tail = buffer.trim()
+    if (tail) sentences.push(tail)
+    return sentences
+  }, [])
+
+  const splitInsightIntoPoints = useCallback((text: string): string[] => {
+    const normalized = String(text || "")
+      .replace(/\r/g, "")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{2,}/g, "\n")
+      .trim()
+    if (!normalized) return []
+
+    const rawLines = normalized
+      .split("\n")
+      .map((line) => line.replace(/^[\-\*\u2022\u25CF\u25E6]\s*/, "").trim())
+      .filter(Boolean)
+
+    const points: string[] = []
+    const seen = new Set<string>()
+
+    const pushPoint = (value: string) => {
+      const cleaned = value.replace(/\s+/g, " ").trim()
+      if (!cleaned) return
+      if (/^[\)\]\}\.,;:!?]+$/.test(cleaned)) return
+      const key = cleaned.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      points.push(cleaned)
+    }
+
+    for (const line of rawLines) {
+      const sentenceParts = splitLineIntoSentences(line)
+      if (sentenceParts.length > 1) {
+        sentenceParts.forEach(pushPoint)
+        continue
+      }
+      if (line.length > 110 && line.includes(",")) {
+        line
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .forEach(pushPoint)
+        continue
+      }
+      pushPoint(line)
+    }
+
+    return points.slice(0, 6)
+  }, [splitLineIntoSentences])
+
   const insightText = useMemo(() => {
     if (!simulation) {
-      return "시뮬레이션 실행 후 결과를 바탕으로 인사이트를 생성합니다."
+      return isLoading
+        ? "시뮬레이션 결과를 기반으로 LLM 인사이트를 생성 중입니다."
+        : "시뮬레이션 실행 후 결과를 바탕으로 인사이트를 생성합니다."
     }
+
+    const serverInsight = String(simulation.insight || "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+    if (serverInsight) return serverInsight
 
     const readmitDiff = simulatedMetrics.readmitRate - currentMetrics.readmitRate
     const mortalityDiff = simulatedMetrics.mortalityRate - currentMetrics.mortalityRate
     const losDiff = simulatedMetrics.avgLosDays - currentMetrics.avgLosDays
     const icuAdmissionDiff = simulatedMetrics.icuAdmissionRate - currentMetrics.icuAdmissionRate
     const erAdmissionDiff = simulatedMetrics.erAdmissionRate - currentMetrics.erAdmissionRate
-
     return (
       `재입원율 ${readmitDiff >= 0 ? "증가" : "감소"} ${Math.abs(readmitDiff).toFixed(1)}%p, ` +
       `사망률 ${mortalityDiff >= 0 ? "증가" : "감소"} ${Math.abs(mortalityDiff).toFixed(1)}%p, ` +
@@ -711,16 +919,13 @@ export function CohortView() {
       `응급실 입원 비율 ${erAdmissionDiff >= 0 ? "증가" : "감소"} ${Math.abs(erAdmissionDiff).toFixed(1)}%p로 추정됩니다. ` +
       "임계값 변경 시 분모가 달라질 수 있으므로 하위 그룹 분석을 함께 확인하세요."
     )
-  }, [simulation, currentMetrics, simulatedMetrics])
+  }, [simulation, isLoading, currentMetrics, simulatedMetrics])
+  const insightPoints = useMemo(() => splitInsightIntoPoints(insightText), [insightText, splitInsightIntoPoints])
+  const insightHeadline = insightPoints[0] || insightText
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h2 className="text-xl sm:text-2xl font-bold text-foreground">코호트 생성 & What-if 분석</h2>
-          <p className="text-sm text-muted-foreground mt-1">가상 코호트를 생성하고 조건 변경에 따른 결과를 시뮬레이션합니다</p>
-          <Badge variant="secondary" className="mt-2">부가 기능</Badge>
-        </div>
+      <div className="flex justify-end">
         <Button className="gap-2 w-full sm:w-auto" onClick={handleOpenSaveDialog} disabled={isSaving || isLoading}>
           {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
           코호트 저장
@@ -988,13 +1193,39 @@ export function CohortView() {
                   <h4 className="text-sm font-medium text-foreground mb-3">생존 곡선 비교</h4>
                   <div className="h-[250px]">
                     {survivalFigure ? (
-                      <Plot
-                        data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
-                        layout={survivalFigure.layout || {}}
-                        config={{ responsive: true, displaylogo: false, editable: true }}
-                        style={{ width: "100%", height: "100%" }}
-                        useResizeHandler
-                      />
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        className="h-full rounded-lg border border-border bg-background p-1 relative cursor-zoom-in"
+                        onClick={() => setIsSurvivalZoomOpen(true)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault()
+                            setIsSurvivalZoomOpen(true)
+                          }
+                        }}
+                      >
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="secondary"
+                          className="absolute top-2 right-2 z-10 h-7 w-7 shadow-sm"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setIsSurvivalZoomOpen(true)
+                          }}
+                          aria-label="생존 곡선 확대 보기"
+                        >
+                          <Maximize2 className="w-3.5 h-3.5" />
+                        </Button>
+                        <Plot
+                          data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
+                          layout={survivalFigure.layout || {}}
+                          config={{ responsive: true, displaylogo: false, editable: true }}
+                          style={{ width: "100%", height: "100%" }}
+                          useResizeHandler
+                        />
+                      </div>
                     ) : (
                       <div className="h-full rounded-lg border border-dashed border-border text-sm text-muted-foreground flex items-center justify-center">
                         No survival data available.
@@ -1061,11 +1292,36 @@ export function CohortView() {
                 </div>
 
                 <div className="p-4 rounded-lg bg-primary/10 border border-primary/30">
-                  <h4 className="text-sm font-medium text-foreground mb-2 flex items-center gap-2">
-                    <AlertTriangle className="w-4 h-4 text-primary" />
-                    분석 인사이트
-                  </h4>
-                  <p className="text-sm text-muted-foreground">{insightText}</p>
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <h4 className="text-sm font-medium text-foreground flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-primary" />
+                      분석 인사이트
+                    </h4>
+                    {simulation ? (
+                      <Badge variant={simulation.insightSource === "llm" ? "default" : "outline"} className="text-[10px]">
+                        {simulation.insightSource === "llm" ? "LLM 해석" : "Fallback"}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <div className="space-y-3">
+                    <div className="rounded-md border border-primary/20 bg-background/70 px-3 py-2 text-sm font-medium leading-relaxed text-foreground">
+                      {insightHeadline}
+                    </div>
+                    {insightPoints.length > 1 ? (
+                      <ul className="space-y-2 text-sm text-muted-foreground">
+                        {insightPoints.slice(1).map((point, idx) => (
+                          <li key={`cohort-insight-${idx}-${point.slice(0, 24)}`} className="flex items-start gap-2">
+                            <span className="mt-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/20 text-[11px] font-semibold text-primary">
+                              {idx + 1}
+                            </span>
+                            <span className="leading-relaxed">{point}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-muted-foreground leading-relaxed">{insightText}</p>
+                    )}
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -1073,7 +1329,37 @@ export function CohortView() {
         </TabsContent>
 
         <TabsContent value="cohorts" className="space-y-4">
-          {savedCohorts.length === 0 ? (
+          <Card>
+            <CardContent className="py-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+                  <Input
+                    value={savedSearch}
+                    onChange={(e) => setSavedSearch(e.target.value)}
+                    className="h-8 pl-7 text-xs"
+                    placeholder="코호트 이름/PDF 파일명 검색"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  {(["ALL", "CROSS_SECTIONAL", "PDF_DERIVED"] as const).map((item) => (
+                    <Button
+                      key={item}
+                      type="button"
+                      size="sm"
+                      variant={savedTypeFilter === item ? "default" : "outline"}
+                      className="h-8 px-2 text-xs"
+                      onClick={() => setSavedTypeFilter(item)}
+                    >
+                      {item === "ALL" ? "전체" : item === "CROSS_SECTIONAL" ? "단면" : "PDF"}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {filteredSavedCohorts.length === 0 ? (
             <Card>
               <CardContent className="py-8 text-sm text-muted-foreground">
                 저장된 코호트가 없습니다. `코호트 저장`으로 현재 조건을 저장하세요.
@@ -1081,35 +1367,45 @@ export function CohortView() {
             </Card>
           ) : (
             <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {savedCohorts.map((cohort) => (
+              {filteredSavedCohorts.map((cohort) => (
                 <Card key={cohort.id} className="hover:border-primary/30 transition-colors">
                   <CardHeader className="pb-2">
                     <div className="flex items-center justify-between gap-2">
                       <CardTitle className="text-sm">{cohort.name}</CardTitle>
-                      <Badge variant={cohort.status === "active" ? "default" : "secondary"} className="text-[10px]">
-                        {cohort.status === "active" ? "활성" : "보관"}
+                      <Badge variant="secondary" className="text-[10px]">
+                        {cohortTypeLabel(cohort.type)}
                       </Badge>
                     </div>
-                    <CardDescription className="text-xs">생성일: {cohort.createdAt || "-"}</CardDescription>
+                    <CardDescription className="text-xs">
+                      수정일: {cohort.updatedAt || cohort.createdAt || "-"}
+                      {cohort.pdfName ? ` · ${cohort.pdfName}` : ""}
+                    </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Users className="w-4 h-4 text-muted-foreground" />
                         <span className="text-lg font-bold text-foreground">
-                          {Math.round(cohort.metrics.patientCount).toLocaleString()}
+                          {Math.round(cohort.count ?? cohort.metrics.patientCount ?? 0).toLocaleString()}
                         </span>
                         <span className="text-xs text-muted-foreground">명</span>
                       </div>
                     </div>
-                    <div className="text-xs text-muted-foreground space-y-1">
-                      <div>재입원율: {cohort.metrics.readmitRate.toFixed(1)}%</div>
-                      <div>사망률: {cohort.metrics.mortalityRate.toFixed(1)}%</div>
-                      <div>평균 재원일수: {cohort.metrics.avgLosDays.toFixed(1)}일</div>
-                      <div>ICU 입실 비율: {cohort.metrics.icuAdmissionRate.toFixed(1)}%</div>
-                      <div>응급실 입원 비율: {cohort.metrics.erAdmissionRate.toFixed(1)}%</div>
-                    </div>
+                    {(cohort.humanSummary || cohort.sqlFilterSummary) && (
+                      <div className="line-clamp-2 text-xs text-muted-foreground">
+                        {cohort.humanSummary || cohort.sqlFilterSummary}
+                      </div>
+                    )}
                     <div className="flex items-center gap-1 pt-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1 text-xs"
+                        onClick={() => handleQuerySavedCohort(cohort)}
+                      >
+                        <Play className="w-3 h-3" />
+                        쿼리하기
+                      </Button>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -1119,15 +1415,17 @@ export function CohortView() {
                         <Download className="w-3 h-3" />
                         내보내기
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 gap-1 text-xs"
-                        onClick={() => void handleAnalyzeSavedCohort(cohort)}
-                      >
-                        <ArrowRight className="w-3 h-3" />
-                        분석
-                      </Button>
+                      {cohort.type === "CROSS_SECTIONAL" && cohort.params && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 gap-1 text-xs"
+                          onClick={() => void handleAnalyzeSavedCohort(cohort)}
+                        >
+                          <ArrowRight className="w-3 h-3" />
+                          분석
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"
@@ -1195,6 +1493,37 @@ export function CohortView() {
               닫기
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isSurvivalZoomOpen}
+        onOpenChange={(open) => {
+          setIsSurvivalZoomOpen(open)
+        }}
+      >
+        <DialogContent className="!w-[92vw] !max-w-[92vw] h-[90vh] p-0 gap-0 flex flex-col overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-4 border-b border-border shrink-0">
+            <DialogTitle>생존 곡선 확대 보기</DialogTitle>
+            <DialogDescription>현재/시뮬레이션 생존 곡선을 크게 확인할 수 있습니다.</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 p-4 bg-card/30">
+            {survivalFigure ? (
+              <div className="w-full h-full rounded-lg border border-border bg-white p-2">
+                <Plot
+                  data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
+                  layout={survivalFigure.layout || {}}
+                  config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+                  style={{ width: "100%", height: "100%" }}
+                  useResizeHandler
+                />
+              </div>
+            ) : (
+              <div className="w-full h-full rounded-lg border border-dashed border-border text-sm text-muted-foreground flex items-center justify-center">
+                No survival data available.
+              </div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

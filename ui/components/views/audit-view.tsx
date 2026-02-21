@@ -114,6 +114,8 @@ export function AuditView() {
   const [deletingLogId, setDeletingLogId] = useState<string | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [pendingDeleteLogId, setPendingDeleteLogId] = useState<string | null>(null)
+  const [logPage, setLogPage] = useState(1)
+  const LOGS_PER_PAGE = 5
 
   const readError = async (res: Response) => {
     const text = await res.text()
@@ -201,6 +203,20 @@ export function AuditView() {
 
     return matchesSearch && matchesDate
   })
+
+  const totalLogPages = Math.max(1, Math.ceil(filteredLogs.length / LOGS_PER_PAGE))
+  const pagedLogs = filteredLogs.slice((logPage - 1) * LOGS_PER_PAGE, logPage * LOGS_PER_PAGE)
+  const pageTokens = buildPageTokens(totalLogPages, logPage)
+
+  useEffect(() => {
+    setLogPage(1)
+  }, [searchTerm, dateFilter])
+
+  useEffect(() => {
+    if (logPage > totalLogPages) {
+      setLogPage(totalLogPages)
+    }
+  }, [logPage, totalLogPages])
 
   const derivedStats = (() => {
     if (stats) return stats
@@ -316,17 +332,9 @@ export function AuditView() {
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h2 className="text-xl sm:text-2xl font-bold text-foreground">감사 로그 (Audit Trail)</h2>
-          <p className="text-sm text-muted-foreground mt-1">모든 쿼리 실행 기록과 의사결정 증적을 관리합니다</p>
-          {loadError && (
-            <p className="text-xs text-destructive mt-1">{loadError}</p>
-          )}
-          {!loadError && isLoading && (
-            <p className="text-xs text-muted-foreground mt-1">감사 로그를 불러오는 중...</p>
-          )}
-        </div>
+      {loadError && <p className="text-xs text-destructive">{loadError}</p>}
+      {!loadError && isLoading && <p className="text-xs text-muted-foreground">감사 로그를 불러오는 중...</p>}
+      <div className="flex justify-end">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -415,7 +423,7 @@ export function AuditView() {
               {isLoading ? "감사 로그를 불러오는 중..." : "표시할 감사 로그가 없습니다."}
             </div>
           ) : (
-            filteredLogs.map((log) => (
+            pagedLogs.map((log) => (
               <Collapsible 
                 key={log.id} 
                 open={expandedLogs.includes(log.id)}
@@ -549,6 +557,31 @@ export function AuditView() {
               </Collapsible>
             ))
           )}
+          {filteredLogs.length > 0 && totalLogPages > 1 && (
+            <div className="pt-2 flex items-center justify-center gap-1 flex-wrap">
+              {pageTokens.map((token, index) =>
+                token === "ellipsis" ? (
+                  <span
+                    key={`ellipsis-${index}`}
+                    className="inline-flex h-8 items-center px-2 text-xs text-muted-foreground"
+                  >
+                    ...
+                  </span>
+                ) : (
+                  <Button
+                    key={`page-${token}`}
+                    type="button"
+                    size="sm"
+                    variant={token === logPage ? "default" : "outline"}
+                    className="h-8 min-w-8 px-2 text-xs"
+                    onClick={() => setLogPage(token)}
+                  >
+                    {token}
+                  </Button>
+                )
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -587,6 +620,22 @@ export function AuditView() {
       </Dialog>
     </div>
   )
+}
+
+function buildPageTokens(totalPages: number, currentPage: number): Array<number | "ellipsis"> {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, idx) => idx + 1)
+  }
+
+  if (currentPage <= 4) {
+    return [1, 2, 3, 4, 5, "ellipsis", totalPages]
+  }
+
+  if (currentPage >= totalPages - 3) {
+    return [1, "ellipsis", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages]
+  }
+
+  return [1, "ellipsis", currentPage - 1, currentPage, currentPage + 1, "ellipsis", totalPages]
 }
 
 function formatSqlForDisplay(sql: string) {

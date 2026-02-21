@@ -104,6 +104,8 @@ class Settings:
     max_db_joins: int
     row_cap: int
     db_timeout_sec: int
+    db_timeout_sec_accuracy: int
+    api_request_timeout_sec: int
     db_precount_enabled: bool
     sql_auto_repair_enabled: bool
     sql_auto_repair_max_attempts: int
@@ -196,7 +198,9 @@ def load_settings() -> Settings:
         expert_score_threshold=_int(os.getenv("EXPERT_SCORE_THRESHOLD"), 3),
         max_db_joins=_int(os.getenv("MAX_DB_JOINS"), 12),
         row_cap=_int(os.getenv("ROW_CAP"), 5000),
-        db_timeout_sec=_int(os.getenv("DB_TIMEOUT_SEC"), 30),
+        db_timeout_sec=_int(os.getenv("DB_TIMEOUT_SEC"), 180),
+        db_timeout_sec_accuracy=_int(os.getenv("DB_TIMEOUT_SEC_ACCURACY"), 180),
+        api_request_timeout_sec=_int(os.getenv("API_REQUEST_TIMEOUT_SEC"), 190),
         db_precount_enabled=_bool(os.getenv("DB_PRECOUNT_ENABLED"), False),
         sql_auto_repair_enabled=_bool(os.getenv("SQL_AUTO_REPAIR_ENABLED"), True),
         sql_auto_repair_max_attempts=_int(os.getenv("SQL_AUTO_REPAIR_MAX_ATTEMPTS"), 1),

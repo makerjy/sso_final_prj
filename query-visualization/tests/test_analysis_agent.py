@@ -51,8 +51,12 @@ def test_analysis_agent_skips_visualization_without_numeric_columns() -> None:
     assert result.insight
 
 
-def test_analysis_agent_skips_visualization_with_single_column() -> None:
+def test_analysis_agent_skips_visualization_with_single_column(monkeypatch) -> None:
     df = pd.DataFrame({"average_admissions": [2396.8, 2397.0, 2397.2]})
+    monkeypatch.setattr(
+        "src.agent.analysis_agent._llm_generate_insight",
+        lambda *args, **kwargs: "쿼리 결과 기반 요약 테스트",
+    )
 
     result = analyze_and_visualize(
         "평균 입원 건수 보여줘",
@@ -63,4 +67,4 @@ def test_analysis_agent_skips_visualization_with_single_column() -> None:
     assert result.analyses == []
     assert any("insufficient_columns" in reason for reason in result.failure_reasons)
     assert result.fallback_stage == "insufficient_columns"
-    assert result.insight
+    assert "쿼리 결과 기반 요약 테스트" in str(result.insight)

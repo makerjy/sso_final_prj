@@ -80,11 +80,12 @@ class AppStateStore:
             return None
 
 
-_STORE: AppStateStore | None = None
+_STORES: dict[str, AppStateStore] = {}
 
 
-def get_state_store() -> AppStateStore:
-    global _STORE
-    if _STORE is None:
-        _STORE = AppStateStore()
-    return _STORE
+def get_state_store(collection_name: str = "app_state") -> AppStateStore:
+    store = _STORES.get(collection_name)
+    if store is None:
+        store = AppStateStore(collection_name=collection_name)
+        _STORES[collection_name] = store
+    return store

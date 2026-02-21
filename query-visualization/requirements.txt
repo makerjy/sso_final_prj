@@ -3,6 +3,7 @@ fastapi
 uvicorn
 pandas
 plotly
+seaborn
 python-dotenv
 pytest
 openai

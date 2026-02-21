@@ -386,6 +386,90 @@
       "last_used_at": 1771681728,
       "success_count": 1,
       "updated_at": 1771681728
+    },
+    {
+      "created_at": 1771695501,
+      "error_signature": "ORA-01008",
+      "failed_sql_hash": "7168383fc499690852073824faea7ffd4a1274e548a855d207f4e02e3fbb89a0",
+      "failed_sql_sample": "SELECT COUNT(DISTINCT a.HADM_ID) AS CNT FROM ADMISSIONS a WHERE EXISTS (SELECT 1 FROM ADMISSIONS a2 WHERE a.SUBJECT_ID = a2.SUBJECT_ID AND a.HADM_ID <> a2.HADM_ID AND a.ADMITTIME BETWEEN a2.ADMITTIME AND a2.DISCHTIME + INTERVAL '30' DAY) AND EXTRACT(YEAR FROM a.ADMITTIME) = :specific_year",
+      "fixed_sql": "SELECT COUNT(DISTINCT a.HADM_ID) AS CNT FROM ADMISSIONS a WHERE EXISTS (SELECT 1 FROM ADMISSIONS a2 WHERE a.SUBJECT_ID = a2.SUBJECT_ID AND a.HADM_ID <> a2.HADM_ID AND a.ADMITTIME BETWEEN a2.ADMITTIME AND a2.DISCHTIME + INTERVAL '30' DAY) AND EXTRACT(YEAR FROM a.ADMITTIME) = 2022",
+      "fixed_sql_hash": "379b0b6e5af322957148aa91ed6d6956c2e5af5c714ecfdaa94cc38d621acc80",
+      "hit_count": 0,
+      "id": "991428b445fd48e1aaf2e85375941a26",
+      "last_used_at": 1771695501,
+      "success_count": 1,
+      "updated_at": 1771695501
+    },
+    {
+      "created_at": 1771699989,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "a6ffc84538d8cbcff17073ccf2de3a343fe1f28359126282c6bd9d7c39af0815",
+      "failed_sql_sample": "SELECT CASE WHEN ICUSTAYS.ICUSTAY_ID IS NOT NULL THEN 'ICU' ELSE 'Non-ICU' END AS ADMISSION_STATUS, AVG(ICUSTAYS.LOS) AS avg_los FROM ADMISSIONS LEFT JOIN ICUSTAYS ON ADMISSIONS.HADM_ID = ICUSTAYS.HADM_ID WHERE ICUSTAYS.LOS IS NOT NULL GROUP BY CASE WHEN ICUSTAYS.ICUSTAY_ID IS NOT NULL THEN 'ICU' ELSE 'Non-ICU' END",
+      "fixed_sql": "SELECT CASE WHEN ICUSTAYS.HADM_ID IS NOT NULL THEN 'ICU' ELSE 'Non-ICU' END AS ADMISSION_STATUS, AVG(ICUSTAYS.LOS) AS avg_los FROM ADMISSIONS LEFT JOIN ICUSTAYS ON ADMISSIONS.HADM_ID = ICUSTAYS.HADM_ID WHERE ICUSTAYS.LOS IS NOT NULL GROUP BY CASE WHEN ICUSTAYS.HADM_ID IS NOT NULL THEN 'ICU' ELSE 'Non-ICU' END",
+      "fixed_sql_hash": "b6bf73d618236db778cea92ceb41a1796e68a50dc1ce1e4f4e0a4e62f34d0167",
+      "hit_count": 0,
+      "id": "61ec81f1dc8d4e1fbe2c494935856a17",
+      "last_used_at": 1771699989,
+      "resolution_notes": [
+        "avg_alias_los"
+      ],
+      "success_count": 1,
+      "updated_at": 1771699989
+    },
+    {
+      "created_at": 1771700884,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "ad5f02c1950ff55a0cb452f94f5a65510d01adb3f1a8bd50f4174471731dc8b0",
+      "failed_sql_sample": "SELECT * FROM (SELECT pathogen, COUNT(DISTINCT CASE WHEN readmit_30d_flag = 1 THEN a.hadm_id END) / COUNT(DISTINCT a.hadm_id) AS readmission_rate, COUNT(DISTINCT CASE WHEN a.hospital_expire_flag = 1 THEN a.hadm_id END) / COUNT(DISTINCT a.hadm_id) AS mortality_rate FROM (SELECT a.hadm_id, a.hospital_expire_flag, CASE WHEN LEAD(a.admittime) OVER (PARTITION BY a.subject_id ORDER BY a.admittime) <= a.dischtime + INTERVAL '30' DAY THEN 1 ELSE 0 END AS readmit_30d_flag, m.pathogen FROM admissions a JO",
+      "fixed_sql": "SELECT * FROM (SELECT m.org_name AS pathogen, COUNT(DISTINCT CASE WHEN readmit_30d_flag = 1 THEN a.hadm_id END) / COUNT(DISTINCT a.hadm_id) AS readmission_rate, COUNT(DISTINCT CASE WHEN a.hospital_expire_flag = 1 THEN a.hadm_id END) / COUNT(DISTINCT a.hadm_id) AS mortality_rate FROM (SELECT a.hadm_id, a.hospital_expire_flag, CASE WHEN LEAD(a.admittime) OVER (PARTITION BY a.subject_id ORDER BY a.admittime) <= a.dischtime + INTERVAL '30' DAY THEN 1 ELSE 0 END AS readmit_30d_flag FROM admissions a) a JOIN microbiologyevents m ON a.hadm_id = m.hadm_id WHERE a.hadm_id IS NOT NULL GROUP BY m.org_name ORDER BY readmission_rate DESC) WHERE ROWNUM <= 5",
+      "fixed_sql_hash": "86835053d35dcca45276cce035123ff15177526af3ee9528b89eb35f3d235878",
+      "hit_count": 0,
+      "id": "a93755f7e03445468d03b5b622438cd1",
+      "last_used_at": 1771700884,
+      "resolution_notes": [
+        "enforce_top_n_rownum:5"
+      ],
+      "success_count": 1,
+      "updated_at": 1771700884
+    },
+    {
+      "created_at": 1771701449,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "551803f5fe869ec18fc485d29e90815f0f53ccfba313ac5de824e386da2d991b",
+      "failed_sql_sample": "SELECT \n    COUNT(DISTINCT CASE WHEN A.READMISSION_FLAG = 1 THEN A.HADM_ID END) / COUNT(DISTINCT A.HADM_ID) AS readmission_rate,\n    COUNT(DISTINCT CASE WHEN A.HOSPITAL_EXPIRE_FLAG = 1 AND A.DEATHTIME BETWEEN I.INTIME AND I.OUTTIME THEN A.HADM_ID END) / COUNT(DISTINCT A.HADM_ID) AS mortality_rate\nFROM \n    ADMISSIONS A\nJOIN \n    ICUSTAYS I ON A.SUBJECT_ID = I.SUBJECT_ID AND A.HADM_ID = I.HADM_ID\nWHERE \n    EXISTS (\n        SELECT 1 \n        FROM DIAGNOSES_ICD D\n        WHERE D.HADM_ID = A.HADM_I",
+      "fixed_sql": "SELECT \n    COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM ADMISSIONS A2 WHERE A2.HADM_ID = A.HADM_ID AND A2.ADMISSION_TYPE = 'READMISSION') THEN A.HADM_ID END) / COUNT(DISTINCT A.HADM_ID) AS readmission_rate,\n    COUNT(DISTINCT CASE WHEN A.HOSPITAL_EXPIRE_FLAG = 1 AND A.DEATHTIME BETWEEN I.INTIME AND I.OUTTIME THEN A.HADM_ID END) / COUNT(DISTINCT A.HADM_ID) AS mortality_rate\nFROM \n    ADMISSIONS A\nJOIN \n    ICUSTAYS I ON A.SUBJECT_ID = I.SUBJECT_ID AND A.HADM_ID = I.HADM_ID\nWHERE \n    EXISTS (\n        SELECT 1 \n        FROM DIAGNOSES_ICD D\n        WHERE D.HADM_ID = A.HADM_ID\n        AND D.ICD_CODE NOT LIKE 'B%' -- Assuming 'B%' is a placeholder for pathogen-related codes\n    ) AND A.HADM_ID IS NOT NULL",
+      "fixed_sql_hash": "49885e199c656885282f51153dd02e3199b024efd7d1eb698a553344e7656935",
+      "hit_count": 0,
+      "id": "aea0a0b19c7c4a4fb40daa3b5dfae1ea",
+      "last_used_at": 1771701449,
+      "success_count": 1,
+      "updated_at": 1771701449
+    },
+    {
+      "created_at": 1771701595,
+      "error_signature": "ORA-00918",
+      "failed_sql_hash": "47d1adcf487a31b193825066db7ea20e6b9d3a3d61ab03edf2b26000fc50537d",
+      "failed_sql_sample": "SELECT a.readmission_rate, b.mortality_rate, COUNT(*) AS count\nFROM (\n    SELECT HADM_ID, COUNT(*) / COUNT(DISTINCT HADM_ID) AS readmission_rate\n    FROM ADMISSIONS\n    WHERE HADM_ID IN (\n        SELECT HADM_ID\n        FROM ADMISSIONS\n        WHERE ADMITTIME > (\n            SELECT MAX(DISCHTIME)\n            FROM ADMISSIONS\n            WHERE HADM_ID = ADMISSIONS.HADM_ID\n        )\n    )\n    GROUP BY HADM_ID\n) a\nJOIN (\n    SELECT HADM_ID, AVG(CASE WHEN DEATHTIME IS NOT NULL THEN 1 ELSE 0 END) AS mo",
+      "fixed_sql": "WITH readmission AS (\n    SELECT HADM_ID, COUNT(*) / COUNT(DISTINCT HADM_ID) AS readmission_rate\n    FROM ADMISSIONS\n    WHERE HADM_ID IN (\n        SELECT HADM_ID\n        FROM ADMISSIONS a1\n        WHERE a1.ADMITTIME > (\n            SELECT MAX(a2.DISCHTIME)\n            FROM ADMISSIONS a2\n            WHERE a2.HADM_ID = a1.HADM_ID\n        )\n    )\n    GROUP BY HADM_ID\n), mortality AS (\n    SELECT ADMISSIONS.HADM_ID, AVG(CASE WHEN ADMISSIONS.DEATHTIME IS NOT NULL THEN 1 ELSE 0 END) AS mortality_rate\n    FROM ADMISSIONS\n    LEFT JOIN ICUSTAYS ON ADMISSIONS.HADM_ID = ICUSTAYS.HADM_ID\n    WHERE ADMISSIONS.DEATHTIME BETWEEN ICUSTAYS.INTIME AND ICUSTAYS.OUTTIME\n    GROUP BY ADMISSIONS.HADM_ID\n)\nSELECT r.readmission_rate, m.mortality_rate, COUNT(*) AS count\nFROM readmission r\nJOIN mortality m ON r.HADM_ID = m.HADM_ID\nGROUP BY r.readmission_rate, m.mortality_rate",
+      "fixed_sql_hash": "1a25d6affcd3f9044a064028f0724f65b50a97c8645af83ae02af498065fb55d",
+      "hit_count": 0,
+      "id": "9a5eb362ba024b18a640818a37adb530",
+      "last_used_at": 1771701595,
+      "success_count": 1,
+      "updated_at": 1771701595
+    },
+    {
+      "created_at": 1771709618,
+      "error_signature": "ORA-00904",
+      "failed_sql_hash": "707b5c9cf73710bac815cece245c948632851e79f90ca3cdd8a15c432dcbe7be",
+      "failed_sql_sample": "SELECT d.icd_code, d.long_title, AVG(CASE WHEN a.deathtime BETWEEN i.intime AND i.outtime THEN 1 ELSE 0 END) AS icu_mortality_rate FROM diagnoses_icd d JOIN admissions a ON d.hadm_id = a.hadm_id JOIN icustays i ON a.hadm_id = i.hadm_id AND a.subject_id = i.subject_id GROUP BY d.icd_code, d.long_title",
+      "fixed_sql": "SELECT d.icd_code, AVG(CASE WHEN a.deathtime BETWEEN i.intime AND i.outtime THEN 1 ELSE 0 END) AS icu_mortality_rate FROM diagnoses_icd d JOIN admissions a ON d.hadm_id = a.hadm_id JOIN icustays i ON a.hadm_id = i.hadm_id AND a.subject_id = i.subject_id GROUP BY d.icd_code",
+      "fixed_sql_hash": "a62707c27beb38c795ff2df61e86b03e47d7a6ff300fe4457bf42d2395b6058e",
+      "hit_count": 0,
+      "id": "f8003252f1194ddfac6c043ad01274cc",
+      "last_used_at": 1771709618,
+      "success_count": 1,
+      "updated_at": 1771709618
     }
   ]
 }

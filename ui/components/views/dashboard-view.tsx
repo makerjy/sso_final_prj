@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -39,6 +40,7 @@ import {
   X,
   ArrowRight,
   ChevronRight,
+  Maximize2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
@@ -60,20 +62,67 @@ interface SavedQuery {
   title: string
   description: string
   insight?: string
+  llmSummary?: string
   query: string
   lastRun: string
   schedule?: string
   isPinned: boolean
   category: string
   folderId?: string
+  cohort?: SavedQueryCohortProvenance
+  pdfAnalysis?: SavedQueryPdfAnalysis
   preview?: {
     columns: string[]
     rows: any[][]
     row_count: number
     row_cap?: number | null
   }
+  stats?: Array<{
+    column: string
+    n?: number
+    missing?: number
+    nulls?: number
+    min?: unknown
+    q1?: unknown
+    median?: unknown
+    q3?: unknown
+    max?: unknown
+    mean?: unknown
+  }>
   metrics: { label: string; value: string; trend?: "up" | "down" }[]
   chartType: "line" | "bar" | "pie"
+  recommendedCharts?: DashboardChartSpec[]
+  primaryChart?: DashboardChartSpec
+}
+
+interface SavedQueryCohortProvenance {
+  source: "NONE" | "LIBRARY" | "PDF" | string
+  libraryCohortId?: string
+  libraryCohortName?: string
+  pdfCohortId?: string
+  pdfPaperTitle?: string
+  libraryUsed?: boolean
+}
+
+interface SavedQueryPdfAnalysisInclusion {
+  id: string
+  title: string
+  operationalDefinition: string
+  evidence?: string
+}
+
+interface SavedQueryPdfAnalysis {
+  pdfHash?: string
+  pdfName?: string
+  summaryKo?: string
+  criteriaSummaryKo?: string
+  variables?: string[]
+  inclusionExclusion?: SavedQueryPdfAnalysisInclusion[]
+  source?: string
+  analyzedAt?: string
+  libraryUsed?: boolean
+  libraryCohortId?: string
+  libraryCohortName?: string
 }
 
 interface SavedFolder {
@@ -103,6 +152,25 @@ interface DialogStatRow {
   q3: number | null
   max: number | null
   avg: number | null
+}
+
+interface DashboardChartSpec {
+  id: string
+  type: string
+  x?: string
+  y?: string
+  config?: Record<string, unknown>
+  thumbnailUrl?: string
+  pngUrl?: string
+}
+
+interface PopupChartPayload {
+  title: string
+  imageUrl?: string
+  figure?: {
+    data: unknown[]
+    layout?: Record<string, unknown>
+  }
 }
 
 const ALL_FOLDER_ID = "__all__"
@@ -232,6 +300,13 @@ const toFiniteNumber = (value: unknown): number | null => {
   return Number.isFinite(n) ? n : null
 }
 
+const toText = (value: unknown) => String(value ?? "").trim()
+
+const toOptionalText = (value: unknown) => {
+  const text = toText(value)
+  return text || undefined
+}
+
 const quantile = (sortedValues: number[], p: number): number | null => {
   if (!sortedValues.length) return null
   if (sortedValues.length === 1) return sortedValues[0]
@@ -248,6 +323,298 @@ const formatStatNumber = (value: number | null) => {
   return value.toLocaleString(undefined, { maximumFractionDigits: 4 })
 }
 
+const normalizeChartType = (value: unknown) => String(value || "").trim().toUpperCase()
+
+const isRecordLike = (value: unknown): value is Record<string, unknown> =>
+  value != null && typeof value === "object" && !Array.isArray(value)
+
+const readBooleanLike = (value: unknown): boolean | undefined => {
+  if (typeof value === "boolean") return value
+  if (typeof value === "number") return value !== 0
+  const text = String(value ?? "").trim().toLowerCase()
+  if (!text) return undefined
+  if (["true", "1", "y", "yes"].includes(text)) return true
+  if (["false", "0", "n", "no"].includes(text)) return false
+  return undefined
+}
+
+const normalizeCohortProvenance = (raw: unknown): SavedQueryCohortProvenance | undefined => {
+  if (!isRecordLike(raw)) return undefined
+  const sourceRaw = toText(raw.source).toUpperCase()
+  const source: SavedQueryCohortProvenance["source"] =
+    sourceRaw === "PDF" || sourceRaw === "LIBRARY" || sourceRaw === "NONE"
+      ? sourceRaw
+      : "NONE"
+  const libraryUsed = readBooleanLike(raw.libraryUsed ?? raw.library_used)
+  const normalized: SavedQueryCohortProvenance = {
+    source,
+    libraryCohortId: toOptionalText(raw.libraryCohortId ?? raw.library_cohort_id),
+    libraryCohortName: toOptionalText(raw.libraryCohortName ?? raw.library_cohort_name),
+    pdfCohortId: toOptionalText(raw.pdfCohortId ?? raw.pdf_cohort_id),
+    pdfPaperTitle: toOptionalText(raw.pdfPaperTitle ?? raw.pdf_paper_title),
+    libraryUsed,
+  }
+  return normalized
+}
+
+const normalizePdfAnalysisSnapshot = (raw: unknown): SavedQueryPdfAnalysis | undefined => {
+  if (!isRecordLike(raw)) return undefined
+  const variables = Array.isArray(raw.variables)
+    ? raw.variables
+        .map((item) => toText(item))
+        .filter(Boolean)
+        .slice(0, 24)
+    : []
+  const inclusionCandidate = raw.inclusionExclusion ?? raw.inclusion_exclusion
+  const inclusionExclusion: SavedQueryPdfAnalysisInclusion[] = []
+  if (Array.isArray(inclusionCandidate)) {
+    for (let idx = 0; idx < inclusionCandidate.length; idx += 1) {
+      const item = inclusionCandidate[idx]
+      if (!isRecordLike(item)) continue
+      const operationalDefinition = toText(item.operationalDefinition ?? item.operational_definition)
+      if (!operationalDefinition) continue
+      inclusionExclusion.push({
+        id: toText(item.id) || `ie-${idx + 1}`,
+        title: toText(item.title) || `조건 ${idx + 1}`,
+        operationalDefinition,
+        evidence: toOptionalText(item.evidence),
+      })
+      if (inclusionExclusion.length >= 20) break
+    }
+  }
+  const normalized: SavedQueryPdfAnalysis = {
+    pdfHash: toOptionalText(raw.pdfHash ?? raw.pdf_hash),
+    pdfName: toOptionalText(raw.pdfName ?? raw.pdf_name),
+    summaryKo: toOptionalText(raw.summaryKo ?? raw.summary_ko),
+    criteriaSummaryKo: toOptionalText(raw.criteriaSummaryKo ?? raw.criteria_summary_ko),
+    variables: variables.length ? variables : undefined,
+    inclusionExclusion: inclusionExclusion.length ? inclusionExclusion : undefined,
+    source: toOptionalText(raw.source),
+    analyzedAt: toOptionalText(raw.analyzedAt ?? raw.analyzed_at),
+    libraryUsed: readBooleanLike(raw.libraryUsed ?? raw.library_used),
+    libraryCohortId: toOptionalText(raw.libraryCohortId ?? raw.library_cohort_id),
+    libraryCohortName: toOptionalText(raw.libraryCohortName ?? raw.library_cohort_name),
+  }
+  if (
+    !normalized.pdfHash &&
+    !normalized.pdfName &&
+    !normalized.summaryKo &&
+    !normalized.criteriaSummaryKo &&
+    !normalized.variables?.length &&
+    !normalized.inclusionExclusion?.length
+  ) {
+    return undefined
+  }
+  return normalized
+}
+
+const formatCohortSourceText = (query: SavedQuery) => {
+  const cohort = query.cohort
+  const pdfAnalysis = query.pdfAnalysis
+  const source = String(cohort?.source || "NONE").toUpperCase()
+  const libraryRef =
+    cohort?.libraryCohortName ||
+    cohort?.libraryCohortId ||
+    pdfAnalysis?.libraryCohortName ||
+    pdfAnalysis?.libraryCohortId ||
+    ""
+  if (!cohort || source === "NONE") {
+    return "코호트: 선택 안 함"
+  }
+  if (source === "PDF") {
+    const pdfTitle =
+      cohort.pdfPaperTitle || pdfAnalysis?.pdfName || cohort.pdfCohortId || pdfAnalysis?.pdfHash || "미지정 PDF"
+    const provenance = libraryRef || cohort.pdfCohortId || pdfAnalysis?.pdfHash || "출처 정보 없음"
+    return `코호트: PDF / ${pdfTitle} / ${provenance}`
+  }
+  return `코호트: 라이브러리 / ${libraryRef || "미지정"}`
+}
+
+const cohortSourceBadgeText = (query: SavedQuery) => {
+  const source = String(query.cohort?.source || "NONE").toUpperCase()
+  if (source === "PDF") return "PDF 코호트"
+  if (source === "LIBRARY") return "라이브러리 코호트"
+  return "코호트 없음"
+}
+
+const isLibraryUsed = (query: SavedQuery) => {
+  if (typeof query.cohort?.libraryUsed === "boolean") return query.cohort.libraryUsed
+  if (typeof query.pdfAnalysis?.libraryUsed === "boolean") return query.pdfAnalysis.libraryUsed
+  return Boolean(
+    query.cohort?.libraryCohortId ||
+      query.cohort?.libraryCohortName ||
+      query.pdfAnalysis?.libraryCohortId ||
+      query.pdfAnalysis?.libraryCohortName
+  )
+}
+
+const buildAxisTitleConfig = (axis: Record<string, unknown>, defaultSize: number) => {
+  const rawTitle = axis.title
+  if (typeof rawTitle === "string") {
+    return {
+      text: rawTitle,
+      standoff: 16,
+      font: { size: defaultSize },
+    }
+  }
+  if (isRecordLike(rawTitle)) {
+    const rawFont = isRecordLike(rawTitle.font) ? rawTitle.font : {}
+    return {
+      ...rawTitle,
+      standoff: Number(rawTitle.standoff ?? 16),
+      font: {
+        ...rawFont,
+        size: Number(rawFont.size ?? defaultSize),
+      },
+    }
+  }
+  return {
+    standoff: 16,
+    font: { size: defaultSize },
+  }
+}
+
+const enhancePopupPlotLayout = (layoutInput: unknown) => {
+  const layout = isRecordLike(layoutInput) ? layoutInput : {}
+  const margin = isRecordLike(layout.margin) ? layout.margin : {}
+  const xaxis = isRecordLike(layout.xaxis) ? layout.xaxis : {}
+  const yaxis = isRecordLike(layout.yaxis) ? layout.yaxis : {}
+  const xTickFont = isRecordLike(xaxis.tickfont) ? xaxis.tickfont : {}
+  const yTickFont = isRecordLike(yaxis.tickfont) ? yaxis.tickfont : {}
+
+  return {
+    ...layout,
+    margin: {
+      ...margin,
+      l: Math.max(44, Number(margin.l ?? 0)),
+      r: Math.max(20, Number(margin.r ?? 0)),
+      t: Math.max(34, Number(margin.t ?? 0)),
+      b: Math.max(72, Number(margin.b ?? 0)),
+    },
+    xaxis: {
+      ...xaxis,
+      automargin: true,
+      tickangle: typeof xaxis.tickangle === "number" ? xaxis.tickangle : -20,
+      tickfont: {
+        ...xTickFont,
+        size: Number(xTickFont.size ?? 13),
+      },
+      title: buildAxisTitleConfig(xaxis, 14),
+    },
+    yaxis: {
+      ...yaxis,
+      automargin: true,
+      tickfont: {
+        ...yTickFont,
+        size: Number(yTickFont.size ?? 13),
+      },
+      title: buildAxisTitleConfig(yaxis, 13),
+    },
+  }
+}
+
+const sanitizeRecommendedCharts = (raw: unknown, queryId: string): DashboardChartSpec[] => {
+  if (!Array.isArray(raw)) return []
+  const charts: DashboardChartSpec[] = []
+  const seen = new Set<string>()
+  raw.forEach((item, idx) => {
+    const source = (item || {}) as Record<string, unknown>
+    const type = normalizeChartType(source.type || source.chart_type)
+    if (!type) return
+    const id = String(source.id || `${queryId}-rec-${idx + 1}`).trim() || `${queryId}-rec-${idx + 1}`
+    if (seen.has(id)) return
+    const x = String(source.x || "").trim() || undefined
+    const y = String(source.y || "").trim() || undefined
+    const thumbnailUrl = String(source.thumbnailUrl || source.thumbnail_url || source.image_data_url || "").trim() || undefined
+    const pngUrl = String(source.pngUrl || source.png_url || "").trim() || undefined
+    const config =
+      source.config && typeof source.config === "object" && !Array.isArray(source.config)
+        ? (source.config as Record<string, unknown>)
+        : undefined
+    const sourceTag = String(config?.source || "").trim().toLowerCase()
+    if (sourceTag === "fallback") return
+    charts.push({ id, type, x, y, config, thumbnailUrl, pngUrl })
+    seen.add(id)
+  })
+  return charts.slice(0, 3)
+}
+
+const getRecommendedChartsForQuery = (
+  query: SavedQuery,
+  scope: string
+) => {
+  return sanitizeRecommendedCharts(query.recommendedCharts, `${scope}-${query.id}`).slice(0, 3)
+}
+
+const buildFigureFromStoredChart = (chart: DashboardChartSpec | null | undefined) => {
+  if (!chart?.config || typeof chart.config !== "object" || Array.isArray(chart.config)) return null
+  const config = chart.config as Record<string, unknown>
+  const rawFigure = config.figureJson || config.figure_json
+  if (!rawFigure || typeof rawFigure !== "object" || Array.isArray(rawFigure)) return null
+  const figure = rawFigure as Record<string, unknown>
+  const data = Array.isArray(figure.data) ? figure.data : []
+  if (!data.length) return null
+  const layout =
+    figure.layout && typeof figure.layout === "object" && !Array.isArray(figure.layout)
+      ? (figure.layout as Record<string, unknown>)
+      : {}
+  return { data, layout }
+}
+
+const buildFigureByChartSpec = (
+  chartType: string,
+  columns: string[],
+  records: Array<Record<string, unknown>>,
+  title: string,
+  preferredX?: string,
+  preferredY?: string
+) => {
+  if (!columns.length || !records.length) return null
+  const numericCols = columns.filter((col) => records.some((r) => isNumericValue(r[col])))
+  const categoryCols = columns.filter((col) => !numericCols.includes(col))
+  const xCol = preferredX && columns.includes(preferredX) ? preferredX : categoryCols[0] || columns[0]
+  const yCol =
+    preferredY && columns.includes(preferredY)
+      ? preferredY
+      : numericCols[0] || columns.find((col) => col !== xCol)
+  if (!xCol || !yCol) return null
+
+  const normalized = normalizeChartType(chartType)
+  if (normalized === "PIE") {
+    const sums = new Map<string, number>()
+    for (const row of records) {
+      const key = String(row[xCol] ?? "")
+      const value = Number(row[yCol])
+      if (!Number.isFinite(value)) continue
+      sums.set(key, (sums.get(key) || 0) + value)
+    }
+    if (!sums.size) return null
+    return {
+      data: [{ type: "pie", labels: Array.from(sums.keys()), values: Array.from(sums.values()), textinfo: "label+percent" }],
+      layout: { margin: { l: 24, r: 24, t: 36, b: 24 }, title },
+    }
+  }
+
+  if (normalized === "LINE") {
+    return {
+      data: [{ type: "scatter", mode: "lines+markers", x: records.map((r) => r[xCol]), y: records.map((r) => Number(r[yCol])) }],
+      layout: { margin: { l: 40, r: 16, t: 36, b: 40 }, xaxis: { title: xCol }, yaxis: { title: yCol }, title },
+    }
+  }
+
+  if (normalized === "SCATTER") {
+    return {
+      data: [{ type: "scatter", mode: "markers", x: records.map((r) => r[xCol]), y: records.map((r) => Number(r[yCol])) }],
+      layout: { margin: { l: 40, r: 16, t: 36, b: 40 }, xaxis: { title: xCol }, yaxis: { title: yCol }, title },
+    }
+  }
+
+  return {
+    data: [{ type: "bar", x: records.map((r) => r[xCol]), y: records.map((r) => Number(r[yCol])) }],
+    layout: { margin: { l: 40, r: 16, t: 36, b: 40 }, xaxis: { title: xCol }, yaxis: { title: yCol }, title },
+  }
+}
+
 const previewRowsToRecords = (query: SavedQuery | null) => {
   if (!query?.preview?.columns?.length || !Array.isArray(query.preview.rows)) return []
   const columns = query.preview.columns
@@ -258,6 +625,70 @@ const previewRowsToRecords = (query: SavedQuery | null) => {
       record[columns[i]] = cells[i]
     }
     return record
+  })
+}
+
+const buildStatsRowsFromQuery = (query: SavedQuery | null): DialogStatRow[] => {
+  if (!query) return []
+  if (Array.isArray(query.stats) && query.stats.length) {
+    return query.stats.map((row) => ({
+      column: String(row.column || ""),
+      n: Number(row.n || 0),
+      missingCount: Number(row.missing || 0),
+      nullCount: Number(row.nulls || 0),
+      min: toFiniteNumber(row.min),
+      q1: toFiniteNumber(row.q1),
+      median: toFiniteNumber(row.median),
+      q3: toFiniteNumber(row.q3),
+      max: toFiniteNumber(row.max),
+      avg: toFiniteNumber(row.mean),
+    }))
+  }
+
+  const preview = query.preview
+  if (!preview?.columns?.length || !Array.isArray(preview.rows)) return []
+
+  return preview.columns.map((column, colIndex) => {
+    let n = 0
+    let missingCount = 0
+    let nullCount = 0
+    const numericValues: number[] = []
+
+    for (const row of preview.rows) {
+      const cell = Array.isArray(row) ? row[colIndex] : undefined
+      if (cell === null) {
+        nullCount += 1
+        missingCount += 1
+        continue
+      }
+      if (cell === undefined || (typeof cell === "string" && cell.trim() === "")) {
+        missingCount += 1
+        continue
+      }
+      n += 1
+      const numeric = toFiniteNumber(cell)
+      if (numeric != null) numericValues.push(numeric)
+    }
+
+    numericValues.sort((a, b) => a - b)
+    const min = numericValues.length ? numericValues[0] : null
+    const max = numericValues.length ? numericValues[numericValues.length - 1] : null
+    const avg = numericValues.length
+      ? numericValues.reduce((acc, value) => acc + value, 0) / numericValues.length
+      : null
+
+    return {
+      column,
+      n,
+      missingCount,
+      nullCount,
+      min,
+      q1: quantile(numericValues, 0.25),
+      median: quantile(numericValues, 0.5),
+      q3: quantile(numericValues, 0.75),
+      max,
+      avg,
+    }
   })
 }
 
@@ -322,24 +753,103 @@ function normalizeDashboardData(rawQueries: SavedQuery[], rawFolders: SavedFolde
     changed = true
   }
 
-  const queries = rawQueries.map((raw) => {
-    const currentFolderId = typeof raw.folderId === "string" ? raw.folderId.trim() : ""
+  const queries = rawQueries.map((raw, index) => {
+    const rawQuery = (raw || {}) as unknown as Record<string, unknown>
+    const currentFolderId = typeof rawQuery.folderId === "string" ? rawQuery.folderId.trim() : ""
     const currentFolder = currentFolderId ? folderById.get(currentFolderId) : undefined
     let targetFolder = currentFolder
 
     if (!targetFolder) {
-      const category = normalizeName(raw.category || "")
+      const category = normalizeName(String(rawQuery.category || ""))
       targetFolder = getOrCreateFolderByName(category && category !== "전체" ? category : "기타")
     }
 
+    const previewCandidate = (rawQuery.preview || {}) as Record<string, unknown>
+    const previewColumns = Array.isArray(previewCandidate.columns)
+      ? previewCandidate.columns.map((col) => String(col ?? "")).filter(Boolean)
+      : []
+    const previewRows = Array.isArray(previewCandidate.rows)
+      ? previewCandidate.rows.map((row) => (Array.isArray(row) ? row : []))
+      : []
+    const normalizedPreview = previewColumns.length
+      ? {
+          columns: previewColumns,
+          rows: previewRows as any[][],
+          row_count: Number.isFinite(Number(previewCandidate.row_count))
+            ? Number(previewCandidate.row_count)
+            : previewRows.length,
+          row_cap: Number.isFinite(Number(previewCandidate.row_cap))
+            ? Number(previewCandidate.row_cap)
+            : previewCandidate.row_cap == null
+              ? null
+              : undefined,
+        }
+      : undefined
+
+    const normalizedMetrics = Array.isArray(rawQuery.metrics)
+      ? rawQuery.metrics
+          .map((metric) => {
+            const item = (metric || {}) as Record<string, unknown>
+            const label = String(item.label || "").trim()
+            const value = String(item.value || "-").trim()
+            let trend: "up" | "down" | undefined
+            if (item.trend === "up" || item.trend === "down") {
+              trend = item.trend
+            }
+            return { label, value: value || "-", trend }
+          })
+          .filter((metric) => metric.label || metric.value)
+      : []
+    const fallbackMetrics =
+      normalizedMetrics.length > 0
+        ? normalizedMetrics
+        : [
+            { label: "행 수", value: String(normalizedPreview?.row_count ?? "-") },
+            { label: "컬럼 수", value: String(normalizedPreview?.columns.length ?? "-") },
+            {
+              label: "ROW CAP",
+              value: normalizedPreview?.row_cap == null ? "-" : String(normalizedPreview.row_cap),
+            },
+          ]
+
+    const normalizedChartType =
+      rawQuery.chartType === "line" || rawQuery.chartType === "bar" || rawQuery.chartType === "pie"
+        ? rawQuery.chartType
+        : "bar"
+    const normalizedId = String(rawQuery.id || rawQuery.queryId || `query-${index + 1}`).trim() || `query-${index + 1}`
+    const normalizedRecommendedCharts = sanitizeRecommendedCharts(rawQuery.recommendedCharts, normalizedId)
+    const normalizedPrimaryChart =
+      sanitizeRecommendedCharts([rawQuery.primaryChart], `${normalizedId}-primary`)[0] || normalizedRecommendedCharts[0]
+    const normalizedStats = Array.isArray(rawQuery.stats)
+      ? (rawQuery.stats as SavedQuery["stats"])
+      : undefined
+    const normalizedCohort = normalizeCohortProvenance(rawQuery.cohort ?? rawQuery.cohort_provenance)
+    const normalizedPdfAnalysis = normalizePdfAnalysisSnapshot(rawQuery.pdfAnalysis ?? rawQuery.pdf_analysis)
     const nextCategory = targetFolder.name
     const nextQuery: SavedQuery = {
-      ...raw,
+      ...(raw as SavedQuery),
+      id: normalizedId,
+      title: String(rawQuery.title || rawQuery.question || "저장된 쿼리"),
+      description: String(rawQuery.description || ""),
+      insight: typeof rawQuery.insight === "string" ? rawQuery.insight : undefined,
+      llmSummary: typeof rawQuery.llmSummary === "string" ? rawQuery.llmSummary : undefined,
+      query: String(rawQuery.query || rawQuery.sql || ""),
+      lastRun: String(rawQuery.lastRun || rawQuery.executedAt || "방금 전"),
+      schedule: typeof rawQuery.schedule === "string" ? rawQuery.schedule : undefined,
+      isPinned: Boolean(rawQuery.isPinned),
       folderId: targetFolder.id,
       category: nextCategory,
+      cohort: normalizedCohort,
+      pdfAnalysis: normalizedPdfAnalysis,
+      preview: normalizedPreview,
+      stats: normalizedStats,
+      metrics: fallbackMetrics,
+      chartType: normalizedChartType,
+      recommendedCharts: normalizedRecommendedCharts,
+      primaryChart: normalizedPrimaryChart,
     }
 
-    if (raw.folderId !== nextQuery.folderId || raw.category !== nextQuery.category) {
+    if (rawQuery.folderId !== nextQuery.folderId || rawQuery.category !== nextQuery.category) {
       changed = true
     }
 
@@ -392,6 +902,10 @@ export function DashboardView() {
   const [comparisonResults, setComparisonResults] = useState<Record<string, { loading: boolean; error?: string; data?: any }>>({})
   const [visibleComparisonIds, setVisibleComparisonIds] = useState<Set<string>>(new Set())
   const [comparisonOrder, setComparisonOrder] = useState<string[]>([])
+  const [isCompareSelectionMode, setIsCompareSelectionMode] = useState(false)
+  const [compareChartSelectionByQuery, setCompareChartSelectionByQuery] = useState<Record<string, string>>({})
+  const [detailChartSelectionByQuery, setDetailChartSelectionByQuery] = useState<Record<string, string>>({})
+  const [popupChartPayload, setPopupChartPayload] = useState<PopupChartPayload | null>(null)
 
   const saveTimer = useRef<number | null>(null)
   const listSectionRef = useRef<HTMLDivElement | null>(null)
@@ -511,6 +1025,113 @@ export function DashboardView() {
     setQueries(nextQueries)
     setFolders(nextFolders)
     schedulePersist(nextQueries, nextFolders)
+  }
+
+  const mergeBundleIntoQuery = (query: SavedQuery, rawBundle: unknown): SavedQuery => {
+    if (!rawBundle || typeof rawBundle !== "object") return query
+    const bundle = rawBundle as Record<string, unknown>
+    const merged: SavedQuery = { ...query }
+
+    if (typeof bundle.title === "string" && bundle.title.trim()) merged.title = bundle.title
+    if (typeof bundle.description === "string") merged.description = bundle.description
+    if (typeof bundle.query === "string") merged.query = bundle.query
+    if (typeof bundle.insight === "string") merged.insight = bundle.insight
+    if (typeof bundle.llmSummary === "string") merged.llmSummary = bundle.llmSummary
+    if (typeof bundle.lastRun === "string" && bundle.lastRun.trim()) merged.lastRun = bundle.lastRun
+    if (typeof bundle.category === "string" && bundle.category.trim()) merged.category = bundle.category
+    if (typeof bundle.folderId === "string" && bundle.folderId.trim()) merged.folderId = bundle.folderId
+
+    const normalizedBundleCohort = normalizeCohortProvenance(bundle.cohort ?? bundle.cohort_provenance)
+    if (normalizedBundleCohort) {
+      merged.cohort = normalizedBundleCohort
+    }
+    const normalizedBundlePdfAnalysis = normalizePdfAnalysisSnapshot(bundle.pdfAnalysis ?? bundle.pdf_analysis)
+    if (normalizedBundlePdfAnalysis) {
+      merged.pdfAnalysis = normalizedBundlePdfAnalysis
+    }
+
+    if (bundle.chartType === "line" || bundle.chartType === "bar" || bundle.chartType === "pie") {
+      merged.chartType = bundle.chartType
+    } else if (typeof bundle.chartType === "string") {
+      const lowered = bundle.chartType.toLowerCase()
+      if (lowered === "line" || lowered === "bar" || lowered === "pie") merged.chartType = lowered
+    }
+
+    if (Array.isArray(bundle.recommendedCharts)) {
+      merged.recommendedCharts = sanitizeRecommendedCharts(bundle.recommendedCharts, query.id)
+    }
+
+    if (bundle.primaryChart != null) {
+      const normalizedPrimaryChart =
+        sanitizeRecommendedCharts([bundle.primaryChart], `${query.id}-primary`)[0] || undefined
+      if (normalizedPrimaryChart) merged.primaryChart = normalizedPrimaryChart
+    }
+
+    if (Array.isArray(bundle.stats)) {
+      merged.stats = bundle.stats as SavedQuery["stats"]
+    }
+
+    if (Array.isArray(bundle.metrics)) {
+      const metrics: SavedQuery["metrics"] = []
+      bundle.metrics.forEach((metric) => {
+        const item = (metric || {}) as Record<string, unknown>
+        const label = String(item.label || "").trim()
+        const value = String(item.value || "-").trim()
+        let trend: "up" | "down" | undefined
+        if (item.trend === "up" || item.trend === "down") trend = item.trend
+        if (!label && !value) return
+        metrics.push({ label: label || "지표", value: value || "-", trend })
+      })
+      if (metrics.length) merged.metrics = metrics
+    }
+
+    if (bundle.preview && typeof bundle.preview === "object" && !Array.isArray(bundle.preview)) {
+      const preview = bundle.preview as Record<string, unknown>
+      const columns = Array.isArray(preview.columns)
+        ? preview.columns.map((col) => String(col ?? "")).filter(Boolean)
+        : []
+      const rows = Array.isArray(preview.rows)
+        ? preview.rows.map((row) => (Array.isArray(row) ? row : []))
+        : []
+      if (columns.length) {
+        merged.preview = {
+          columns,
+          rows,
+          row_count: Number.isFinite(Number(preview.row_count)) ? Number(preview.row_count) : rows.length,
+          row_cap: Number.isFinite(Number(preview.row_cap))
+            ? Number(preview.row_cap)
+            : preview.row_cap == null
+              ? null
+              : undefined,
+        }
+      }
+    }
+
+    return merged
+  }
+
+  const fetchQueryBundles = async (queryIds: string[]) => {
+    const ids = Array.from(new Set(queryIds.map((id) => String(id || "").trim()).filter(Boolean)))
+    if (!ids.length) return {} as Record<string, unknown>
+    try {
+      const res = await fetch(apiUrl("/dashboard/queryBundles"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: dashboardUser || null, queryIds: ids }),
+      })
+      if (!res.ok) return {} as Record<string, unknown>
+      const payload = await res.json()
+      const bundles =
+        payload && typeof payload === "object" && payload.bundles && typeof payload.bundles === "object"
+          ? (payload.bundles as Record<string, unknown>)
+          : {}
+      if (Object.keys(bundles).length > 0) {
+        setQueries((prev) => prev.map((query) => (bundles[query.id] ? mergeBundleIntoQuery(query, bundles[query.id]) : query)))
+      }
+      return bundles
+    } catch {
+      return {} as Record<string, unknown>
+    }
   }
 
   const togglePin = (id: string) => {
@@ -784,13 +1405,31 @@ export function DashboardView() {
     () => previewRowsToRecords(selectedDialogQuery),
     [selectedDialogQuery]
   )
+  const selectedDialogColumns = useMemo(
+    () => selectedDialogQuery?.preview?.columns || [],
+    [selectedDialogQuery]
+  )
+  const selectedDialogRecommendedCharts = useMemo(() => {
+    if (!selectedDialogQuery) return []
+    return getRecommendedChartsForQuery(selectedDialogQuery, "detail")
+  }, [selectedDialogQuery])
+  const selectedDialogRecommendedChart = useMemo(() => {
+    if (!selectedDialogQuery) return null
+    const selectedId = detailChartSelectionByQuery[selectedDialogQuery.id]
+    return selectedDialogRecommendedCharts.find((item) => item.id === selectedId) || selectedDialogRecommendedCharts[0] || null
+  }, [detailChartSelectionByQuery, selectedDialogQuery, selectedDialogRecommendedCharts])
+  const selectedDialogStoredFigure = useMemo(
+    () => buildFigureFromStoredChart(selectedDialogRecommendedChart),
+    [selectedDialogRecommendedChart]
+  )
+
   const selectedDialogFigure = useMemo(() => {
     const q = selectedDialogQuery
     if (!q) return null
     const records = selectedDialogRecords
     if (!records.length) return null
 
-    const columns = q.preview?.columns || []
+    const columns = selectedDialogColumns
     const numericCols = columns.filter((col) => records.some((r) => isNumericValue(r[col])))
     const categoryCols = columns.filter((col) => !numericCols.includes(col))
     const title = q.title || "Saved Visualization"
@@ -918,71 +1557,62 @@ export function DashboardView() {
     }
 
     return null
-  }, [selectedDialogQuery, selectedDialogRecords])
+  }, [selectedDialogColumns, selectedDialogQuery, selectedDialogRecords])
 
-  const selectedDialogStatsRows = useMemo<DialogStatRow[]>(() => {
-    const preview = selectedDialogQuery?.preview
-    if (!preview?.columns?.length || !Array.isArray(preview.rows)) return []
-
-    return preview.columns.map((column, colIndex) => {
-      let n = 0
-      let missingCount = 0
-      let nullCount = 0
-      const numericValues: number[] = []
-
-      for (const row of preview.rows) {
-        const cell = Array.isArray(row) ? row[colIndex] : undefined
-
-        if (cell === null) {
-          nullCount += 1
-          missingCount += 1
-          continue
-        }
-        if (cell === undefined || (typeof cell === "string" && cell.trim() === "")) {
-          missingCount += 1
-          continue
-        }
-
-        n += 1
-        const numeric = toFiniteNumber(cell)
-        if (numeric != null) numericValues.push(numeric)
-      }
-
-      numericValues.sort((a, b) => a - b)
-      const min = numericValues.length ? numericValues[0] : null
-      const max = numericValues.length ? numericValues[numericValues.length - 1] : null
-      const avg = numericValues.length
-        ? numericValues.reduce((acc, value) => acc + value, 0) / numericValues.length
-        : null
-
-      return {
-        column,
-        n,
-        missingCount,
-        nullCount,
-        min,
-        q1: quantile(numericValues, 0.25),
-        median: quantile(numericValues, 0.5),
-        q3: quantile(numericValues, 0.75),
-        max,
-        avg,
-      }
-    })
-  }, [selectedDialogQuery])
+  const selectedDialogStatsRows = useMemo<DialogStatRow[]>(() => buildStatsRowsFromQuery(selectedDialogQuery), [selectedDialogQuery])
 
   const selectedDialogInsight = useMemo(() => {
     if (!selectedDialogQuery) return "선택된 쿼리가 없습니다."
-    const savedInsight = String(selectedDialogQuery.insight || "").trim()
+    const savedInsight = String(selectedDialogQuery.llmSummary || selectedDialogQuery.insight || "").trim()
     if (savedInsight) return savedInsight
     const fallback = String(selectedDialogQuery.description || "").trim()
     return fallback || "저장된 해석 데이터가 없습니다."
   }, [selectedDialogQuery])
+  const selectedDialogCohortText = useMemo(
+    () => (selectedDialogQuery ? formatCohortSourceText(selectedDialogQuery) : "코호트: 선택 안 함"),
+    [selectedDialogQuery]
+  )
+  const selectedDialogLibraryUsed = useMemo(
+    () => (selectedDialogQuery ? isLibraryUsed(selectedDialogQuery) : false),
+    [selectedDialogQuery]
+  )
+  const selectedDialogPdfAnalysis = selectedDialogQuery?.pdfAnalysis
+  const selectedDialogPdfVariables = selectedDialogPdfAnalysis?.variables || []
+  const selectedDialogPdfInclusions = selectedDialogPdfAnalysis?.inclusionExclusion || []
+  const selectedDialogAnalyzedAt = (() => {
+    const value = selectedDialogPdfAnalysis?.analyzedAt
+    if (!value) return null
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ko-KR")
+  })()
+  const selectedDialogRecommendedImage =
+    selectedDialogRecommendedChart?.pngUrl || selectedDialogRecommendedChart?.thumbnailUrl || ""
+  const selectedDialogChartTitle = `${selectedDialogQuery?.title || "쿼리"} · ${
+    selectedDialogRecommendedChart?.type || selectedDialogQuery?.chartType || "chart"
+  }`
+
+  const openPopupChart = (
+    title: string,
+    imageUrl?: string,
+    figure?: { data?: unknown[]; layout?: Record<string, unknown> }
+  ) => {
+    const normalizedImage = String(imageUrl || "").trim()
+    const hasFigure = Array.isArray(figure?.data) && figure.data.length > 0
+    if (!normalizedImage && !hasFigure) return
+    setPopupChartPayload({
+      title,
+      imageUrl: normalizedImage || undefined,
+      figure: hasFigure ? { data: figure!.data as unknown[], layout: figure?.layout || {} } : undefined,
+    })
+  }
 
   const handleOpenFolder = (folderId: string) => {
     if (folderId === ALL_FOLDER_ID) return
     setActiveFolderId(folderId)
     setOpenedFolderId(folderId)
     setIsFolderDialogOpen(true)
+    const targetIds = queries.filter((query) => query.folderId === folderId).map((query) => query.id)
+    void fetchQueryBundles(targetIds)
   }
 
   const handleToggleCompare = (id: string) => {
@@ -1004,12 +1634,13 @@ export function DashboardView() {
     setSelectedQueryIds(next)
   }
 
-  const executeComparisonQueries = (ids: Set<string>) => {
+  const executeComparisonQueries = (ids: Set<string>, bundlesById?: Record<string, unknown>) => {
     const nextResults: Record<string, { loading: boolean; error?: string; data?: any }> = {}
 
     ids.forEach(id => {
-      const query = queries.find(q => q.id === id)
-      if (!query) return
+      const baseQuery = queries.find(q => q.id === id)
+      if (!baseQuery) return
+      const query = bundlesById?.[id] ? mergeBundleIntoQuery(baseQuery, bundlesById[id]) : baseQuery
 
       if (query.preview && query.preview.columns && Array.isArray(query.preview.rows)) {
         // 저장된 프리뷰 데이터를 차트/테이블용 레코드 형식으로 변환
@@ -1039,11 +1670,15 @@ export function DashboardView() {
     setComparisonResults(prev => ({ ...prev, ...nextResults }))
   }
 
-  const handleStartCompare = () => {
+  const handleStartCompare = async () => {
+    const ids = Array.from(selectedQueryIds)
+    const bundlesById = await fetchQueryBundles(ids)
     setIsCompareOpen(true)
+    setIsCompareSelectionMode(false)
+    setCompareChartSelectionByQuery({})
     setVisibleComparisonIds(new Set(selectedQueryIds))
     setComparisonOrder(Array.from(selectedQueryIds))
-    executeComparisonQueries(selectedQueryIds)
+    executeComparisonQueries(new Set(ids), bundlesById)
   }
 
   const handleRunQuery = (query: SavedQuery) => {
@@ -1122,35 +1757,50 @@ export function DashboardView() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="rounded-xl border border-border overflow-hidden bg-secondary/10 p-4 transition-all duration-300">
-            {selectedQueryIds.size > 0 ? (
-              <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold flex items-center gap-2 text-foreground">
-                    <Scale className="w-4 h-4 text-primary" />
-                    비교할 쿼리 ({selectedQueryIds.size}/3)
-                  </h3>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setSelectedQueryIds(new Set())}
-                      className="h-7 text-xs text-muted-foreground hover:text-destructive"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 mr-1" />
-                      모두 해제
-                    </Button>
-                    <Button
-                      size="sm"
-                      className="h-7 text-xs gap-1"
-                      disabled={selectedQueryIds.size < 2}
-                      onClick={handleStartCompare}
-                    >
-                      비교하기
-                      <ArrowRight className="w-3.5 h-3.5" />
-                    </Button>
-                  </div>
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold flex items-center gap-2 text-foreground">
+                  <Scale className="w-4 h-4 text-primary" />
+                  비교할 쿼리 ({selectedQueryIds.size}/3)
+                </h3>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant={isCompareSelectionMode ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setIsCompareSelectionMode((prev) => !prev)}
+                  >
+                    {isCompareSelectionMode ? "선택 완료" : "선택하기"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSelectedQueryIds(new Set())}
+                    className="h-7 text-xs text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 mr-1" />
+                    모두 해제
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="h-7 text-xs gap-1"
+                    disabled={selectedQueryIds.size < 2}
+                    onClick={handleStartCompare}
+                  >
+                    비교하기
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </Button>
                 </div>
-                <div className="flex flex-wrap gap-2">
+              </div>
+
+              {isCompareSelectionMode && (
+                <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+                  리스트의 체크박스를 눌러 최대 3개까지 빠르게 선택할 수 있습니다.
+                </div>
+              )}
+
+              {selectedQueryIds.size > 0 ? (
+                <div className="flex flex-wrap gap-2 animate-in fade-in slide-in-from-top-2">
                   {queries
                     .filter((q) => selectedQueryIds.has(q.id))
                     .map((q) => (
@@ -1169,13 +1819,17 @@ export function DashboardView() {
                       </Badge>
                     ))}
                 </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-center text-sm text-muted-foreground gap-2 py-2">
-                <Scale className="w-4 h-4 opacity-50" />
-                <span>비교할 쿼리를 드롭다운 메뉴에서 선택해주세요 (최대 3개)</span>
-              </div>
-            )}
+              ) : (
+                <div className="flex items-center text-sm text-muted-foreground gap-2 py-1">
+                  <Scale className="w-4 h-4 opacity-50" />
+                  <span>
+                    {isCompareSelectionMode
+                      ? "체크박스로 비교 대상을 선택하세요."
+                      : "선택하기 버튼을 눌러 체크박스로 빠르게 선택하세요."}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
           {filteredQueries.length > 0 ? (
             <div className="rounded-xl border border-border overflow-hidden">
@@ -1202,6 +1856,7 @@ export function DashboardView() {
                     getChartIcon={getChartIcon}
                     selected={selectedQueryIds.has(query.id)}
                     onToggleCompare={handleToggleCompare}
+                    selectionMode={isCompareSelectionMode}
                   />
                 ))}
               </div>
@@ -1224,27 +1879,19 @@ export function DashboardView() {
           if (!open) {
             setVisibleComparisonIds(new Set())
             setComparisonOrder([])
+            setCompareChartSelectionByQuery({})
           }
         }}
       >
-        <DialogContent className="!left-0 !top-0 !translate-x-0 !translate-y-0 !w-screen !h-screen !max-w-none rounded-none">
-          <DialogHeader>
+        <DialogContent className="!w-[72vw] !max-w-[72vw] h-[min(92vh,980px)] p-0 gap-0 flex flex-col overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-4 border-b border-border shrink-0">
             <DialogTitle>상세 비교 분석</DialogTitle>
             <DialogDescription>선택한 항목의 실행 결과를 비교합니다.</DialogDescription>
           </DialogHeader>
-          <div className="mt-4 h-[calc(100%-4rem)] flex flex-col min-h-0">
+          <div className="flex-1 min-h-0 flex flex-col px-6 pb-6 pt-4 overflow-hidden">
             <div className="flex items-center justify-between gap-2 mb-3">
               <Badge variant="secondary">{comparisonOrder.length}개 쿼리</Badge>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={comparisonOrder.length === 0}
-                  onClick={() => executeComparisonQueries(new Set(comparisonOrder))}
-                >
-                  <Play className="w-3.5 h-3.5 mr-1" />
-                  전체 재실행
-                </Button>
                 <Button variant="ghost" size="sm" onClick={() => setIsCompareOpen(false)}>
                   <X className="w-4 h-4 mr-1" />
                   닫기
@@ -1310,41 +1957,61 @@ export function DashboardView() {
                     })}
                 </div>
 
-                <div
-                  className={cn(
-                    "grid gap-4 mt-4 overflow-x-auto",
-                    visibleComparisonIds.size === 1 && "grid-cols-1",
-                    visibleComparisonIds.size === 2 && "grid-cols-1 lg:grid-cols-2",
-                    visibleComparisonIds.size >= 3 && "grid-cols-1 lg:grid-cols-2 xl:grid-cols-3"
-                  )}
-                >
-                  {comparisonOrder
-                    .filter((id) => visibleComparisonIds.has(id))
-                    .map((id) => queries.find((q) => q.id === id))
-                    .filter((q): q is SavedQuery => !!q)
-                    .map((q) => {
+                <div className="flex-1 min-h-0 mt-4 overflow-y-auto pr-1">
+                  <div
+                    className={cn(
+                      "grid gap-4 overflow-x-auto",
+                      visibleComparisonIds.size === 1 && "grid-cols-1",
+                      visibleComparisonIds.size === 2 && "grid-cols-1 lg:grid-cols-2",
+                      visibleComparisonIds.size >= 3 && "grid-cols-1 lg:grid-cols-2 xl:grid-cols-3"
+                    )}
+                  >
+                    {comparisonOrder
+                      .filter((id) => visibleComparisonIds.has(id))
+                      .map((id) => queries.find((q) => q.id === id))
+                      .filter((q): q is SavedQuery => !!q)
+                      .map((q) => {
                       const result = comparisonResults[q.id] || { loading: false }
                       const records = result.data ? result.data.records : []
                       const columns = result.data ? result.data.columns : []
-
-                      let chartData = null
-                      if (result.data && records.length > 0) {
-                        const numCols = columns.filter((c: string) => records.some((r: any) => typeof r[c] === "number"))
-                        const catCols = columns.filter((c: string) => !numCols.includes(c))
-                        if (numCols.length > 0 && catCols.length > 0) {
-                          chartData = [{
-                            type: "bar",
-                            x: records.map((r: any) => r[catCols[0]]),
-                            y: records.map((r: any) => r[numCols[0]]),
-                          }]
-                        }
-                      }
+                      const recommendedCharts = getRecommendedChartsForQuery(q, "compare")
+                      const selectedRecommendedId = compareChartSelectionByQuery[q.id]
+                      const selectedRecommendedChart =
+                        recommendedCharts.find((item) => item.id === selectedRecommendedId) ||
+                        recommendedCharts[0] ||
+                        null
+                      const selectedRecommendedImage =
+                        selectedRecommendedChart?.pngUrl || selectedRecommendedChart?.thumbnailUrl || ""
+                      const compareChartTitle = `${q.title} · ${selectedRecommendedChart?.type || q.chartType}`
+                      const storedRecommendedFigure = buildFigureFromStoredChart(selectedRecommendedChart)
+                      const chartFigure = selectedRecommendedChart ? storedRecommendedFigure : null
+                      const compareSummary = String(q.llmSummary || q.insight || q.description || "").trim() || "요약 정보가 없습니다."
+                      const compareStatsRows = buildStatsRowsFromQuery(q)
+                      const compareCohortText = formatCohortSourceText(q)
+                      const compareLibraryUsed = isLibraryUsed(q)
+                      const comparePdfAnalysis = q.pdfAnalysis
+                      const comparePdfVariables = comparePdfAnalysis?.variables || []
+                      const comparePdfInclusions = comparePdfAnalysis?.inclusionExclusion || []
+                      const compareAnalyzedAt = (() => {
+                        const value = comparePdfAnalysis?.analyzedAt
+                        if (!value) return null
+                        const date = new Date(value)
+                        return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ko-KR")
+                      })()
 
                       return (
                         <Card key={q.id} className="border border-border/60 shadow-md overflow-hidden flex flex-col h-full min-h-[500px]">
                           <CardHeader className="bg-secondary/20 py-3 px-4 flex flex-row items-center justify-between shrink-0">
                             <div className="flex items-center gap-2 min-w-0">
                               <Badge variant="outline" className="shrink-0">{q.category}</Badge>
+                              <Badge variant="outline" className="shrink-0 text-[10px]">
+                                {cohortSourceBadgeText(q)}
+                              </Badge>
+                              {compareLibraryUsed && (
+                                <Badge variant="secondary" className="shrink-0 text-[10px]">
+                                  라이브러리 사용
+                                </Badge>
+                              )}
                               <span className="font-semibold text-sm truncate" title={q.title}>{q.title}</span>
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
@@ -1367,20 +2034,89 @@ export function DashboardView() {
                               </div>
                             ) : result.data ? (
                               <div className="flex flex-col h-full min-h-0 divide-y divide-border">
-                                <div className="h-[250px] p-2 bg-white">
-                                  {chartData ? (
-                                    <Plot
-                                      data={chartData}
-                                      layout={{ autosize: true, margin: { l: 30, r: 10, t: 10, b: 30 } }}
-                                      config={{ responsive: true, displayModeBar: false }}
-                                      style={{ width: "100%", height: "100%" }}
-                                      useResizeHandler
-                                    />
-                                  ) : (
-                                    <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
-                                      시각화 가능한 데이터가 없습니다.
+                                <div className="h-[250px] p-2 bg-white flex flex-col gap-2">
+                                  {recommendedCharts.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {recommendedCharts.map((chart, index) => {
+                                        const selected = selectedRecommendedChart?.id === chart.id
+                                        return (
+                                          <Button
+                                            key={chart.id}
+                                            size="sm"
+                                            variant={selected ? "default" : "outline"}
+                                            className="h-6 px-2 text-[10px]"
+                                            onClick={() =>
+                                              setCompareChartSelectionByQuery((prev) => ({
+                                                ...prev,
+                                                [q.id]: chart.id,
+                                              }))
+                                            }
+                                          >
+                                            추천 {index + 1} · {chart.type}
+                                          </Button>
+                                        )
+                                      })}
                                     </div>
                                   )}
+                                  <div className="flex-1 min-h-0 relative">
+                                    {(selectedRecommendedImage || chartFigure) && (
+                                      <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="secondary"
+                                        className="absolute top-1.5 right-1.5 z-10 h-7 w-7 shadow-sm"
+                                        onClick={() => openPopupChart(compareChartTitle, selectedRecommendedImage, chartFigure || undefined)}
+                                        aria-label="차트 확대 보기"
+                                      >
+                                        <Maximize2 className="w-3.5 h-3.5" />
+                                      </Button>
+                                    )}
+                                    {selectedRecommendedImage ? (
+                                      <button
+                                        type="button"
+                                        className="w-full h-full cursor-zoom-in rounded border border-border/60 overflow-hidden"
+                                        onClick={() => openPopupChart(compareChartTitle, selectedRecommendedImage)}
+                                        aria-label={`${q.title} 추천 차트 확대`}
+                                      >
+                                        <img
+                                          src={selectedRecommendedImage}
+                                          alt={`${q.title} 추천 차트`}
+                                          className="w-full h-full object-contain"
+                                        />
+                                      </button>
+                                    ) : chartFigure ? (
+                                      <div
+                                        role="button"
+                                        tabIndex={0}
+                                        className="h-full rounded border border-border/60 p-0.5 cursor-zoom-in"
+                                        onClick={() => openPopupChart(compareChartTitle, "", chartFigure || undefined)}
+                                        onKeyDown={(event) => {
+                                          if (event.key === "Enter" || event.key === " ") {
+                                            event.preventDefault()
+                                            openPopupChart(compareChartTitle, "", chartFigure || undefined)
+                                          }
+                                        }}
+                                      >
+                                        <Plot
+                                          data={Array.isArray(chartFigure.data) ? chartFigure.data : []}
+                                          layout={enhancePopupPlotLayout(
+                                            chartFigure.layout || { autosize: true, margin: { l: 30, r: 10, t: 10, b: 30 } }
+                                          )}
+                                          config={{ responsive: true, displayModeBar: false }}
+                                          style={{ width: "100%", height: "100%" }}
+                                          useResizeHandler
+                                        />
+                                      </div>
+                                    ) : selectedRecommendedChart ? (
+                                      <div className="h-full flex items-center justify-center text-xs text-muted-foreground text-center px-3">
+                                        저장 당시 추천 시각화 이미지/figure가 없습니다.
+                                      </div>
+                                    ) : (
+                                      <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
+                                        시각화 가능한 데이터가 없습니다.
+                                      </div>
+                                    )}
+                                  </div>
                                 </div>
 
                                 <div className="bg-secondary/10 border-b border-border">
@@ -1397,20 +2133,154 @@ export function DashboardView() {
                                   </details>
                                 </div>
 
-                                <div className="flex-1 min-h-0 overflow-auto bg-white relative">
-                                  <table className="w-full text-xs text-left border-collapse">
-                                    <thead className="bg-secondary/30 sticky top-0 z-10">
+                                <div className="bg-secondary/10 border-b border-border">
+                                  <details className="group">
+                                    <summary className="flex items-center gap-2 p-2 cursor-pointer text-[10px] font-semibold text-muted-foreground hover:text-foreground transition-colors select-none">
+                                      <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+                                      요약 보기
+                                    </summary>
+                                    <div className="px-2 pb-2">
+                                      <div className="text-xs rounded bg-secondary/50 p-2 whitespace-pre-wrap leading-relaxed text-muted-foreground">
+                                        {compareSummary}
+                                      </div>
+                                    </div>
+                                  </details>
+                                </div>
+
+                                <div className="bg-secondary/10 border-b border-border">
+                                  <details className="group">
+                                    <summary className="flex items-center gap-2 p-2 cursor-pointer text-[10px] font-semibold text-muted-foreground hover:text-foreground transition-colors select-none">
+                                      <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+                                      코호트/PDF 분석 보기
+                                    </summary>
+                                    <div className="px-2 pb-2 space-y-2">
+                                      <div className="rounded border border-border/60 bg-secondary/40 p-2 text-[11px] text-muted-foreground">
+                                        {compareCohortText}
+                                      </div>
+                                      {comparePdfAnalysis ? (
+                                        <>
+                                          {compareAnalyzedAt && (
+                                            <div className="text-[11px] text-muted-foreground">
+                                              분석 시각: {compareAnalyzedAt}
+                                            </div>
+                                          )}
+                                          <div className="rounded border border-border/60 bg-secondary/30 p-2 text-[11px] whitespace-pre-wrap leading-relaxed">
+                                            {comparePdfAnalysis.summaryKo || "저장된 논문 요약이 없습니다."}
+                                          </div>
+                                          <div className="rounded border border-border/60 bg-secondary/30 p-2 text-[11px] whitespace-pre-wrap leading-relaxed">
+                                            {comparePdfAnalysis.criteriaSummaryKo || "저장된 코호트 기준 요약이 없습니다."}
+                                          </div>
+                                          {comparePdfVariables.length > 0 && (
+                                            <div className="flex flex-wrap gap-1">
+                                              {comparePdfVariables.map((item) => (
+                                                <Badge key={item} variant="outline" className="text-[10px]">
+                                                  {item}
+                                                </Badge>
+                                              ))}
+                                            </div>
+                                          )}
+                                          {comparePdfInclusions.length > 0 && (
+                                            <div className="max-h-32 overflow-auto rounded border border-border/60">
+                                              <table className="w-full text-[10px]">
+                                                <thead className="bg-secondary/40">
+                                                  <tr>
+                                                    <th className="text-left p-1.5 font-medium">항목</th>
+                                                    <th className="text-left p-1.5 font-medium">정의</th>
+                                                  </tr>
+                                                </thead>
+                                                <tbody>
+                                                  {comparePdfInclusions.map((item) => (
+                                                    <tr key={item.id} className="border-t border-border/60 align-top">
+                                                      <td className="p-1.5 whitespace-nowrap">{item.title}</td>
+                                                      <td className="p-1.5 whitespace-pre-wrap break-words">{item.operationalDefinition}</td>
+                                                    </tr>
+                                                  ))}
+                                                </tbody>
+                                              </table>
+                                            </div>
+                                          )}
+                                        </>
+                                      ) : (
+                                        <div className="text-[10px] rounded border border-dashed border-border p-2 text-muted-foreground">
+                                          저장된 PDF 분석 데이터가 없습니다.
+                                        </div>
+                                      )}
+                                    </div>
+                                  </details>
+                                </div>
+
+                                <div className="bg-secondary/10 border-b border-border">
+                                  <details className="group">
+                                    <summary className="flex items-center gap-2 p-2 cursor-pointer text-[10px] font-semibold text-muted-foreground hover:text-foreground transition-colors select-none">
+                                      <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+                                      통계 보기
+                                    </summary>
+                                    <div className="px-2 pb-2">
+                                      {compareStatsRows.length ? (
+                                        <div className="rounded border border-border overflow-auto max-h-[180px]">
+                                          <table className="w-full text-[10px]">
+                                            <thead className="bg-secondary/40">
+                                              <tr>
+                                                <th className="text-left p-1.5 font-medium">컬럼</th>
+                                                <th className="text-right p-1.5 font-medium">N</th>
+                                                <th className="text-right p-1.5 font-medium">결측치</th>
+                                                <th className="text-right p-1.5 font-medium">NULL</th>
+                                                <th className="text-right p-1.5 font-medium">MIN</th>
+                                                <th className="text-right p-1.5 font-medium">Q1</th>
+                                                <th className="text-right p-1.5 font-medium">중앙값</th>
+                                                <th className="text-right p-1.5 font-medium">Q3</th>
+                                                <th className="text-right p-1.5 font-medium">MAX</th>
+                                                <th className="text-right p-1.5 font-medium">평균</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {compareStatsRows.map((row) => (
+                                                <tr key={row.column} className="border-t border-border/60">
+                                                  <td className="p-1.5">{row.column}</td>
+                                                  <td className="p-1.5 text-right">{row.n.toLocaleString()}</td>
+                                                  <td className="p-1.5 text-right">{row.missingCount.toLocaleString()}</td>
+                                                  <td className="p-1.5 text-right">{row.nullCount.toLocaleString()}</td>
+                                                  <td className="p-1.5 text-right">{formatStatNumber(row.min)}</td>
+                                                  <td className="p-1.5 text-right">{formatStatNumber(row.q1)}</td>
+                                                  <td className="p-1.5 text-right">{formatStatNumber(row.median)}</td>
+                                                  <td className="p-1.5 text-right">{formatStatNumber(row.q3)}</td>
+                                                  <td className="p-1.5 text-right">{formatStatNumber(row.max)}</td>
+                                                  <td className="p-1.5 text-right">{formatStatNumber(row.avg)}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      ) : (
+                                        <div className="text-[10px] rounded border border-dashed border-border p-2 text-muted-foreground">
+                                          통계 정보가 없습니다.
+                                        </div>
+                                      )}
+                                    </div>
+                                  </details>
+                                </div>
+
+                                <div className="flex-1 min-h-0 overflow-auto bg-white relative border-t border-border/50">
+                                  <table className="w-full text-xs text-left border-separate border-spacing-0">
+                                    <thead className="bg-white">
                                       <tr>
                                         {columns.map((col: string) => (
-                                          <th key={col} className="p-2 font-medium border-b border-border whitespace-nowrap text-muted-foreground">{col}</th>
+                                          <th
+                                            key={col}
+                                            className="sticky top-0 z-30 bg-white p-2 font-medium border-b border-border whitespace-nowrap text-muted-foreground shadow-[inset_0_-1px_0_hsl(var(--border))]"
+                                          >
+                                            {col}
+                                          </th>
                                         ))}
                                       </tr>
                                     </thead>
                                     <tbody>
                                       {records.map((row: any, idx: number) => (
-                                        <tr key={idx} className="border-b border-border/50 hover:bg-secondary/5">
+                                        <tr key={idx} className="hover:bg-secondary/5">
                                           {columns.map((col: string) => (
-                                            <td key={`${idx}-${col}`} className="p-2 truncate max-w-[120px]">{String(row[col])}</td>
+                                            <td key={`${idx}-${col}`} className="p-2 truncate max-w-[120px] border-b border-border/50">
+                                              {String(row[col])}
+                                            </td>
                                           ))}
                                         </tr>
                                       ))}
@@ -1427,6 +2297,7 @@ export function DashboardView() {
                         </Card>
                       )
                     })}
+                  </div>
                 </div>
               </>
             ) : (
@@ -1442,12 +2313,12 @@ export function DashboardView() {
         setIsFolderDialogOpen(open)
         if (!open) setOpenedFolderId(null)
       }}>
-        <DialogContent className="!left-0 !top-0 !translate-x-0 !translate-y-0 !w-screen !h-screen !max-w-none rounded-none">
-          <DialogHeader>
+        <DialogContent className="!w-[72vw] !max-w-[72vw] h-[min(92vh,980px)] p-0 gap-0 flex flex-col overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-4 border-b border-border shrink-0">
             <DialogTitle>{openedFolderName || "폴더"}</DialogTitle>
             <DialogDescription>폴더 안 쿼리를 한눈에 확인합니다.</DialogDescription>
           </DialogHeader>
-          <div className="mt-4 h-[calc(100%-4rem)] flex flex-col">
+          <div className="flex-1 min-h-0 flex flex-col px-6 pb-6 pt-4 overflow-hidden">
             <div className="flex items-center justify-between mb-3">
               <Badge variant="secondary">
                 {dialogQueries.length}개 쿼리
@@ -1481,6 +2352,87 @@ export function DashboardView() {
                       실행
                     </Button>
                   </div>
+
+                  <Card className="border border-border/60">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm">코호트 출처</CardTitle>
+                      <CardDescription className="text-xs">PDF/라이브러리 provenance 및 저장된 PDF 분석 정보를 확인합니다.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge variant="outline" className="text-[11px]">
+                          {cohortSourceBadgeText(selectedDialogQuery)}
+                        </Badge>
+                        {selectedDialogLibraryUsed && (
+                          <Badge variant="secondary" className="text-[11px]">
+                            라이브러리 사용
+                          </Badge>
+                        )}
+                        {selectedDialogPdfAnalysis?.pdfName && (
+                          <Badge variant="outline" className="text-[11px] max-w-full truncate">
+                            PDF: {selectedDialogPdfAnalysis.pdfName}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="rounded border border-border/60 bg-secondary/20 p-2 text-xs text-muted-foreground">
+                        {selectedDialogCohortText}
+                      </div>
+                      <details className="group rounded border border-border/60 bg-background/70">
+                        <summary className="flex items-center gap-2 px-2 py-1.5 cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground select-none">
+                          <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+                          PDF LLM 분석 보기
+                        </summary>
+                        <div className="px-2 pb-2 space-y-2">
+                          {selectedDialogPdfAnalysis ? (
+                            <>
+                              {selectedDialogAnalyzedAt && (
+                                <div className="text-[11px] text-muted-foreground">
+                                  분석 시각: {selectedDialogAnalyzedAt}
+                                </div>
+                              )}
+                              <div className="text-xs rounded border border-border/60 bg-secondary/10 p-2 whitespace-pre-wrap leading-relaxed">
+                                {selectedDialogPdfAnalysis.summaryKo || "저장된 논문 요약이 없습니다."}
+                              </div>
+                              <div className="text-xs rounded border border-border/60 bg-secondary/10 p-2 whitespace-pre-wrap leading-relaxed">
+                                {selectedDialogPdfAnalysis.criteriaSummaryKo || "저장된 코호트 기준 요약이 없습니다."}
+                              </div>
+                              {selectedDialogPdfVariables.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {selectedDialogPdfVariables.map((item) => (
+                                    <Badge key={item} variant="outline" className="text-[10px]">
+                                      {item}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              )}
+                              {selectedDialogPdfInclusions.length > 0 && (
+                                <div className="max-h-40 overflow-auto rounded border border-border/60">
+                                  <table className="w-full text-[11px]">
+                                    <thead className="bg-secondary/30">
+                                      <tr>
+                                        <th className="text-left p-1.5 font-medium">항목</th>
+                                        <th className="text-left p-1.5 font-medium">정의</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {selectedDialogPdfInclusions.map((item) => (
+                                        <tr key={item.id} className="border-t border-border/60 align-top">
+                                          <td className="p-1.5 whitespace-nowrap">{item.title}</td>
+                                          <td className="p-1.5 whitespace-pre-wrap break-words">{item.operationalDefinition}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <div className="text-[11px] text-muted-foreground">저장된 PDF 분석 데이터가 없습니다.</div>
+                          )}
+                        </div>
+                      </details>
+                    </CardContent>
+                  </Card>
 
                   <Card className="border border-border/60">
                     <CardHeader className="pb-2">
@@ -1539,15 +2491,116 @@ export function DashboardView() {
                       <CardDescription className="text-xs">저장된 결과 기반 Plotly 차트</CardDescription>
                     </CardHeader>
                     <CardContent>
-                      {selectedDialogFigure ? (
-                        <div className="h-[340px]">
+                      {selectedDialogRecommendedCharts.length > 0 && selectedDialogQuery && (
+                        <div className="mb-3 flex flex-wrap gap-1.5">
+                          {selectedDialogRecommendedCharts.map((chart, index) => {
+                            const selected = selectedDialogRecommendedChart?.id === chart.id
+                            return (
+                              <Button
+                                key={chart.id}
+                                size="sm"
+                                variant={selected ? "default" : "outline"}
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() =>
+                                  setDetailChartSelectionByQuery((prev) => ({
+                                    ...prev,
+                                    [selectedDialogQuery.id]: chart.id,
+                                  }))
+                                }
+                              >
+                                추천 {index + 1} · {chart.type}
+                              </Button>
+                            )
+                          })}
+                        </div>
+                      )}
+
+                      {selectedDialogRecommendedImage ? (
+                        <div className="h-[340px] rounded-lg border border-border bg-white overflow-hidden relative">
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="secondary"
+                            className="absolute top-2 right-2 z-10 h-7 w-7 shadow-sm"
+                            onClick={() =>
+                              openPopupChart(
+                                selectedDialogChartTitle,
+                                selectedDialogRecommendedImage
+                              )
+                            }
+                            aria-label="차트 확대 보기"
+                          >
+                            <Maximize2 className="w-3.5 h-3.5" />
+                          </Button>
+                          <button
+                            type="button"
+                            className="w-full h-full cursor-zoom-in"
+                            onClick={() =>
+                              openPopupChart(
+                                selectedDialogChartTitle,
+                                selectedDialogRecommendedImage
+                              )
+                            }
+                            aria-label="추천 차트 확대"
+                          >
+                            <img
+                              src={selectedDialogRecommendedImage}
+                              alt="추천 차트"
+                              className="w-full h-full object-contain"
+                            />
+                          </button>
+                        </div>
+                      ) : selectedDialogStoredFigure ? (
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          className="h-[340px] rounded-lg border border-border bg-white p-0.5 cursor-zoom-in relative"
+                          onClick={() =>
+                            openPopupChart(
+                              selectedDialogChartTitle,
+                              "",
+                              selectedDialogStoredFigure
+                            )
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault()
+                              openPopupChart(
+                                selectedDialogChartTitle,
+                                "",
+                                selectedDialogStoredFigure
+                              )
+                            }
+                          }}
+                        >
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="secondary"
+                            className="absolute top-2 right-2 z-10 h-7 w-7 shadow-sm"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              openPopupChart(
+                                selectedDialogChartTitle,
+                                "",
+                                selectedDialogStoredFigure
+                              )
+                            }}
+                            aria-label="차트 확대 보기"
+                          >
+                            <Maximize2 className="w-3.5 h-3.5" />
+                          </Button>
                           <Plot
-                            data={Array.isArray(selectedDialogFigure.data) ? selectedDialogFigure.data : []}
-                            layout={selectedDialogFigure.layout || {}}
+                            data={Array.isArray(selectedDialogStoredFigure.data) ? selectedDialogStoredFigure.data : []}
+                            layout={enhancePopupPlotLayout(selectedDialogStoredFigure.layout || {})}
                             config={{ responsive: true, displaylogo: false, editable: true }}
                             style={{ width: "100%", height: "100%" }}
                             useResizeHandler
                           />
+                        </div>
+                      ) : selectedDialogRecommendedChart ? (
+                        <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
+                          저장 당시 추천 시각화 이미지/figure가 없습니다.
                         </div>
                       ) : (
                         <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
@@ -1575,6 +2628,45 @@ export function DashboardView() {
                 </div>
               )}
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(popupChartPayload)}
+        onOpenChange={(open: boolean) => {
+          if (!open) setPopupChartPayload(null)
+        }}
+      >
+        <DialogContent className="!w-[96vw] !max-w-[96vw] h-[92vh] p-0 gap-0 flex flex-col overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-4 border-b border-border shrink-0">
+            <DialogTitle>{popupChartPayload?.title || "차트 확대 보기"}</DialogTitle>
+            <DialogDescription>선택한 시각화를 크게 확인할 수 있습니다.</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 p-4 bg-card/30">
+            {popupChartPayload?.imageUrl ? (
+              <div className="w-full h-full rounded-lg border border-border bg-white overflow-hidden">
+                <img
+                  src={popupChartPayload.imageUrl}
+                  alt={popupChartPayload.title}
+                  className="w-full h-full object-contain"
+                />
+              </div>
+            ) : popupChartPayload?.figure ? (
+              <div className="w-full h-full rounded-lg border border-border bg-white p-2">
+                <Plot
+                  data={Array.isArray(popupChartPayload.figure.data) ? popupChartPayload.figure.data : []}
+                  layout={enhancePopupPlotLayout(popupChartPayload.figure.layout || {})}
+                  config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+                  style={{ width: "100%", height: "100%" }}
+                  useResizeHandler
+                />
+              </div>
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
+                확대할 시각화가 없습니다.
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>
@@ -1700,18 +2792,20 @@ function FolderCard({ folder, active, onSelect, onOpen, onRename, onDelete }: Fo
   return (
     <Card
       className={cn(
-        "rounded-2xl border bg-card transition-colors aspect-[3.5/1] w-full",
+        "relative overflow-hidden rounded-2xl border bg-card transition-colors aspect-[3.5/1] w-full gap-0 py-0",
         active ? "border-primary/50 bg-primary/5" : "hover:border-primary/30"
       )}
     >
       <CardContent className="p-4 h-full flex items-center">
-        <div className="flex items-start gap-2 w-full">
-          <button
-            type="button"
-            className="flex-1 text-left min-w-0"
-            onClick={onSelect}
-            onDoubleClick={onOpen}
-          >
+        <button
+          type="button"
+          className="absolute inset-0 z-10 cursor-pointer"
+          aria-label={`${folder.name} 폴더 선택`}
+          onClick={onSelect}
+          onDoubleClick={onOpen}
+        />
+        <div className="relative z-0 flex items-start gap-2 w-full pointer-events-none">
+          <div className="flex-1 text-left min-w-0 select-none">
             <div className="flex items-center gap-2 min-w-0">
               <div className="w-9 h-9 rounded-lg bg-secondary flex items-center justify-center shrink-0">
                 {folder.id === ALL_FOLDER_ID ? (
@@ -1725,8 +2819,10 @@ function FolderCard({ folder, active, onSelect, onOpen, onRename, onDelete }: Fo
                 <div className="text-xs text-muted-foreground">{folder.count}개 쿼리</div>
               </div>
             </div>
-          </button>
-          <div className="ml-auto flex items-center gap-2 shrink-0">
+          </div>
+          <div
+            className="relative z-20 ml-auto flex items-center gap-2 shrink-0 pointer-events-auto"
+          >
             {folder.pinnedCount > 0 && (
               <Badge variant="outline" className="text-[10px] shrink-0">
                 <Pin className="w-3 h-3 mr-1" />
@@ -1777,6 +2873,7 @@ interface DashboardQueryRowProps {
   getChartIcon: (type: string) => ReactNode
   selected: boolean
   onToggleCompare: (id: string) => void
+  selectionMode: boolean
 }
 
 function DashboardQueryRow({
@@ -1792,6 +2889,7 @@ function DashboardQueryRow({
   getChartIcon,
   selected,
   onToggleCompare,
+  selectionMode,
 }: DashboardQueryRowProps) {
   const displayTitle = formatDashboardTitle(query)
   const displayLastRun = formatDashboardLastRun(query.lastRun)
@@ -1805,6 +2903,14 @@ function DashboardQueryRow({
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2 min-w-0">
+          {selectionMode && (
+            <Checkbox
+              checked={selected}
+              onCheckedChange={() => onToggleCompare(query.id)}
+              aria-label={`${displayTitle} 비교 선택`}
+              className="shrink-0"
+            />
+          )}
           <div className="w-8 h-8 rounded-lg bg-secondary flex items-center justify-center shrink-0">
             {getChartIcon(query.chartType)}
           </div>

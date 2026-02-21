@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends libnsl2 \
+  && apt-get install -y --no-install-recommends libnsl2 fonts-noto-cjk \
   && (apt-get install -y --no-install-recommends libaio1 \
     || apt-get install -y --no-install-recommends libaio1t64) \
   && if [ ! -e /lib/x86_64-linux-gnu/libaio.so.1 ]; then \

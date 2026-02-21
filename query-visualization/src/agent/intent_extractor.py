@@ -19,6 +19,13 @@ from src.utils.logging import log_event
 _DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_DOTENV_PATH)
 
+_AGE_QUERY_TOKENS = ("연령", "나이", "age")
+_GENDER_QUERY_TOKENS = ("성별", "gender", "sex")
+_SURVIVAL_QUERY_TOKENS = ("생존", "사망", "mortality", "survival", "death", "alive", "dead", "expire")
+_AGE_COLUMN_TOKENS = ("age_group", "age band", "age_band", "age", "연령", "나이")
+_GENDER_COLUMN_TOKENS = ("gender", "sex", "성별")
+_SURVIVAL_COLUMN_TOKENS = ("survival", "alive", "dead", "mortality", "death", "expire", "status", "outcome", "사망", "생존")
+
 
 # 입력: user_query, df_schema
 # 출력: Dict[str, Any]
@@ -42,6 +49,51 @@ def _mentioned_columns_in_query(user_query: str, columns: List[str]) -> List[str
             hits.append((idx, col))
     hits.sort(key=lambda item: item[0])
     return [col for _, col in hits]
+
+
+def _pick_semantic_column(columns: List[str], tokens: tuple[str, ...], *, exclude: Optional[List[str]] = None) -> Optional[str]:
+    blocked = {str(col).lower() for col in (exclude or [])}
+    for col in columns:
+        lower = col.lower()
+        if lower in blocked:
+            continue
+        if any(token in lower for token in tokens):
+            return col
+    return None
+
+
+def _extract_multisplit_slots(
+    user_query: str,
+    columns: List[str],
+    seed_axis: Optional[str] = None,
+) -> Dict[str, Optional[str]]:
+    q = (user_query or "").lower()
+    wants_age = any(token in q for token in _AGE_QUERY_TOKENS)
+    wants_gender = any(token in q for token in _GENDER_QUERY_TOKENS)
+    wants_survival = any(token in q for token in _SURVIVAL_QUERY_TOKENS)
+    if sum([wants_age, wants_gender, wants_survival]) < 2:
+        return {"multisplit_axis": None, "multisplit_group": None, "multisplit_secondary_group": None}
+
+    age_col = _pick_semantic_column(columns, _AGE_COLUMN_TOKENS)
+    gender_col = _pick_semantic_column(columns, _GENDER_COLUMN_TOKENS, exclude=[age_col] if age_col else None)
+    survival_col = _pick_semantic_column(
+        columns,
+        _SURVIVAL_COLUMN_TOKENS,
+        exclude=[age_col, gender_col] if age_col or gender_col else None,
+    )
+
+    axis = age_col or seed_axis
+    group = gender_col if wants_gender else None
+    secondary_group = survival_col if wants_survival else None
+    if axis == group:
+        group = None
+    if axis == secondary_group or group == secondary_group:
+        secondary_group = None
+    return {
+        "multisplit_axis": axis,
+        "multisplit_group": group,
+        "multisplit_secondary_group": secondary_group,
+    }
 
 
 def _numeric_columns_from_schema(
@@ -206,6 +258,10 @@ def _infer_chart_preference(user_query: str) -> str | None:
     q = (user_query or "").lower()
     if any(token in q for token in ("histogram", "hist", "히스토그램", "히스토")):
         return "hist"
+    if any(token in q for token in ("violin", "바이올린")):
+        return "violin"
+    if any(token in q for token in ("area", "area chart", "면적", "영역")):
+        return "area"
     if any(
         token in q
         for token in (
@@ -381,6 +437,7 @@ def extract_intent(
             group_var = None
         if analysis_intent == "trend" and group_var and time_var and group_var.lower() == time_var.lower():
             group_var = None
+        multisplit_slots = _extract_multisplit_slots(user_query, columns, seed_axis=group_var)
         recommended_chart = (chart_preference or llm_result.recommended_chart or "").strip() or None
 
         log_event("intent.llm.success",
@@ -393,6 +450,7 @@ def extract_intent(
             "group_var": group_var,
             "agg": llm_result.agg,
             "recommended_chart": recommended_chart,
+            **multisplit_slots,
             "extra_analyses": [],
             "user_query": user_query,
         }
@@ -426,6 +484,7 @@ def extract_intent(
             primary_outcome=primary_outcome,
             time_var=time_var,
         )
+        multisplit_slots = _extract_multisplit_slots(user_query, columns, seed_axis=group_var)
 
         return {
             "analysis_intent": analysis_intent,
@@ -433,6 +492,7 @@ def extract_intent(
             "time_var": time_var,
             "group_var": group_var,
             "recommended_chart": chart_preference,
+            **multisplit_slots,
             "extra_analyses": [],
             "user_query": user_query,
         }

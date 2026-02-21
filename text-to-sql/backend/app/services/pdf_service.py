@@ -6,6 +6,7 @@ import logging
 import traceback
 import hashlib
 from pathlib import Path
+from datetime import datetime
 from openai import AsyncOpenAI
 import re
 import base64
@@ -15,6 +16,24 @@ from typing import Any
 from app.services.runtime.state_store import get_state_store
 from app.services.oracle.executor import execute_sql
 from app.services.agents.orchestrator import run_oneshot
+from app.services.cohort_adaptive import run_adaptive_extraction
+from app.services.cohort_adaptive.upgrade_rules import (
+    should_upgrade_to_accurate,
+    should_upgrade_to_strict,
+)
+from app.services.cohort_ambiguity import resolve_ambiguities
+from app.services.cohort_spec import (
+    enforce_condition_evidence,
+    validate_cohort_spec,
+    validate_supported_types,
+)
+from app.services.cohort_spec.type_catalog import (
+    has_icd_shorthand_risk,
+    has_measurement_required,
+)
+from app.services.cohort_sql_compiler import apply_oracle_compiler_guards
+from app.services.cohort_validate.report import build_validation_markdown
+from app.services.cohort_validate.validator import summarize_validation
 
 logger = logging.getLogger(__name__)
 # 로깅 설정을 보장하기 위해 출력 핸들러 강제 추가
@@ -112,6 +131,13 @@ def _env_mode(name: str, default: str, allowed: set[str]) -> str:
     return value if value in allowed else default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 _PDF_MAX_PAGES = _env_int("PDF_MAX_PAGES", 7, minimum=1, maximum=50)
 _PDF_MAX_TEXT_CHARS = _env_int("PDF_MAX_TEXT_CHARS", 22000, minimum=4000, maximum=120000)
 _PDF_ASSET_TABLE_ROWS = _env_int("PDF_ASSET_TABLE_ROWS", 20, minimum=1, maximum=100)
@@ -122,6 +148,19 @@ _PDF_RAG_REFINEMENT_MODE = _env_mode(
     "auto",
     {"auto", "always", "off"},
 )
+_PDF_SNIPPET_MAX_COUNT = _env_int("PDF_SNIPPET_MAX_COUNT", 30, minimum=5, maximum=120)
+_PDF_VALIDATION_ENABLED = _env_bool("PDF_VALIDATION_ENABLED", True)
+_PDF_VALIDATION_SAMPLE_ROWS = _env_int("PDF_VALIDATION_SAMPLE_ROWS", 5, minimum=1, maximum=20)
+_PDF_STRICT_AMBIGUITY_MODE = _env_bool("PDF_STRICT_AMBIGUITY_MODE", False)
+_PDF_ACCURACY_MODE_DEFAULT = _env_bool("PDF_ACCURACY_MODE", False)
+_PDF_ACCURACY_REPAIR_MAX_ROUNDS = _env_int("PDF_ACCURACY_REPAIR_MAX_ROUNDS", 2, minimum=1, maximum=3)
+_PDF_ACCURACY_NEGATIVE_SAMPLE_N = _env_int("PDF_ACCURACY_NEGATIVE_SAMPLE_N", 50, minimum=5, maximum=200)
+_PDF_ACCURACY_INCLUDE_TABLES = _env_bool("PDF_ACCURACY_INCLUDE_TABLES", True)
+_PDF_ACCURACY_TABLE_CAPTURE_CHARS = _env_int("PDF_ACCURACY_TABLE_CAPTURE_CHARS", 6000, minimum=800, maximum=20000)
+_PDF_ACCURACY_SECTION_KEYWORDS_EXPANDED = _env_bool("PDF_ACCURACY_SECTION_KEYWORDS_EXPANDED", True)
+_PDF_ACCURACY_FAIL_FAST_ON_INVARIANTS = _env_bool("PDF_ACCURACY_FAIL_FAST_ON_INVARIANTS", True)
+_PDF_SCHEMA_MAP_PATH = Path(os.getenv("PDF_SCHEMA_MAP_PATH", "/app/var/metadata/pdf_schema_map.json"))
+_PDF_SCHEMA_MAP_LOCAL = _METADATA_LOCAL_BASE / "pdf_schema_map.json"
 
 
 class _SkipRagRefinement(Exception):
@@ -309,6 +348,163 @@ def _append_warning_once(result: dict[str, Any], message: str) -> None:
     if message not in warnings:
         warnings.append(message)
     result["warning"] = warnings
+
+
+_SQL_LIKE_RE = re.compile(
+    r"\bselect\b[\s\S]{0,400}\bfrom\b|\bwith\b[\s\S]{0,200}\bselect\b",
+    re.IGNORECASE,
+)
+
+
+def _iter_strings(payload: Any):
+    if isinstance(payload, str):
+        yield payload
+    elif isinstance(payload, dict):
+        for value in payload.values():
+            yield from _iter_strings(value)
+    elif isinstance(payload, (list, tuple, set)):
+        for item in payload:
+            yield from _iter_strings(item)
+
+
+def _contains_sql_like_text(payload: Any) -> bool:
+    for text in _iter_strings(payload):
+        value = str(text or "").strip()
+        if not value:
+            continue
+        if len(value) < 8:
+            continue
+        if _SQL_LIKE_RE.search(value):
+            return True
+    return False
+
+
+def _normalize_yn(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"yes", "y", "true", "1", "예", "네"}:
+        return "yes"
+    if text in {"no", "n", "false", "0", "아니오"}:
+        return "no"
+    return ""
+
+
+def _normalize_population_unit(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "patient": "per_subject",
+        "subject": "per_subject",
+        "per_subject": "per_subject",
+        "admission": "per_hadm",
+        "hadm": "per_hadm",
+        "per_hadm": "per_hadm",
+        "icu_stay": "per_hadm",
+        "stay": "per_hadm",
+    }
+    return aliases.get(text, "")
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except Exception:
+        return default
+
+
+def _extract_codes(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        text = str(value or "")
+        raw_items = text.split(",") if "," in text else [text]
+    cleaned: list[str] = []
+    for item in raw_items:
+        code = re.sub(r"[^A-Za-z0-9]+", "", str(item or "")).upper().strip()
+        if code and code not in cleaned:
+            cleaned.append(code)
+    return cleaned
+
+
+def _extract_min_days(text: str) -> float | None:
+    matched = re.search(r"(\d+(?:\.\d+)?)\s*(day|days|일|d)\b", text, flags=re.IGNORECASE)
+    if not matched:
+        if "24h" in text.lower() or "24 hour" in text.lower():
+            return 1.0
+        return None
+    try:
+        return float(matched.group(1))
+    except Exception:
+        return None
+
+
+def _default_pdf_schema_map() -> dict[str, Any]:
+    return {
+        "tables": {
+            "patients": "SSO.PATIENTS",
+            "admissions": "SSO.ADMISSIONS",
+            "icustays": "SSO.ICUSTAYS",
+            "diagnoses_icd": "SSO.DIAGNOSES_ICD",
+            "measurements": "SSO.CHARTEVENTS",
+        },
+        "columns": {
+            "subject_id": "subject_id",
+            "hadm_id": "hadm_id",
+            "stay_id": "stay_id",
+            "admittime": "admittime",
+            "icu_intime": "intime",
+            "icu_outtime": "outtime",
+            "icu_los_days": "los",
+            "anchor_age": "anchor_age",
+            "death_time": "deathtime",
+            "icd_code": "icd_code",
+            "icd_version": "icd_version",
+            "meas_time": "charttime",
+            "meas_itemid": "itemid",
+            "meas_value": "valuenum",
+            "hospital_expire_flag": "hospital_expire_flag",
+        },
+        "signal_map": {},
+    }
+
+
+def _merge_dict(base: dict[str, Any], override: Any) -> dict[str, Any]:
+    if not isinstance(override, dict):
+        return base
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_pdf_schema_map() -> dict[str, Any]:
+    schema = _default_pdf_schema_map()
+    path = _PDF_SCHEMA_MAP_PATH if _PDF_SCHEMA_MAP_PATH.exists() else _PDF_SCHEMA_MAP_LOCAL
+    if not path.exists():
+        return schema
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("PDF schema map load failed (%s): %s", path, exc)
+        return schema
+    return _merge_dict(schema, payload if isinstance(payload, dict) else {})
+
+
+def _schema_table(schema_map: dict[str, Any], key: str, default_value: str) -> str:
+    tables = schema_map.get("tables") if isinstance(schema_map, dict) else {}
+    if not isinstance(tables, dict):
+        return default_value
+    value = str(tables.get(key) or "").strip()
+    return value or default_value
+
+
+def _schema_col(schema_map: dict[str, Any], key: str, default_value: str) -> str:
+    columns = schema_map.get("columns") if isinstance(schema_map, dict) else {}
+    if not isinstance(columns, dict):
+        return default_value
+    value = str(columns.get(key) or "").strip()
+    return value or default_value
 
 
 def _load_reference_cohorts() -> str:
@@ -609,6 +805,1101 @@ class PDFCohortService:
             focused_text = f"{focused_text}\n\n{text}"
         return focused_text[:_PDF_MAX_TEXT_CHARS]
 
+    def _split_text_by_pages(self, full_text: str) -> list[dict[str, Any]]:
+        text = str(full_text or "")
+        marker_re = re.compile(r"===\s*PAGE\s+(\d+)\s*===\n?", re.IGNORECASE)
+        matches = list(marker_re.finditer(text))
+        if not matches:
+            return [{"page": 1, "text": text, "global_start": 0}]
+
+        chunks: list[dict[str, Any]] = []
+        for idx, match in enumerate(matches):
+            page_no = _safe_int(match.group(1), default=idx + 1)
+            content_start = match.end()
+            content_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            chunk_text = text[content_start:content_end].strip()
+            if not chunk_text:
+                continue
+            chunks.append({"page": page_no, "text": chunk_text, "global_start": content_start})
+        return chunks
+
+    def _is_section_heading(self, line: str) -> bool:
+        value = str(line or "").strip()
+        if not value:
+            return False
+        if len(value) > 90:
+            return False
+        heading_patterns = (
+            r"^(methods?|methodology|study population|population|eligibility|inclusion|exclusion)\b",
+            r"^(results?|outcomes?|baseline characteristics?|discussion|conclusion)\b",
+            r"^(연구대상|대상자|대상 환자|방법|결과|선정 기준|제외 기준|코호트)\b",
+        )
+        lowered = value.lower()
+        return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in heading_patterns)
+
+    def _extract_cohort_snippets(self, full_text: str, *, accuracy_mode: bool = False) -> list[dict[str, Any]]:
+        base_keywords = [
+            "cohort", "population", "study population", "eligibility", "inclusion", "exclusion",
+            "diagnosis", "icd", "admission", "icu", "mortality", "within", "first admission",
+            "first icu", "los", "length of stay", "follow-up", "endpoint", "outcome",
+            "코호트", "대상자", "선정", "제외", "진단", "입원", "중환자실", "사망", "기간",
+        ]
+        if accuracy_mode and _PDF_ACCURACY_SECTION_KEYWORDS_EXPANDED:
+            base_keywords.extend(
+                [
+                    "methods", "definitions", "appendix", "supplementary", "table", "flowchart",
+                    "guideline", "protocol", "eligibility criteria", "study design", "outcomes",
+                    "exposure", "index date", "index event", "first icu admission",
+                    "measurement", "charttime", "itemid", "vital", "lab", "time window",
+                    "방법", "정의", "부록", "보충", "표", "연구설계", "결과지표", "지표",
+                ]
+            )
+        keywords = tuple(dict.fromkeys(base_keywords))
+        table_hint_tokens = ("table", "tbl", "표")
+        snippets: list[dict[str, Any]] = []
+        seen: set[tuple[int, str]] = set()
+
+        for page_chunk in self._split_text_by_pages(full_text):
+            page_no = int(page_chunk.get("page") or 0)
+            page_text = str(page_chunk.get("text") or "")
+            global_start = int(page_chunk.get("global_start") or 0)
+            lines = page_text.splitlines()
+            if not lines:
+                continue
+
+            offsets: list[int] = []
+            running = 0
+            for line in lines:
+                offsets.append(running)
+                running += len(line) + 1
+
+            current_section = "Unknown"
+            for idx, raw_line in enumerate(lines):
+                line = str(raw_line or "").strip()
+                if not line:
+                    continue
+                if self._is_section_heading(line):
+                    current_section = line[:80]
+                    continue
+                lowered = line.lower()
+                if not any(keyword in lowered for keyword in keywords):
+                    continue
+
+                is_table_hint = any(token in lowered for token in table_hint_tokens)
+                pad = 2
+                if accuracy_mode and _PDF_ACCURACY_INCLUDE_TABLES and is_table_hint:
+                    pad = 8
+                start_idx = max(0, idx - pad)
+                end_idx = min(len(lines), idx + pad + 1)
+                snippet_text = "\n".join(lines[start_idx:end_idx]).strip()
+                if not snippet_text:
+                    continue
+                if accuracy_mode and is_table_hint and len(snippet_text) > _PDF_ACCURACY_TABLE_CAPTURE_CHARS:
+                    snippet_text = snippet_text[:_PDF_ACCURACY_TABLE_CAPTURE_CHARS]
+                normalized_key = re.sub(r"\s+", " ", snippet_text.lower()).strip()
+                dedup_key = (page_no, normalized_key)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                span_start = offsets[start_idx]
+                span_end_line_idx = max(start_idx, end_idx - 1)
+                span_end = offsets[span_end_line_idx] + len(lines[span_end_line_idx])
+                snippets.append(
+                    {
+                        "page": page_no,
+                        "page_no": page_no,
+                        "section": current_section,
+                        "section_title": current_section,
+                        "text": snippet_text[: (1200 if accuracy_mode else 700)],
+                        "is_table_hint": bool(is_table_hint),
+                        "char_range": [global_start + span_start, global_start + span_end],
+                        "span": [global_start + span_start, global_start + span_end],
+                    }
+                )
+                if len(snippets) >= _PDF_SNIPPET_MAX_COUNT:
+                    break
+            if len(snippets) >= _PDF_SNIPPET_MAX_COUNT:
+                break
+
+        snippets.sort(key=lambda item: (int(item.get("page") or 0), int((item.get("char_range") or [0])[0])))
+        return snippets
+
+    def _pick_evidence_refs(self, snippets: list[dict[str, Any]], clue_text: str, limit: int = 2) -> list[dict[str, Any]]:
+        if not snippets:
+            return []
+        clue = str(clue_text or "").lower()
+        tokens = {
+            token
+            for token in re.findall(r"[a-z0-9가-힣]{2,}", clue)
+            if token not in {"study", "patient", "cohort", "criteria", "조건", "환자", "코호트"}
+        }
+
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for idx, snippet in enumerate(snippets):
+            text = str(snippet.get("text") or "")
+            lowered = text.lower()
+            overlap = sum(1 for token in tokens if token in lowered)
+            has_number = 1 if re.search(r"\d", lowered) else 0
+            score = float(overlap * 3 + has_number - idx * 0.01)
+            scored.append((score, snippet))
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        picked: list[dict[str, Any]] = []
+        for _, snippet in scored[: max(1, limit)]:
+            quote = str(snippet.get("text") or "").replace("\n", " ").strip()
+            picked.append(
+                {
+                    "page": int(snippet.get("page") or 0),
+                    "section": str(snippet.get("section") or "Unknown"),
+                    "quote": quote[:220],
+                    "char_range": snippet.get("char_range") or [],
+                }
+            )
+        return picked
+
+    def _enrich_conditions_with_evidence(
+        self,
+        conditions: dict[str, Any],
+        snippets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if not isinstance(conditions, dict):
+            conditions = {}
+        cohort_def = conditions.get("cohort_definition")
+        if not isinstance(cohort_def, dict):
+            cohort_def = {}
+            conditions["cohort_definition"] = cohort_def
+
+        extraction = cohort_def.get("extraction_details")
+        if not isinstance(extraction, dict):
+            extraction = {}
+            cohort_def["extraction_details"] = extraction
+
+        cohort_criteria = extraction.get("cohort_criteria")
+        if not isinstance(cohort_criteria, dict):
+            cohort_criteria = {}
+            extraction["cohort_criteria"] = cohort_criteria
+
+        population = cohort_criteria.get("population")
+        if not isinstance(population, list):
+            population = []
+            cohort_criteria["population"] = population
+
+        evidence_enriched = 0
+        for item in population:
+            if not isinstance(item, dict):
+                continue
+            criterion = str(item.get("criterion") or item.get("operational_definition") or "").strip()
+            refs = self._pick_evidence_refs(snippets, criterion, limit=2)
+            if refs:
+                item["evidence_refs"] = refs
+                if not str(item.get("evidence") or "").strip() or str(item.get("evidence")).startswith("[Source]"):
+                    item["evidence"] = refs[0]["quote"]
+                if not isinstance(item.get("evidence_source"), dict):
+                    item["evidence_source"] = {}
+                item["evidence_source"]["page"] = refs[0]["page"]
+                item["evidence_source"]["type"] = item["evidence_source"].get("type") or "text"
+                evidence_enriched += 1
+
+        diagnosis_criteria = extraction.get("diagnosis_criteria")
+        if isinstance(diagnosis_criteria, dict):
+            diag_refs = self._pick_evidence_refs(
+                snippets,
+                json.dumps(diagnosis_criteria, ensure_ascii=False),
+                limit=2,
+            )
+            if diag_refs:
+                diagnosis_criteria["evidence_refs"] = diag_refs
+                if not str(diagnosis_criteria.get("evidence") or "").strip() or str(diagnosis_criteria.get("evidence")).startswith("[Source]"):
+                    diagnosis_criteria["evidence"] = diag_refs[0]["quote"]
+                if not isinstance(diagnosis_criteria.get("evidence_source"), dict):
+                    diagnosis_criteria["evidence_source"] = {}
+                diagnosis_criteria["evidence_source"]["page"] = diag_refs[0]["page"]
+                diagnosis_criteria["evidence_source"]["type"] = diagnosis_criteria["evidence_source"].get("type") or "text"
+
+        inferred_ambiguities = self._build_ambiguities(cohort_def, snippets)
+        llm_ambiguities = cohort_def.get("ambiguities")
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        if isinstance(llm_ambiguities, list):
+            for item in llm_ambiguities:
+                if not isinstance(item, dict):
+                    continue
+                amb_id = str(item.get("id") or "").strip() or f"amb_llm_{len(merged)+1}"
+                if amb_id in seen_ids:
+                    continue
+                seen_ids.add(amb_id)
+                item = dict(item)
+                item["id"] = amb_id
+                item["status"] = str(item.get("status") or "unresolved")
+                merged.append(item)
+        for item in inferred_ambiguities:
+            amb_id = str(item.get("id") or "").strip()
+            if not amb_id or amb_id in seen_ids:
+                continue
+            seen_ids.add(amb_id)
+            merged.append(item)
+
+        ambiguities = merged
+        cohort_def["ambiguities"] = ambiguities
+        cohort_def["snippet_count"] = len(snippets)
+        cohort_def["evidence_coverage_count"] = evidence_enriched
+        return conditions, ambiguities
+
+    def _build_ambiguities(self, cohort_def: dict[str, Any], snippets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ambiguities: list[dict[str, Any]] = []
+        extraction = cohort_def.get("extraction_details") if isinstance(cohort_def, dict) else {}
+        criteria = extraction.get("cohort_criteria") if isinstance(extraction, dict) else {}
+
+        index_unit_raw = str((criteria or {}).get("index_unit") or "").strip().lower()
+        first_stay = _normalize_yn((criteria or {}).get("first_stay_only"))
+        if index_unit_raw not in {"patient", "icu_stay"}:
+            ambiguities.append(
+                {
+                    "id": "amb_index_unit",
+                    "question": "코호트 기준 단위(index_unit)가 patient 인지 icu_stay 인지 불명확합니다.",
+                    "options": ["patient", "icu_stay"],
+                    "default_policy": "require_user_choice",
+                    "status": "unresolved",
+                }
+            )
+        if not first_stay:
+            ambiguities.append(
+                {
+                    "id": "amb_first_stay_only",
+                    "question": "first stay only 적용 여부가 불명확합니다.",
+                    "options": ["Yes", "No"],
+                    "default_policy": "require_user_choice",
+                    "status": "unresolved",
+                }
+            )
+        if index_unit_raw == "patient" and first_stay == "yes":
+            ambiguities.append(
+                {
+                    "id": "amb_first_icu_unit",
+                    "question": "first ICU admission 기준이 subject 기준인지 hadm 기준인지 선택이 필요합니다.",
+                    "options": ["per_subject", "per_hadm"],
+                    "default_policy": "require_user_choice",
+                    "status": "unresolved",
+                }
+            )
+
+        diagnosis_criteria = extraction.get("diagnosis_criteria") if isinstance(extraction, dict) else {}
+        if isinstance(diagnosis_criteria, dict):
+            codes = _extract_codes(diagnosis_criteria.get("codes", []))
+            coding_system = str(diagnosis_criteria.get("coding_system") or "").strip().upper()
+            if codes and coding_system not in {"ICD-9", "ICD-10", "ICD-9/10", "ICD9", "ICD10"}:
+                ambiguities.append(
+                    {
+                        "id": "amb_icd_version",
+                        "question": "진단 코드의 ICD 버전(ICD-9/ICD-10)이 명확하지 않습니다.",
+                        "options": ["ICD-9", "ICD-10", "ICD-9/10"],
+                        "default_policy": "require_user_choice",
+                        "status": "unresolved",
+                    }
+                )
+
+        population = criteria.get("population") if isinstance(criteria, dict) else []
+        if isinstance(population, list):
+            missing_evidence = 0
+            for item in population:
+                if not isinstance(item, dict):
+                    continue
+                refs = item.get("evidence_refs")
+                if not isinstance(refs, list) or not refs:
+                    missing_evidence += 1
+            if population and missing_evidence > 0 and snippets:
+                ambiguities.append(
+                    {
+                        "id": "amb_missing_evidence_links",
+                        "question": "일부 조건의 근거 문장 연결이 충분하지 않습니다.",
+                        "options": ["재추출", "현재 근거로 진행"],
+                        "default_policy": "require_user_choice",
+                        "status": "unresolved",
+                    }
+                )
+        return ambiguities
+
+    def _derive_population_policy(self, conditions: dict[str, Any], *, accuracy_mode: bool = False) -> dict[str, Any]:
+        cohort_def = conditions.get("cohort_definition") if isinstance(conditions, dict) else {}
+        extraction = cohort_def.get("extraction_details") if isinstance(cohort_def, dict) else {}
+        criteria = extraction.get("cohort_criteria") if isinstance(extraction, dict) else {}
+        first_stay_raw = _normalize_yn((criteria or {}).get("first_stay_only"))
+        index_unit = str((criteria or {}).get("index_unit") or "").strip().lower()
+        normalized_unit = _normalize_population_unit(index_unit)
+
+        require_icu = index_unit == "icu_stay"
+        episode_selector = "first" if first_stay_raw == "yes" else "all"
+        episode_unit = normalized_unit or "per_hadm"
+        if episode_selector == "first" and index_unit == "patient":
+            episode_unit = "per_subject"
+        if episode_selector == "first" and index_unit == "icu_stay":
+            episode_unit = "per_hadm"
+
+        policy = {
+            "require_icu": require_icu,
+            "episode_selector": episode_selector,
+            "episode_unit": episode_unit,
+            "index_unit": index_unit or "patient",
+            "measurement_window": "icu_discharge_last_24h",
+            "accuracy_mode": bool(accuracy_mode),
+        }
+        if accuracy_mode:
+            # Accuracy-first policy defaults:
+            # - first ICU per subject
+            # - ICU required
+            # - measurement window fixed to outtime-24h ~ outtime
+            policy["require_icu"] = True
+            policy["episode_selector"] = "first"
+            policy["episode_unit"] = "per_subject"
+            policy["index_unit"] = "icu_stay"
+            policy["measurement_window"] = "icu_discharge_last_24h"
+            policy["icu_los_min_days_default"] = 1.0
+        return policy
+
+    def _build_canonical_spec(
+        self,
+        conditions: dict[str, Any],
+        *,
+        file_hash: str,
+        snippets: list[dict[str, Any]],
+        ambiguities: list[dict[str, Any]],
+        accuracy_mode: bool = False,
+    ) -> dict[str, Any]:
+        cohort_def = conditions.get("cohort_definition") if isinstance(conditions, dict) else {}
+        extraction = cohort_def.get("extraction_details") if isinstance(cohort_def, dict) else {}
+        criteria = extraction.get("cohort_criteria") if isinstance(extraction, dict) else {}
+        policy = self._derive_population_policy(conditions, accuracy_mode=accuracy_mode)
+
+        population_items = criteria.get("population") if isinstance(criteria, dict) else []
+        if not isinstance(population_items, list):
+            population_items = []
+
+        inclusion: list[dict[str, Any]] = []
+        exclusion: list[dict[str, Any]] = []
+        requirements: list[dict[str, Any]] = []
+        candidate_condition_count = 0
+
+        for idx, item in enumerate(population_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            criterion_text = str(item.get("criterion") or item.get("operational_definition") or "").strip()
+            if not criterion_text:
+                continue
+            candidate_condition_count += 1
+            normalized = criterion_text.lower()
+            refs = item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
+            condition_type = "criterion_text"
+            payload: dict[str, Any] = {
+                "id": f"cond_{idx:03d}",
+                "type": condition_type,
+                "criterion": criterion_text,
+                "evidence_refs": refs,
+            }
+
+            if "age" in normalized or "연령" in normalized:
+                condition_type = "age_range"
+                nums = re.findall(r"\d+(?:\.\d+)?", criterion_text)
+                if len(nums) >= 2:
+                    payload["min"] = _safe_int(nums[0], 0)
+                    payload["max"] = _safe_int(nums[1], 120)
+                payload["type"] = condition_type
+                payload["age_field_hint"] = "patients.anchor_age"
+            elif "icd" in normalized or "진단" in normalized or "diagnos" in normalized:
+                condition_type = "diagnosis_icd_prefix"
+                payload["type"] = condition_type
+                diag = extraction.get("diagnosis_criteria") if isinstance(extraction, dict) else {}
+                if isinstance(diag, dict):
+                    codes = _extract_codes(diag.get("codes", []))
+                    coding_system = str(diag.get("coding_system") or "").upper()
+                    version_hint = 9 if "9" in coding_system else (10 if "10" in coding_system else None)
+                    payload["codes"] = [
+                        {
+                            "prefix": code,
+                            "icd_version": version_hint,
+                        }
+                        for code in codes
+                    ]
+                    payload["scope"] = "hadm"
+                    for code in codes:
+                        if code.isdigit() and len(code) <= 3:
+                            ambiguities.append(
+                                {
+                                    "id": f"amb_icd_{code}_scope",
+                                    "question": f"ICD 코드 '{code}'는 prefix({code}%)인지 range 해석인지 확인이 필요합니다.",
+                                    "options": [f"prefix:{code}%", "range:manual_confirm"],
+                                    "default_policy": "require_user_choice",
+                                    "status": "unresolved",
+                                }
+                            )
+            elif "los" in normalized or "length of stay" in normalized:
+                condition_type = "icu_los_min_days"
+                payload["type"] = condition_type
+                min_days = _extract_min_days(criterion_text)
+                if min_days is not None:
+                    payload["min_days"] = min_days
+            elif ("death" in normalized or "사망" in normalized) and ("within" in normalized or "이내" in normalized):
+                condition_type = "death_within_days_of_index_event"
+                payload["type"] = condition_type
+                day_match = re.search(r"(\d+)\s*(day|days|일)", normalized)
+                payload["days"] = _safe_int(day_match.group(1), default=3) if day_match else 3
+                payload["death_time_field_hint"] = "admissions.deathtime|hospital_expire_flag"
+
+            signals: list[str] = []
+            if "heart rate" in normalized or "hr" in normalized:
+                signals.append("HR")
+            if "sbp" in normalized or "systolic" in normalized or "bp sys" in normalized:
+                signals.append("BP_SYS")
+            if "dbp" in normalized or "diastolic" in normalized or "bp dia" in normalized:
+                signals.append("BP_DIA")
+            if ("measurement" in normalized or "vital" in normalized or "chart" in normalized) and signals:
+                req_payload = {
+                    "id": f"req_{idx:03d}",
+                    "type": "measurement_required",
+                    "signals": sorted(set(signals)),
+                    "window": {
+                        "anchor": "icu_outtime",
+                        "start_offset_hours": -24,
+                        "end_offset_hours": 0,
+                    },
+                    "evidence_refs": refs,
+                }
+                requirements.append(req_payload)
+
+            target = exclusion if str(item.get("type") or "").lower() == "exclusion" else inclusion
+            target.append(payload)
+
+        unique_ambiguities: list[dict[str, Any]] = []
+        seen_amb_ids: set[str] = set()
+        for amb in ambiguities:
+            if not isinstance(amb, dict):
+                continue
+            amb_id = str(amb.get("id") or "").strip()
+            if not amb_id or amb_id in seen_amb_ids:
+                continue
+            seen_amb_ids.add(amb_id)
+            unique_ambiguities.append(amb)
+
+        canonical = {
+            "metadata": {
+                "source_doc": {
+                    "title": str(cohort_def.get("title") or "Untitled PDF"),
+                    "hash": file_hash,
+                },
+                "created_at": str(datetime.utcnow().isoformat() + "Z"),
+                "db_dialect": "oracle",
+                "accuracy_mode": bool(accuracy_mode),
+            },
+            "population": {
+                "index_event": "icu_intime" if policy.get("require_icu") else "admittime",
+                "require_icu": bool(policy.get("require_icu")),
+                "episode_unit": policy.get("episode_unit"),
+                "episode_selector": policy.get("episode_selector"),
+                "measurement_window": str(policy.get("measurement_window") or "icu_discharge_last_24h"),
+            },
+            "inclusion": inclusion,
+            "exclusion": exclusion,
+            "requirements": requirements,
+            "ambiguities": unique_ambiguities,
+            "evidence_snippets": snippets[: min(20, len(snippets))],
+            "candidates": {
+                "condition_candidates": candidate_condition_count,
+            },
+        }
+        return canonical
+
+    def _strip_fetch_first_clause(self, sql: str) -> str:
+        text = str(sql or "").strip().rstrip(";")
+        return re.sub(
+            r"\s+fetch\s+first\s+\d+\s+rows\s+only\s*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+
+    def _enforce_evidence_refs(self, canonical_spec: dict[str, Any]) -> dict[str, Any]:
+        spec = dict(canonical_spec or {})
+        ambiguities = spec.get("ambiguities") if isinstance(spec.get("ambiguities"), list) else []
+        seen_amb_ids = {str(item.get("id") or "").strip() for item in ambiguities if isinstance(item, dict)}
+        kept_by_section: dict[str, list[dict[str, Any]]] = {"inclusion": [], "exclusion": [], "requirements": []}
+
+        for section in ("inclusion", "exclusion", "requirements"):
+            items = spec.get(section)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                refs = item.get("evidence_refs")
+                if isinstance(refs, list) and refs:
+                    kept_by_section[section].append(item)
+                    continue
+                cond_id = str(item.get("id") or f"{section}_missing_evidence")
+                amb_id = f"amb_missing_evidence_{cond_id}"
+                if amb_id in seen_amb_ids:
+                    continue
+                seen_amb_ids.add(amb_id)
+                ambiguities.append(
+                    {
+                        "id": amb_id,
+                        "question": f"{cond_id} 조건의 근거 문장(evidence_refs)이 없습니다. 근거 보강 후 재실행이 필요합니다.",
+                        "options": ["재추출", "사용자 근거 수동입력"],
+                        "default_policy": "require_user_choice",
+                        "status": "unresolved",
+                    }
+                )
+        for section in kept_by_section:
+            spec[section] = kept_by_section[section]
+        spec["ambiguities"] = ambiguities
+        return spec
+
+    async def _critic_cohort_spec(
+        self,
+        *,
+        snippets: list[dict[str, Any]],
+        canonical_spec: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[str]]:
+        warnings: list[str] = []
+        prompt = f"""아래 Snippets와 CohortSpec을 검토하여 정확도 관점에서 누락/의미 붕괴를 수정하세요.
+규칙:
+1) SQL은 절대 출력하지 마세요.
+2) 근거 없는 조건은 확정하지 말고 ambiguities로 이동하세요.
+3) within X days는 event-to-event 조건으로 유지하세요(LOS 치환 금지).
+4) first ICU admission 단위(subject/hadm)가 모호하면 ambiguities에 남기세요.
+
+반환 형식(JSON):
+{{
+  "canonical_spec": {{ ...수정된 CohortSpec... }},
+  "critic_notes": ["..."]
+}}
+
+Snippets:
+{json.dumps(snippets[: min(40, len(snippets))], ensure_ascii=False)}
+
+CohortSpec:
+{json.dumps(canonical_spec, ensure_ascii=False)}
+"""
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "당신은 임상 코호트 스펙 검증기입니다. JSON만 반환하세요."},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+                seed=42,
+            )
+            parsed = json.loads(response.choices[0].message.content)
+            if _contains_sql_like_text(parsed):
+                warnings.append("Spec critic output contained SQL-like text and was discarded.")
+                return canonical_spec, warnings
+            revised = parsed.get("canonical_spec") if isinstance(parsed, dict) else None
+            if not isinstance(revised, dict):
+                warnings.append("Spec critic returned invalid format. Original spec is used.")
+                return canonical_spec, warnings
+            notes = parsed.get("critic_notes")
+            if isinstance(notes, list):
+                warnings.extend([str(n) for n in notes if str(n or "").strip()])
+            return revised, warnings
+        except Exception as exc:
+            warnings.append(f"Spec critic skipped due to error: {exc}")
+            return canonical_spec, warnings
+
+    def _build_accuracy_metrics(
+        self,
+        *,
+        canonical_spec: dict[str, Any],
+        validation_report: dict[str, Any],
+    ) -> dict[str, Any]:
+        inclusion = canonical_spec.get("inclusion") if isinstance(canonical_spec.get("inclusion"), list) else []
+        exclusion = canonical_spec.get("exclusion") if isinstance(canonical_spec.get("exclusion"), list) else []
+        requirements = canonical_spec.get("requirements") if isinstance(canonical_spec.get("requirements"), list) else []
+        conditions = [*inclusion, *exclusion, *requirements]
+        with_evidence = 0
+        for item in conditions:
+            if not isinstance(item, dict):
+                continue
+            refs = item.get("evidence_refs")
+            if isinstance(refs, list) and refs:
+                with_evidence += 1
+
+        candidate_count = _safe_int(
+            (
+                canonical_spec.get("candidates", {})
+                if isinstance(canonical_spec.get("candidates"), dict)
+                else {}
+            ).get("condition_candidates"),
+            default=len(conditions),
+        )
+        completeness = float(len(conditions) / max(1, candidate_count))
+        evidence_coverage = float(with_evidence / max(1, len(conditions)))
+        validation_status = str(validation_report.get("status") or "").strip().lower()
+        return {
+            "spec_completeness": round(completeness, 4),
+            "evidence_coverage": round(evidence_coverage, 4),
+            "validation_pass": validation_status == "passed",
+            "condition_count": len(conditions),
+            "condition_candidate_count": candidate_count,
+            "evidence_condition_count": with_evidence,
+        }
+
+    def _execute_scalar_count(self, sql: str, *, accuracy_mode: bool = False) -> int | None:
+        try:
+            res = execute_sql(sql, accuracy_mode=accuracy_mode, query_tag="pdf_validation_scalar")
+        except Exception:
+            return None
+        rows = res.get("rows")
+        if not isinstance(rows, list) or not rows:
+            return None
+        first = rows[0]
+        if isinstance(first, (list, tuple)):
+            return _safe_int(first[0], default=0)
+        if isinstance(first, dict):
+            if first:
+                return _safe_int(next(iter(first.values())), default=0)
+            return 0
+        return _safe_int(first, default=0)
+
+    def _execute_rows_sample(self, sql: str, *, accuracy_mode: bool = False) -> list[dict[str, Any]]:
+        try:
+            res = execute_sql(sql, accuracy_mode=accuracy_mode, query_tag="pdf_validation_sample")
+        except Exception:
+            return []
+        cols = [str(c or "").lower() for c in (res.get("columns") or [])]
+        rows = res.get("rows") or []
+        sample: list[dict[str, Any]] = []
+        for row in rows[:_PDF_VALIDATION_SAMPLE_ROWS]:
+            if isinstance(row, (list, tuple)):
+                sample.append({col: value for col, value in zip(cols, row)})
+            elif isinstance(row, dict):
+                sample.append(row)
+        return sample
+
+    def _build_stepwise_anomalies(
+        self,
+        step_counts: list[dict[str, Any]],
+        intent_steps: list[dict[str, Any]],
+        *,
+        accuracy_mode: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not step_counts:
+            return []
+        anomalies: list[dict[str, Any]] = []
+        numeric_counts: list[int] = []
+        labels: list[str] = []
+        for row in step_counts:
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get("step_name") or row.get("STEP_NAME") or "").strip()
+            count = _safe_int(row.get("cnt", row.get("CNT", 0)), default=0)
+            labels.append(label)
+            numeric_counts.append(count)
+
+        for idx in range(1, len(numeric_counts)):
+            prev_count = numeric_counts[idx - 1]
+            now_count = numeric_counts[idx]
+            if now_count > prev_count:
+                anomalies.append(
+                    {
+                        "type": "non_monotonic_increase",
+                        "step": labels[idx] if idx < len(labels) else f"step_{idx+1}",
+                        "previous_count": prev_count,
+                        "current_count": now_count,
+                        "message": "필터 단계에서 row count가 증가했습니다. 조인 중복 가능성을 점검하세요.",
+                    }
+                )
+            if prev_count > 0:
+                drop_ratio = (prev_count - now_count) / float(prev_count)
+                drop_warn_ratio = 0.80 if accuracy_mode else 0.95
+                if drop_ratio >= drop_warn_ratio:
+                    anomalies.append(
+                        {
+                            "type": "sharp_drop",
+                            "step": labels[idx] if idx < len(labels) else f"step_{idx+1}",
+                            "previous_count": prev_count,
+                            "current_count": now_count,
+                            "drop_ratio": round(drop_ratio, 4),
+                            "message": f"특정 단계에서 {int(drop_warn_ratio*100)}% 이상 급감했습니다. 조건 해석/코드 범위를 확인하세요.",
+                        }
+                    )
+                if accuracy_mode and abs(drop_ratio) < 0.001:
+                    anomalies.append(
+                        {
+                            "type": "no_effect",
+                            "step": labels[idx] if idx < len(labels) else f"step_{idx+1}",
+                            "previous_count": prev_count,
+                            "current_count": now_count,
+                            "drop_ratio": round(drop_ratio, 6),
+                            "message": "단계 적용 후 변화가 0.1% 미만입니다. 조건이 실제로 적용됐는지 확인하세요.",
+                        }
+                    )
+
+        if intent_steps and len(intent_steps) + 1 != len(step_counts):
+            anomalies.append(
+                {
+                    "type": "step_count_mismatch",
+                    "message": "Intent step 수와 debug step count 수가 일치하지 않습니다.",
+                    "intent_steps": len(intent_steps),
+                    "debug_steps": len(step_counts),
+                }
+            )
+        return anomalies
+
+    def _build_validation_report(
+        self,
+        *,
+        cohort_sql: str,
+        db_result: dict[str, Any],
+        step_counts: list[dict[str, Any]],
+        intent: dict[str, Any],
+        population_policy: dict[str, Any],
+        canonical_spec: dict[str, Any],
+        schema_map: dict[str, Any],
+        accuracy_mode: bool = False,
+    ) -> dict[str, Any]:
+        report = {
+            "enabled": _PDF_VALIDATION_ENABLED,
+            "accuracy_mode": bool(accuracy_mode),
+            "status": "skipped",
+            "invariants": [],
+            "stepwise_counts": step_counts,
+            "anomalies": [],
+            "negative_samples": [],
+            "messages": [],
+        }
+        if not _PDF_VALIDATION_ENABLED:
+            report["messages"].append("Validation is disabled by env(PDF_VALIDATION_ENABLED=false).")
+            return report
+        if not str(cohort_sql or "").strip():
+            report["messages"].append("Validation skipped: cohort_sql is empty.")
+            return report
+        if db_result.get("error"):
+            report["status"] = "failed"
+            report["messages"].append(f"Validation blocked by SQL execution error: {db_result.get('error')}")
+            return report
+
+        base_sql = self._strip_fetch_first_clause(cohort_sql)
+        negative_sample_limit = _PDF_ACCURACY_NEGATIVE_SAMPLE_N if accuracy_mode else _PDF_VALIDATION_SAMPLE_ROWS
+        invariants: list[dict[str, Any]] = []
+        negative_samples: list[dict[str, Any]] = []
+
+        def add_invariant(name: str, passed: bool, detail: str, violation_count: int | None = None) -> None:
+            invariants.append(
+                {
+                    "name": name,
+                    "passed": bool(passed),
+                    "detail": detail,
+                    "violation_count": violation_count,
+                }
+            )
+
+        cols = _normalize_result_columns(db_result.get("columns", []))
+        add_invariant(
+            "result_has_identifier",
+            _has_identifier_columns(cols),
+            "결과에 subject_id/hadm_id/stay_id 중 최소 1개 식별자 컬럼이 있어야 합니다.",
+            0 if _has_identifier_columns(cols) else 1,
+        )
+
+        if population_policy.get("require_icu"):
+            null_stay_count = self._execute_scalar_count(
+                f"SELECT COUNT(*) AS cnt FROM ({base_sql}) q WHERE q.stay_id IS NULL",
+                accuracy_mode=accuracy_mode,
+            )
+            if null_stay_count is None:
+                add_invariant(
+                    "require_icu_implies_non_null_stay",
+                    True,
+                    "require_icu 검증 쿼리를 실행하지 못했습니다(권한/타임아웃 가능).",
+                    None,
+                )
+                passed = True
+            else:
+                passed = null_stay_count == 0
+                add_invariant(
+                    "require_icu_implies_non_null_stay",
+                    passed,
+                    "require_icu=true이면 최종 결과의 stay_id NULL이 없어야 합니다.",
+                    null_stay_count,
+                )
+            if not passed and null_stay_count:
+                negative_samples.extend(
+                    self._execute_rows_sample(
+                        f"SELECT subject_id, hadm_id, stay_id FROM ({base_sql}) q "
+                        f"WHERE q.stay_id IS NULL FETCH FIRST {negative_sample_limit} ROWS ONLY",
+                        accuracy_mode=accuracy_mode,
+                    )
+                )
+
+            if accuracy_mode and "LEFT JOIN" in str(cohort_sql or "").upper():
+                add_invariant(
+                    "require_icu_join_pattern",
+                    False,
+                    "accuracy_mode에서는 require_icu=true일 때 LEFT JOIN 패턴을 금지합니다.",
+                    1,
+                )
+                if _PDF_ACCURACY_FAIL_FAST_ON_INVARIANTS:
+                    report["status"] = "failed"
+                    report["invariants"] = invariants
+                    report["negative_samples"] = negative_samples[:negative_sample_limit]
+                    report["messages"].append("Fail-fast: require_icu join invariant failed.")
+                    return report
+
+        episode_selector = str(population_policy.get("episode_selector") or "all")
+        episode_unit = str(population_policy.get("episode_unit") or "per_hadm")
+        if episode_selector == "first":
+            key = "subject_id" if episode_unit == "per_subject" else "hadm_id"
+            dup_count = self._execute_scalar_count(
+                "SELECT COUNT(*) AS cnt FROM ("
+                f"SELECT q.{key}, COUNT(*) AS c FROM ({base_sql}) q "
+                f"GROUP BY q.{key} HAVING COUNT(*) > 1"
+                ") t",
+                accuracy_mode=accuracy_mode,
+            )
+            if dup_count is None:
+                add_invariant(
+                    "first_episode_uniqueness",
+                    True,
+                    f"{key} 중복 검증 쿼리를 실행하지 못했습니다(권한/타임아웃 가능).",
+                    None,
+                )
+                passed = True
+            else:
+                passed = dup_count == 0
+                add_invariant(
+                    "first_episode_uniqueness",
+                    passed,
+                    f"episode_selector=first이면 {key} 중복이 없어야 합니다.",
+                    dup_count,
+                )
+            if not passed and dup_count:
+                negative_samples.extend(
+                    self._execute_rows_sample(
+                        f"SELECT q.{key}, COUNT(*) AS dup_cnt FROM ({base_sql}) q "
+                        f"GROUP BY q.{key} HAVING COUNT(*) > 1 FETCH FIRST {negative_sample_limit} ROWS ONLY",
+                        accuracy_mode=accuracy_mode,
+                    )
+                )
+                if _PDF_ACCURACY_FAIL_FAST_ON_INVARIANTS and accuracy_mode:
+                    report["status"] = "failed"
+                    report["invariants"] = invariants
+                    report["negative_samples"] = negative_samples[:negative_sample_limit]
+                    report["messages"].append("Fail-fast: first_episode_uniqueness invariant failed.")
+                    return report
+
+        intent_steps = intent.get("steps") if isinstance(intent, dict) else []
+        if isinstance(intent_steps, list):
+            los_thresholds: list[float] = []
+            for step in intent_steps:
+                if not isinstance(step, dict):
+                    continue
+                if str(step.get("type") or "").strip().lower() != "icu_stay":
+                    continue
+                if not bool(step.get("is_exclusion", False)):
+                    continue
+                min_los = step.get("params", {}).get("min_los") if isinstance(step.get("params"), dict) else None
+                try:
+                    min_los_val = float(min_los)
+                except Exception:
+                    min_los_val = 0.0
+                if min_los_val > 0:
+                    los_thresholds.append(min_los_val)
+            if los_thresholds:
+                min_los = min(los_thresholds)
+                icustays_table = _schema_table(schema_map, "icustays", "SSO.ICUSTAYS")
+                stay_col = _schema_col(schema_map, "stay_id", "stay_id")
+                icu_los_col = _schema_col(schema_map, "icu_los_days", "los")
+                los_violation = self._execute_scalar_count(
+                    "SELECT COUNT(*) AS cnt FROM ("
+                    f"SELECT q.stay_id FROM ({base_sql}) q "
+                    f"JOIN {icustays_table} i ON i.{stay_col} = q.stay_id "
+                    f"WHERE i.{icu_los_col} < {min_los:g}"
+                    ") t",
+                    accuracy_mode=accuracy_mode,
+                )
+                if los_violation is None:
+                    add_invariant(
+                        "icu_los_min_days",
+                        True,
+                        "ICU LOS 검증 쿼리를 실행하지 못했습니다(권한/타임아웃 가능).",
+                        None,
+                    )
+                    passed = True
+                else:
+                    passed = los_violation == 0
+                    add_invariant(
+                        "icu_los_min_days",
+                        passed,
+                        f"제외조건 icu_los_min_days({min_los:g})를 위반한 stay가 없어야 합니다.",
+                        los_violation,
+                    )
+                if not passed and los_violation:
+                    negative_samples.extend(
+                        self._execute_rows_sample(
+                            f"SELECT q.subject_id, q.hadm_id, q.stay_id, i.{icu_los_col} "
+                            f"FROM ({base_sql}) q JOIN {icustays_table} i ON i.{stay_col} = q.stay_id "
+                            f"WHERE i.{icu_los_col} < {min_los:g} FETCH FIRST {negative_sample_limit} ROWS ONLY",
+                            accuracy_mode=accuracy_mode,
+                        )
+                    )
+                    if _PDF_ACCURACY_FAIL_FAST_ON_INVARIANTS and accuracy_mode:
+                        report["status"] = "failed"
+                        report["invariants"] = invariants
+                        report["negative_samples"] = negative_samples[:negative_sample_limit]
+                        report["messages"].append("Fail-fast: icu_los_min_days invariant failed.")
+                        return report
+
+        exclusion = canonical_spec.get("exclusion") if isinstance(canonical_spec.get("exclusion"), list) else []
+        death_rule = next(
+            (
+                item
+                for item in exclusion
+                if isinstance(item, dict)
+                and str(item.get("type") or "").strip().lower() == "death_within_days_of_index_event"
+            ),
+            None,
+        )
+        if isinstance(death_rule, dict):
+            days = max(1, _safe_int(death_rule.get("days"), default=3))
+            admissions_table = _schema_table(schema_map, "admissions", "SSO.ADMISSIONS")
+            hadm_col = _schema_col(schema_map, "hadm_id", "hadm_id")
+            death_col = _schema_col(schema_map, "death_time", "deathtime")
+            death_violation = self._execute_scalar_count(
+                "SELECT COUNT(*) AS cnt FROM ("
+                f"SELECT q.hadm_id FROM ({base_sql}) q "
+                f"JOIN {admissions_table} a ON a.{hadm_col} = q.hadm_id "
+                f"WHERE a.{death_col} IS NOT NULL "
+                f"AND a.{death_col} <= COALESCE(q.intime, q.admittime) + NUMTODSINTERVAL({days}, 'DAY')"
+                ") t",
+                accuracy_mode=accuracy_mode,
+            )
+            if death_violation is None:
+                add_invariant(
+                    "death_within_days_exclusion",
+                    True,
+                    "death_within_days 검증 쿼리를 실행하지 못했습니다(권한/타임아웃 가능).",
+                    None,
+                )
+            else:
+                passed = death_violation == 0
+                add_invariant(
+                    "death_within_days_exclusion",
+                    passed,
+                    "death_within_days exclusion은 event-to-event 비교를 만족해야 합니다.",
+                    death_violation,
+                )
+                if not passed:
+                    negative_samples.extend(
+                        self._execute_rows_sample(
+                            f"SELECT q.subject_id, q.hadm_id, q.stay_id, a.{death_col} "
+                            f"FROM ({base_sql}) q JOIN {admissions_table} a ON a.{hadm_col} = q.hadm_id "
+                            f"WHERE a.{death_col} IS NOT NULL "
+                            f"AND a.{death_col} <= COALESCE(q.intime, q.admittime) + NUMTODSINTERVAL({days}, 'DAY') "
+                            f"FETCH FIRST {negative_sample_limit} ROWS ONLY",
+                            accuracy_mode=accuracy_mode,
+                        )
+                    )
+                    if _PDF_ACCURACY_FAIL_FAST_ON_INVARIANTS and accuracy_mode:
+                        report["status"] = "failed"
+                        report["invariants"] = invariants
+                        report["negative_samples"] = negative_samples[:negative_sample_limit]
+                        report["messages"].append("Fail-fast: death_within_days_exclusion invariant failed.")
+                        return report
+
+            if accuracy_mode and " LOS " in f" {str(cohort_sql or '').upper()} " and "DEATHTIME" not in str(cohort_sql or "").upper():
+                add_invariant(
+                    "within_days_not_los_substitution",
+                    False,
+                    "within-days 조건이 LOS로 대체된 흔적이 있습니다.",
+                    1,
+                )
+
+        requirements = canonical_spec.get("requirements") if isinstance(canonical_spec.get("requirements"), list) else []
+        if requirements:
+            measurements_table = _schema_table(schema_map, "measurements", "SSO.CHARTEVENTS")
+            stay_col = _schema_col(schema_map, "stay_id", "stay_id")
+            meas_itemid_col = _schema_col(schema_map, "meas_itemid", "itemid")
+            meas_time_col = _schema_col(schema_map, "meas_time", "charttime")
+            for req in requirements:
+                if not isinstance(req, dict):
+                    continue
+                if str(req.get("type") or "").strip().lower() != "measurement_required":
+                    continue
+                signals = req.get("signals") if isinstance(req.get("signals"), list) else []
+                for signal in signals:
+                    itemids = self._resolve_signal_itemids(schema_map, str(signal))
+                    if not itemids:
+                        add_invariant(
+                            f"measurement_required_{signal}",
+                            False,
+                            f"signal_map에서 '{signal}' itemid를 찾지 못했습니다.",
+                            1,
+                        )
+                        continue
+                    itemids_text = ", ".join(str(item) for item in itemids)
+                    miss_count = self._execute_scalar_count(
+                        "SELECT COUNT(*) AS cnt FROM ("
+                        f"SELECT q.stay_id FROM ({base_sql}) q "
+                        f"WHERE NOT EXISTS ("
+                        f"SELECT 1 FROM {measurements_table} m "
+                        f"WHERE m.{stay_col} = q.stay_id "
+                        f"AND m.{meas_itemid_col} IN ({itemids_text}) "
+                        f"AND m.{meas_time_col} BETWEEN q.outtime - INTERVAL '24' HOUR AND q.outtime"
+                        ")"
+                        ") t",
+                        accuracy_mode=accuracy_mode,
+                    )
+                    if miss_count is None:
+                        add_invariant(
+                            f"measurement_required_{signal}",
+                            True,
+                            f"measurement_required({signal}) 검증 쿼리를 실행하지 못했습니다.",
+                            None,
+                        )
+                    else:
+                        passed = miss_count == 0
+                        add_invariant(
+                            f"measurement_required_{signal}",
+                            passed,
+                            f"필수 시그널({signal})의 window 내 측정치가 있어야 합니다.",
+                            miss_count,
+                        )
+                        if not passed:
+                            negative_samples.extend(
+                                self._execute_rows_sample(
+                                    f"SELECT q.subject_id, q.hadm_id, q.stay_id FROM ({base_sql}) q "
+                                    f"WHERE NOT EXISTS ("
+                                    f"SELECT 1 FROM {measurements_table} m "
+                                    f"WHERE m.{stay_col} = q.stay_id "
+                                    f"AND m.{meas_itemid_col} IN ({itemids_text}) "
+                                    f"AND m.{meas_time_col} BETWEEN q.outtime - INTERVAL '24' HOUR AND q.outtime"
+                                    f") FETCH FIRST {negative_sample_limit} ROWS ONLY",
+                                    accuracy_mode=accuracy_mode,
+                                )
+                            )
+
+        anomalies = self._build_stepwise_anomalies(
+            step_counts,
+            intent_steps if isinstance(intent_steps, list) else [],
+            accuracy_mode=accuracy_mode,
+        )
+        report["anomalies"] = anomalies
+        report["invariants"] = invariants
+        report["negative_samples"] = negative_samples[:negative_sample_limit]
+
+        failed = any(not inv.get("passed", False) for inv in invariants)
+        if failed:
+            report["status"] = "failed"
+        elif anomalies:
+            report["status"] = "warning"
+        else:
+            report["status"] = "passed"
+
+        if canonical_spec.get("ambiguities"):
+            report["messages"].append("Ambiguities detected in CohortSpec. Resolve for deterministic behavior.")
+        return report
+
     def _table_preview_text(self, rows: Any) -> str:
         if not isinstance(rows, list):
             return ""
@@ -776,6 +2067,7 @@ class PDFCohortService:
 3. **핵심 요약**: `summary_ko`와 `criteria_summary_ko`는 각각 3문장 내외로 핵심만 요약하세요. (속도 최적화)
 4. **논리적 분해**: 각 조건을 DB 필터링 로직 위주로 설명하세요.
 5. **임상 변수 추출**: 주요 수치형 임상 변수를 찾아 `variables` 리스트에 담고, 반드시 단위(Unit)를 함께 명시하세요.
+6. **모호성 표시**: first admission 기준(unit), ICD 버전, death time 필드가 불명확하면 `ambiguities`에 질문 형태로 추가하세요.
 
 ## 추출 대상 정보
 ### 1. TEXT CONTENT
@@ -843,6 +2135,14 @@ class PDFCohortService:
         "signal_name": "변수명 (예: heart_rate)",
         "description": "변동성 설명 (예: Heart rate measured hourly during ICU stay)"
       }}
+    ],
+    "ambiguities": [
+      {{
+        "id": "amb_xxx",
+        "question": "모호한 기준 질문",
+        "options": ["옵션1", "옵션2"],
+        "default_policy": "require_user_choice"
+      }}
     ]
   }}
 }}
@@ -857,14 +2157,165 @@ class PDFCohortService:
             temperature=0,
             seed=42
         )
-        return json.loads(response.choices[0].message.content)
+        data = json.loads(response.choices[0].message.content)
+        if not isinstance(data, dict):
+            raise RuntimeError("Cohort extraction response is not a JSON object.")
+        if _contains_sql_like_text(data):
+            raise RuntimeError("Cohort extraction contains SQL-like text. SQL generation must be compiled, not authored by LLM.")
+        if not isinstance(data.get("cohort_definition"), dict):
+            data["cohort_definition"] = {}
+        return data
 
-    async def _generate_sql_from_conditions(self, conditions_json: dict, relax_mode: bool = False, deterministic: bool = True) -> dict:
+    def _canonical_spec_to_intent(self, canonical_spec: dict[str, Any]) -> dict[str, Any]:
+        inclusion = canonical_spec.get("inclusion") if isinstance(canonical_spec.get("inclusion"), list) else []
+        exclusion = canonical_spec.get("exclusion") if isinstance(canonical_spec.get("exclusion"), list) else []
+        requirements = canonical_spec.get("requirements") if isinstance(canonical_spec.get("requirements"), list) else []
+        population = canonical_spec.get("population") if isinstance(canonical_spec.get("population"), dict) else {}
+        metadata = canonical_spec.get("metadata") if isinstance(canonical_spec.get("metadata"), dict) else {}
+        accuracy_mode = bool(metadata.get("accuracy_mode"))
+        default_window = "icu_discharge_last_24h"
+        if str(population.get("measurement_window") or "").strip() in WINDOW_TEMPLATES:
+            default_window = str(population.get("measurement_window")).strip()
+        steps: list[dict[str, Any]] = []
+
+        def append_step(step: dict[str, Any]) -> None:
+            if not isinstance(step, dict):
+                return
+            step.setdefault("is_mandatory", True)
+            step.setdefault("window", "")
+            steps.append(step)
+
+        for item in inclusion:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            item_id = str(item.get("id") or f"inc_{len(steps)+1}")
+            if item_type in {"age_range", "age_rule"}:
+                append_step(
+                    {
+                        "name": item_id,
+                        "type": "age",
+                        "params": {
+                            "min": _safe_int(item.get("min"), default=0),
+                            "max": _safe_int(item.get("max"), default=120),
+                        },
+                        "is_exclusion": False,
+                    }
+                )
+            elif item_type == "diagnosis_icd_prefix":
+                codes = item.get("codes") if isinstance(item.get("codes"), list) else []
+                prefixes: list[str] = []
+                icd_version = None
+                for code in codes:
+                    if not isinstance(code, dict):
+                        continue
+                    prefix = str(code.get("prefix") or "").strip().upper()
+                    if prefix:
+                        prefixes.append(prefix)
+                    if code.get("icd_version") is not None:
+                        icd_version = _safe_int(code.get("icd_version"), default=0) or None
+                append_step(
+                    {
+                        "name": item_id,
+                        "type": "diagnosis",
+                        "params": {
+                            "codes": prefixes,
+                            "icd_version": icd_version,
+                        },
+                        "is_exclusion": False,
+                    }
+                )
+            elif item_type == "measurement_required":
+                append_step(
+                    {
+                        "name": item_id,
+                        "type": "measurement_required",
+                        "params": {
+                            "signals": item.get("signals") if isinstance(item.get("signals"), list) else [],
+                        },
+                        "window": default_window,
+                        "is_exclusion": False,
+                    }
+                )
+
+        for item in exclusion:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            item_id = str(item.get("id") or f"exc_{len(steps)+1}")
+            if item_type == "icu_los_min_days":
+                append_step(
+                    {
+                        "name": item_id,
+                        "type": "icu_stay",
+                        "params": {"min_los": float(item.get("min_days") or 1)},
+                        "is_exclusion": True,
+                    }
+                )
+            elif item_type == "death_within_days_of_index_event":
+                append_step(
+                    {
+                        "name": item_id,
+                        "type": "death_within_days",
+                        "params": {"days": _safe_int(item.get("days"), default=3)},
+                        "is_exclusion": True,
+                    }
+                )
+
+        for item in requirements:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().lower() != "measurement_required":
+                continue
+            item_id = str(item.get("id") or f"req_{len(steps)+1}")
+            append_step(
+                {
+                    "name": item_id,
+                    "type": "measurement_required",
+                    "params": {
+                        "signals": item.get("signals") if isinstance(item.get("signals"), list) else [],
+                    },
+                    "window": default_window,
+                    "is_exclusion": False,
+                }
+            )
+        if accuracy_mode:
+            has_icu_los_exclusion = any(
+                isinstance(step, dict)
+                and str(step.get("type") or "").strip().lower() == "icu_stay"
+                and bool(step.get("is_exclusion", False))
+                for step in steps
+            )
+            if not has_icu_los_exclusion:
+                append_step(
+                    {
+                        "name": "accuracy_default_icu_los_min_days",
+                        "type": "icu_stay",
+                        "params": {"min_los": 1.0},
+                        "is_exclusion": True,
+                    }
+                )
+        return {"steps": steps}
+
+    async def _generate_sql_from_conditions(
+        self,
+        conditions_json: dict,
+        *,
+        population_policy: dict[str, Any] | None = None,
+        canonical_spec: dict[str, Any] | None = None,
+        schema_map: dict[str, Any] | None = None,
+        accuracy_mode: bool = False,
+        relax_mode: bool = False,
+        deterministic: bool = True,
+    ) -> dict:
         """2단계: 추출된 코호트 조건(JSON)을 바탕으로 'Intent JSON'을 생성하고 SQL로 컴파일"""
         derived_meta = _load_metadata_json(_DERIVED_VAR_PATH, _DERIVED_VAR_LOCAL)
         derived_names = [v.get("derived_name") for v in derived_meta.get("derived_variables", [])]
-        
-        prompt = f"""당신은 MIMIC-IV 데이터베이스 전문가입니다.
+        intent: dict[str, Any]
+        if accuracy_mode and isinstance(canonical_spec, dict):
+            intent = self._canonical_spec_to_intent(canonical_spec)
+        else:
+            prompt = f"""당신은 MIMIC-IV 데이터베이스 전문가입니다.
 제공된 코호트 정의를 바탕으로, SQL을 직접 쓰지 말고 아래 규칙에 따라 'Cohort Intent JSON'을 생성하세요.
 
 ## 규칙
@@ -878,13 +2329,17 @@ class PDFCohortService:
 8. **ICU 체류시간 규칙 (중요)**:
    - "ICU stay < 24h 제외" 문구는 반드시 `type: "icu_stay"`, `params: {{"min_los": 1}}`, `is_exclusion: true`로 표현하세요.
    - `min_los`는 0보다 큰 값으로 넣으세요(일 단위, 24h=1).
+9. **within-days 규칙**:
+   - `death within X days` 조건은 `type: "death_within_days"` 와 `params.days`로 표현하고, LOS 기반으로 치환하지 마세요.
+10. **측정치 필수 조건**:
+   - 필수 측정치는 `type: "measurement_required"` 와 `params.signals` 배열로 표현하세요.
 
 ## 출력 JSON 형식
 {{
   "steps": [
     {{ 
       "name": "단계 이름 (영어)", 
-      "type": "age|gender|diagnosis|lab|icu_stay|vital|derived", 
+      "type": "age|gender|diagnosis|lab|icu_stay|vital|derived|death_within_days|measurement_required", 
       "params": {{ ... }},
       "window": "icu_first_24h|admission_first_24h|icu_discharge_last_24h",
       "is_exclusion": true/false,
@@ -896,26 +2351,31 @@ class PDFCohortService:
 COHORT JSON:
 {json.dumps(conditions_json, ensure_ascii=False, indent=2)}
 """
-        # 속도 최적화를 위해 Intent 생성 단계는 빠르고 정형화된 gpt-4o-mini 모델 사용
-        mini_model = "gpt-4o-mini"
-        response = await self.client.chat.completions.create(
-            model=mini_model,
-            messages=[
-                {"role": "system", "content": "MIMIC-IV 코호트 설계 전문가입니다. 인텐트 기반 JSON만 반환하세요."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0,
-            seed=42
-        )
-        intent = json.loads(response.choices[0].message.content)
+            # 속도 최적화를 위해 Intent 생성 단계는 빠르고 정형화된 gpt-4o-mini 모델 사용
+            mini_model = "gpt-4o-mini"
+            response = await self.client.chat.completions.create(
+                model=mini_model,
+                messages=[
+                    {"role": "system", "content": "MIMIC-IV 코호트 설계 전문가입니다. 인텐트 기반 JSON만 반환하세요."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+                seed=42
+            )
+            intent = json.loads(response.choices[0].message.content)
+        if _contains_sql_like_text(intent):
+            raise RuntimeError("Intent response contains SQL-like text. SQL must be compiled from intent.")
+        intent = self._sanitize_intent(intent)
         
         # 0명 발생 시 완화 로직 (Relax Mode)
         if relax_mode:
             # 필수 조건만 남기거나 범위를 넓히는 로직 (현재는 LLM 가이드에 is_optional 위임)
             logger.info("완화 모드 활성화됨: 선택적 조건 필터링 검토")
 
-        return self.compile_oracle_sql(intent)
+        compiled = self.compile_oracle_sql(intent, population_policy=population_policy, schema_map=schema_map)
+        compiled["intent"] = intent
+        return compiled
 
     def _get_best_join_key(self, s_type, s_params) -> str:
         """가이드라인 3: 테이블 성격에 맞는 최적의 조인 키 선택"""
@@ -958,6 +2418,11 @@ COHORT JSON:
             "icu_los_days": "icu_stay",
             "diagnoses": "diagnosis",
             "dx": "diagnosis",
+            "measurement": "measurement_required",
+            "measurements": "measurement_required",
+            "measurement_required": "measurement_required",
+            "death_within_days_of_index_event": "death_within_days",
+            "death_within_days": "death_within_days",
         }
         return aliases.get(step_type, step_type)
 
@@ -976,6 +2441,109 @@ COHORT JSON:
             return normalized
         return ""
 
+    def _sanitize_intent_step(self, step: Any) -> dict[str, Any] | None:
+        if not isinstance(step, dict):
+            return None
+        step_type = self._normalize_step_type(step.get("type"))
+        if not step_type:
+            return None
+        safe_params = step.get("params") if isinstance(step.get("params"), dict) else {}
+        safe_step = {
+            "name": self._pick_first_text(step.get("name")) or f"{step_type}_step",
+            "type": step_type,
+            "params": safe_params,
+            "window": self._normalize_window_key(step.get("window")),
+            "is_exclusion": bool(step.get("is_exclusion", False)),
+            "is_mandatory": bool(step.get("is_mandatory", True)),
+        }
+        return safe_step
+
+    def _sanitize_intent(self, intent: Any) -> dict[str, Any]:
+        if not isinstance(intent, dict):
+            return {"steps": []}
+        raw_steps = intent.get("steps")
+        if not isinstance(raw_steps, list):
+            raw_steps = []
+        sanitized_steps: list[dict[str, Any]] = []
+        for step in raw_steps:
+            safe = self._sanitize_intent_step(step)
+            if safe:
+                sanitized_steps.append(safe)
+        return {"steps": sanitized_steps}
+
+    def _resolve_signal_itemids(self, schema_map: dict[str, Any], signal_name: str) -> list[int]:
+        normalized = _normalize_signal_name(signal_name)
+        mapping = schema_map.get("signal_map") if isinstance(schema_map.get("signal_map"), dict) else {}
+        raw = mapping.get(normalized) or mapping.get(signal_name) or {}
+        itemids: list[int] = []
+        if isinstance(raw, dict):
+            raw_itemids = raw.get("itemids")
+            if isinstance(raw_itemids, list):
+                for item in raw_itemids:
+                    try:
+                        itemids.append(int(item))
+                    except Exception:
+                        continue
+        if itemids:
+            return sorted(set(itemids))
+
+        meta = self.signal_metadata.get(normalized) if isinstance(self.signal_metadata, dict) else None
+        itemid_text = str((meta or {}).get("itemid") or "").strip()
+        for token in itemid_text.split(","):
+            try:
+                itemids.append(int(token.strip()))
+            except Exception:
+                continue
+        return sorted(set(itemids))
+
+    def _validate_schema_map_requirements(
+        self,
+        *,
+        schema_map: dict[str, Any],
+        canonical_spec: dict[str, Any],
+        intent: dict[str, Any],
+    ) -> list[str]:
+        missing: list[str] = []
+        required_tables = {"patients", "admissions", "diagnoses_icd"}
+        required_columns = {"subject_id", "hadm_id", "anchor_age", "admittime", "icd_code"}
+        population = canonical_spec.get("population") if isinstance(canonical_spec.get("population"), dict) else {}
+        if bool(population.get("require_icu")):
+            required_tables.add("icustays")
+            required_columns.update({"stay_id", "icu_intime", "icu_outtime", "icu_los_days"})
+
+        exclusion = canonical_spec.get("exclusion") if isinstance(canonical_spec.get("exclusion"), list) else []
+        if any(isinstance(item, dict) and str(item.get("type") or "").strip().lower() == "death_within_days_of_index_event" for item in exclusion):
+            required_columns.add("death_time")
+
+        requirements = canonical_spec.get("requirements") if isinstance(canonical_spec.get("requirements"), list) else []
+        for req in requirements:
+            if not isinstance(req, dict):
+                continue
+            if str(req.get("type") or "").strip().lower() != "measurement_required":
+                continue
+            required_tables.add("measurements")
+            required_columns.update({"meas_time", "meas_itemid"})
+            for signal in req.get("signals") if isinstance(req.get("signals"), list) else []:
+                if not self._resolve_signal_itemids(schema_map, str(signal)):
+                    missing.append(f"signal_map.{signal}")
+
+        tables = schema_map.get("tables") if isinstance(schema_map.get("tables"), dict) else {}
+        cols = schema_map.get("columns") if isinstance(schema_map.get("columns"), dict) else {}
+        for key in sorted(required_tables):
+            if not str(tables.get(key) or "").strip():
+                missing.append(f"tables.{key}")
+        for key in sorted(required_columns):
+            if not str(cols.get(key) or "").strip():
+                missing.append(f"columns.{key}")
+
+        steps = intent.get("steps") if isinstance(intent, dict) else []
+        if isinstance(steps, list) and any(str((s or {}).get("type") or "").strip().lower() == "measurement_required" for s in steps if isinstance(s, dict)):
+            required_tables.add("measurements")
+            if not str(tables.get("measurements") or "").strip():
+                missing.append("tables.measurements")
+
+        return sorted(set(missing))
+
     def _sanitize_sql_params(self, raw_params: Any) -> dict[str, Any]:
         defaults: dict[str, Any] = {
             "min": 0,
@@ -983,10 +2551,13 @@ COHORT JSON:
             "operator": "=",
             "value": 0,
             "min_los": 0,
+            "days": 0,
             "drug": "",
             "gender": "all",
             "codes": "''",
             "label": "",
+            "signals": [],
+            "icd_version": None,
         }
         params = raw_params if isinstance(raw_params, dict) else {}
         safe: dict[str, Any] = {**defaults}
@@ -1007,6 +2578,7 @@ COHORT JSON:
         safe["max"] = _coerce_num(safe.get("max"), 150.0)
         safe["value"] = _coerce_num(safe.get("value"), 0.0)
         safe["min_los"] = _coerce_num(safe.get("min_los"), 0.0)
+        safe["days"] = _coerce_num(safe.get("days"), 0.0)
         if safe["min"] > safe["max"]:
             safe["min"], safe["max"] = safe["max"], safe["min"]
 
@@ -1018,6 +2590,16 @@ COHORT JSON:
         safe["drug"] = re.sub(r"[\"'`]", "", str(safe.get("drug") or "").strip())
         safe["gender"] = str(safe.get("gender") or "all").strip().lower() or "all"
         safe["label"] = re.sub(r"[\"'`]", "", str(safe.get("label") or "").strip())
+        if not isinstance(safe.get("signals"), list):
+            picked = self._pick_first_text(safe.get("signals"))
+            safe["signals"] = [picked] if picked else []
+        if safe.get("icd_version") in {"", None}:
+            safe["icd_version"] = None
+        else:
+            try:
+                safe["icd_version"] = int(float(str(safe.get("icd_version")).strip()))
+            except Exception:
+                safe["icd_version"] = None
         return safe
 
     def _normalize_gender_filter(self, raw_gender: Any) -> str | None:
@@ -1107,12 +2689,56 @@ COHORT JSON:
                 return fallback
         return next(iter(available))
 
-    def compile_oracle_sql(self, intent: dict) -> dict:
+    def compile_oracle_sql(
+        self,
+        intent: dict,
+        population_policy: dict[str, Any] | None = None,
+        schema_map: dict[str, Any] | None = None,
+    ) -> dict:
         """Intent JSON을 바탕으로 실제 Oracle SQL(MIMIC-IV)을 조립합니다. (CTE 단계 누적)"""
+        policy = population_policy if isinstance(population_policy, dict) else {}
+        resolved_schema = _merge_dict(_default_pdf_schema_map(), schema_map if isinstance(schema_map, dict) else {})
+        patients_table = _schema_table(resolved_schema, "patients", "SSO.PATIENTS")
+        admissions_table = _schema_table(resolved_schema, "admissions", "SSO.ADMISSIONS")
+        icustays_table = _schema_table(resolved_schema, "icustays", "SSO.ICUSTAYS")
+        diagnoses_table = _schema_table(resolved_schema, "diagnoses_icd", "SSO.DIAGNOSES_ICD")
+        measurements_table = _schema_table(resolved_schema, "measurements", "SSO.CHARTEVENTS")
+
+        subject_col = _schema_col(resolved_schema, "subject_id", "subject_id")
+        hadm_col = _schema_col(resolved_schema, "hadm_id", "hadm_id")
+        stay_col = _schema_col(resolved_schema, "stay_id", "stay_id")
+        admittime_col = _schema_col(resolved_schema, "admittime", "admittime")
+        icu_intime_col = _schema_col(resolved_schema, "icu_intime", "intime")
+        icu_outtime_col = _schema_col(resolved_schema, "icu_outtime", "outtime")
+        icu_los_col = _schema_col(resolved_schema, "icu_los_days", "los")
+        death_time_col = _schema_col(resolved_schema, "death_time", "deathtime")
+        icd_code_col = _schema_col(resolved_schema, "icd_code", "icd_code")
+        icd_version_col = _schema_col(resolved_schema, "icd_version", "icd_version")
+        meas_time_col = _schema_col(resolved_schema, "meas_time", "charttime")
+        meas_itemid_col = _schema_col(resolved_schema, "meas_itemid", "itemid")
+
+        accuracy_mode = bool(policy.get("accuracy_mode", False))
+        require_icu = bool(policy.get("require_icu", False))
+        episode_selector = str(policy.get("episode_selector") or "all").strip().lower()
+        if episode_selector not in {"first", "last", "all"}:
+            episode_selector = "all"
+        episode_unit = str(policy.get("episode_unit") or "per_hadm").strip().lower()
+        if episode_unit not in {"per_subject", "per_hadm"}:
+            episode_unit = "per_hadm"
+        default_measurement_window = str(policy.get("measurement_window") or "icu_discharge_last_24h").strip()
+        if default_measurement_window not in WINDOW_TEMPLATES:
+            default_measurement_window = "icu_discharge_last_24h"
+        if accuracy_mode:
+            require_icu = True
+            episode_selector = "first"
+            episode_unit = "per_subject"
+            default_measurement_window = "icu_discharge_last_24h"
+
         steps = intent.get("steps", [])
         ctes = []
         step_labels = []
         step_refs = []
+        compile_warnings: list[str] = []
 
         def _safe_render_sql_template(
             template: str,
@@ -1132,31 +2758,61 @@ COHORT JSON:
                 )
                 return None
         
-        # 기본 모집단은 ADMISSIONS 중심으로 시작하고, ICU 정보는 있으면 결합합니다.
-        # 논문 본문에 없는 ICU/재원시간 제약을 기본값으로 강제하지 않아야 코호트 정확도가 높아집니다.
-        ctes.append("""population AS (
+        join_keyword = "JOIN" if require_icu else "LEFT JOIN"
+        ctes.append(f"""population AS (
     SELECT
-        a.subject_id,
-        a.hadm_id,
-        i.stay_id,
-        i.intime,
-        i.outtime,
-        a.admittime
-    FROM SSO.ADMISSIONS a
-    LEFT JOIN (
+        a.{subject_col} AS subject_id,
+        a.{hadm_col} AS hadm_id,
+        i.{stay_col} AS stay_id,
+        i.{icu_intime_col} AS intime,
+        i.{icu_outtime_col} AS outtime,
+        i.{icu_los_col} AS los,
+        a.{admittime_col} AS admittime
+    FROM {admissions_table} a
+    {join_keyword} (
         SELECT
-            hadm_id,
-            stay_id,
-            intime,
-            outtime,
-            ROW_NUMBER() OVER (PARTITION BY hadm_id ORDER BY intime) AS rn
-        FROM SSO.ICUSTAYS
-    ) i ON i.hadm_id = a.hadm_id AND i.rn = 1
+            {hadm_col},
+            {stay_col},
+            {icu_intime_col},
+            {icu_outtime_col},
+            {icu_los_col},
+            ROW_NUMBER() OVER (PARTITION BY {hadm_col} ORDER BY {icu_intime_col}) AS rn
+        FROM {icustays_table}
+    ) i ON i.{hadm_col} = a.{hadm_col} AND i.rn = 1
 )""")
         step_labels.append("Initial Population (Admissions)")
         step_refs.append("population")
-        
+
         current_prev = "population"
+        if require_icu:
+            ctes.append("""population_require_icu AS (
+    SELECT *
+    FROM population
+    WHERE stay_id IS NOT NULL
+)""")
+            current_prev = "population_require_icu"
+            step_labels.append("Require ICU Stay")
+            step_refs.append(current_prev)
+
+        if episode_selector in {"first", "last"}:
+            partition_key = "subject_id" if episode_unit == "per_subject" else "hadm_id"
+            order_dir = "ASC" if episode_selector == "first" else "DESC"
+            ctes.append(f"""population_episode_selector AS (
+    SELECT *
+    FROM (
+        SELECT
+            p.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.{partition_key}
+                ORDER BY p.intime {order_dir} NULLS LAST, p.admittime {order_dir} NULLS LAST
+            ) AS rn_episode
+        FROM {current_prev} p
+    )
+    WHERE rn_episode = 1
+)""")
+            current_prev = "population_episode_selector"
+            step_labels.append(f"Episode Selector ({episode_selector} / {episode_unit})")
+            step_refs.append(current_prev)
         
         for i, step in enumerate(steps):
             s_type = self._normalize_step_type(step.get("type"))
@@ -1171,6 +2827,90 @@ COHORT JSON:
             # Guard against malformed/empty params from LLM intent JSON.
             safe_params = self._sanitize_sql_params(s_params)
             
+            # 정확도 우선 특수 규칙: death_within_days는 사건-사건 비교로만 처리
+            if s_type == "death_within_days":
+                days = max(0, int(float(safe_params.get("days") or 0)))
+                if days <= 0:
+                    days = 3
+                exists_sql = (
+                    f"SELECT 1 FROM {admissions_table} a "
+                    f"WHERE a.{hadm_col} = p.hadm_id "
+                    f"AND a.{death_time_col} IS NOT NULL "
+                    f"AND a.{death_time_col} <= COALESCE(p.intime, p.admittime) + NUMTODSINTERVAL({days}, 'DAY')"
+                )
+                operator_exists = "NOT EXISTS" if is_exclusion else "EXISTS"
+                cte_query = f"""SELECT p.*
+FROM {current_prev} p
+WHERE {operator_exists} (
+    {exists_sql}
+)"""
+                ctes.append(f"{s_name} AS ({cte_query})")
+                step_labels.append(self._pick_first_text(step.get("name")) or s_name)
+                step_refs.append(s_name)
+                current_prev = s_name
+                continue
+
+            if s_type == "measurement_required":
+                raw_signals = safe_params.get("signals")
+                signals = [str(sig).strip() for sig in raw_signals] if isinstance(raw_signals, list) else []
+                signals = [sig for sig in signals if sig]
+                if not signals:
+                    logger.warning("Step '%s': measurement_required has no signals. Skipping step.", s_name)
+                    continue
+                effective_window_key = window_key or default_measurement_window
+                if accuracy_mode:
+                    effective_window_key = "icu_discharge_last_24h"
+                window_expr = WINDOW_TEMPLATES.get(effective_window_key)
+                if not window_expr:
+                    window_expr = WINDOW_TEMPLATES[default_measurement_window]
+                window_expr = window_expr.replace("s.charttime", f"m.{meas_time_col}").replace("p.", "c.")
+                signal_itemids: dict[str, list[int]] = {}
+                injected_itemids: set[int] = set()
+                for signal in signals:
+                    itemids = self._resolve_signal_itemids(resolved_schema, signal)
+                    if not itemids:
+                        logger.warning("Step '%s': signal_map for '%s' is empty. Skipping signal.", s_name, signal)
+                        continue
+                    signal_itemids[signal] = sorted(set(itemids))
+                    injected_itemids.update(signal_itemids[signal])
+                if not signal_itemids or not injected_itemids:
+                    logger.warning("Step '%s': no valid signal itemids for measurement_required. Skipping step.", s_name)
+                    continue
+                injected_itemids_text = ", ".join(str(v) for v in sorted(injected_itemids))
+                having_parts = []
+                for signal, itemids in signal_itemids.items():
+                    itemids_text = ", ".join(str(v) for v in itemids)
+                    having_parts.append(
+                        f"SUM(CASE WHEN m.{meas_itemid_col} IN ({itemids_text}) THEN 1 ELSE 0 END) > 0"
+                    )
+                meas_cte_name = f"{s_name}_meas_ok"
+                ctes.append(f"""{meas_cte_name} AS (
+    SELECT /*+ MATERIALIZE */ c.stay_id
+    FROM {current_prev} c
+    JOIN {measurements_table} m
+      ON m.{stay_col} = c.stay_id
+     AND {window_expr}
+     AND m.{meas_itemid_col} IN ({injected_itemids_text})
+    GROUP BY c.stay_id
+    HAVING {' AND '.join(having_parts)}
+)""")
+                if is_exclusion:
+                    filter_clause = (
+                        f"NOT EXISTS (SELECT 1 FROM {meas_cte_name} x WHERE x.stay_id = p.stay_id)"
+                    )
+                else:
+                    filter_clause = (
+                        f"EXISTS (SELECT 1 FROM {meas_cte_name} x WHERE x.stay_id = p.stay_id)"
+                    )
+                cte_query = f"""SELECT p.*
+FROM {current_prev} p
+WHERE {filter_clause}"""
+                ctes.append(f"{s_name} AS ({cte_query})")
+                step_labels.append(self._pick_first_text(step.get("name")) or s_name)
+                step_refs.append(s_name)
+                current_prev = s_name
+                continue
+
             # 가드레일: Vital은 ChartEvents 우선
             if s_type == "vital":
                 v_signal = _normalize_signal_name(safe_params.get("signal"))
@@ -1210,7 +2950,10 @@ COHORT JSON:
                     # 유효하지 않은 derived 변수의 경우, SSO 스키마를 붙여 admissions 조인으로 우회 (에러 방지)
                     logger.warning(f"Unknown derived signal: {d_name}. Falling back to admissions.")
                     # Fallback to ICUSTAYS for derived scores to prevent ORA-00942 (Missing Table)
-                    signal_sql = "SELECT stay_id, intime as charttime FROM SSO.ICUSTAYS WHERE stay_id IS NOT NULL"
+                    signal_sql = (
+                        f"SELECT {stay_col} AS stay_id, {icu_intime_col} AS charttime "
+                        f"FROM {icustays_table} WHERE {stay_col} IS NOT NULL"
+                    )
             elif s_type in self.signal_map:
                 raw_sql = self.signal_map[s_type]
                 if s_type in {"gender", "sex"}:
@@ -1244,8 +2987,8 @@ COHORT JSON:
 
                     if is_exclusion:
                         signal_sql = (
-                            "SELECT stay_id, hadm_id, intime as charttime "
-                            f"FROM SSO.ICUSTAYS WHERE los < {min_los:g}"
+                            f"SELECT {stay_col} AS stay_id, {hadm_col} AS hadm_id, {icu_intime_col} AS charttime "
+                            f"FROM {icustays_table} WHERE {icu_los_col} < {min_los:g}"
                         )
                     else:
                         safe_params["min_los"] = min_los
@@ -1285,10 +3028,25 @@ COHORT JSON:
                         )
                         continue
 
-                    code_conditions = [f"TRIM(icd_code) LIKE '{code}%'" for code in cleaned_codes]
+                    code_conditions = [f"{icd_code_col} LIKE '{code}%'" for code in cleaned_codes]
+                    version_filter = ""
+                    if safe_params.get("icd_version") is not None:
+                        raw_columns = schema_map.get("columns") if isinstance(schema_map, dict) else {}
+                        has_explicit_icd_version = isinstance(raw_columns, dict) and bool(
+                            str(raw_columns.get("icd_version") or "").strip()
+                        )
+                        if has_explicit_icd_version:
+                            version_filter = f" AND {icd_version_col} = {int(safe_params['icd_version'])}"
+                        else:
+                            warning_msg = (
+                                "icd_version 매핑이 없어 diagnosis_icd_prefix 필터를 버전 분리 없이 컴파일했습니다. "
+                                "오탐 가능성이 있습니다."
+                            )
+                            compile_warnings.append(warning_msg)
+                            logger.warning("Step '%s': %s", s_name, warning_msg)
                     signal_sql = (
-                        "SELECT hadm_id FROM SSO.DIAGNOSES_ICD "
-                        f"WHERE {' OR '.join(code_conditions)}"
+                        f"SELECT {hadm_col} AS hadm_id FROM {diagnoses_table} "
+                        f"WHERE ({' OR '.join(code_conditions)}){version_filter}"
                     )
                 else:
                     signal_sql = _safe_render_sql_template(
@@ -1330,7 +3088,9 @@ COHORT JSON:
             # 시간 정보(charttime)가 있는 경우에만 윈도우 필터 적용 (가드 로직)
             if window_key:
                 if "charttime" in signal_sql.lower():
-                    condition_parts.append(WINDOW_TEMPLATES[window_key])
+                    window_template = WINDOW_TEMPLATES.get(window_key)
+                    if window_template:
+                        condition_parts.append(window_template)
                 else:
                     logger.info(f"Step '{s_name}' skipped window filter: No 'charttime' in SQL.")
             
@@ -1365,7 +3125,8 @@ WHERE {operator_exists} (
         return {
             "cohort_sql": cohort_sql,
             "count_sql": count_sql,
-            "debug_count_sql": debug_count_sql
+            "debug_count_sql": debug_count_sql,
+            "warning": compile_warnings,
         }
 
     def _map_clinical_variables(self, extracted_vars: list) -> list:
@@ -1516,6 +3277,7 @@ WHERE {operator_exists} (
         relax_mode: bool = False,
         deterministic: bool = True,
         reuse_existing: bool = True,
+        accuracy_mode: bool | None = None,
     ) -> dict:
         """
         PDF 분석을 2단계(추출 -> SQL 생성)로 수행하고 결과 집계.
@@ -1523,7 +3285,8 @@ WHERE {operator_exists} (
         False이면 캐시를 무시하고 강제로 재생성하여 업데이트합니다.
         """
         # Bump cache version when SQL assembly logic changes to avoid stale results.
-        pipeline_version = "v57"
+        pipeline_version = "v59"
+        accuracy_on = _PDF_ACCURACY_MODE_DEFAULT if accuracy_mode is None else bool(accuracy_mode)
         file_hash = hashlib.sha256(file_content).hexdigest()
         model_name = self.model
         prompt_hash = self._calculate_prompt_hash(relax_mode, deterministic)
@@ -1541,7 +3304,7 @@ WHERE {operator_exists} (
                 return confirmed
 
         # PK 생성: pdf_hash + relax_mode + deterministic + pipeline_version
-        cache_key = f"pdf_analysis::{pipeline_version}::{file_hash}::{relax_mode}::{deterministic}"
+        cache_key = f"pdf_analysis::{pipeline_version}::{file_hash}::{relax_mode}::{deterministic}::{accuracy_on}"
         
         # 1-1. Primary Cache 확인 (reuse_existing=True일 때만)
         if store and reuse_existing:
@@ -1578,7 +3341,8 @@ WHERE {operator_exists} (
                 "value.canonical_hash": canonical_hash,
                 "value.relax_mode": relax_mode,
                 "value.deterministic": deterministic,
-                "value.pipeline_version": pipeline_version
+                "value.pipeline_version": pipeline_version,
+                "value.accuracy_mode": accuracy_on,
             })
             if matched:
                 logger.info(f"PDF 분석 결과 Canonical 캐시 적중 (Canonical Hash: {canonical_hash})")
@@ -1615,10 +3379,248 @@ WHERE {operator_exists} (
             assets_summary=assets_summary,
             deterministic=deterministic,
         )
+        adaptive_extract = run_adaptive_extraction(
+            focused_text,
+            start_level="fast",
+        )
+        snippets = adaptive_extract.get("snippets") if isinstance(adaptive_extract.get("snippets"), list) else []
+        adaptive_level = str(adaptive_extract.get("level") or "fast")
+        adaptive_logs = adaptive_extract.get("log") if isinstance(adaptive_extract.get("log"), list) else []
+        risk_score = int((adaptive_extract.get("risk") or {}).get("risk_score") or 0)
+        risk_flags = (adaptive_extract.get("risk") or {}).get("flags") if isinstance(adaptive_extract.get("risk"), dict) else {}
+        conditions, ambiguities = self._enrich_conditions_with_evidence(conditions, snippets)
+        population_policy = self._derive_population_policy(conditions, accuracy_mode=accuracy_on)
+        critic_notes: list[str] = []
+
+        canonical_spec = self._build_canonical_spec(
+            conditions,
+            file_hash=file_hash,
+            snippets=snippets,
+            ambiguities=ambiguities,
+            accuracy_mode=accuracy_on,
+        )
+        canonical_spec, evidence_summary = enforce_condition_evidence(canonical_spec)
+        schema_validated_spec, schema_errors = validate_cohort_spec(canonical_spec)
+        canonical_spec = schema_validated_spec if isinstance(schema_validated_spec, dict) else canonical_spec
+        if schema_errors:
+            critic_notes.extend([f"spec_schema:{msg}" for msg in schema_errors])
+        type_warnings = validate_supported_types(canonical_spec)
+        if type_warnings:
+            critic_notes.extend([f"type_catalog:{msg}" for msg in type_warnings])
+
+        if accuracy_on and adaptive_level == "fast":
+            if should_upgrade_to_accurate(
+                ambiguity_count=len(ambiguities),
+                evidence_coverage=float(evidence_summary.get("coverage") or 0.0),
+                risk_score=risk_score,
+            ):
+                upgraded = run_adaptive_extraction(focused_text, start_level=adaptive_level, force_level="accurate")
+                snippets = upgraded.get("snippets") if isinstance(upgraded.get("snippets"), list) else snippets
+                adaptive_level = str(upgraded.get("level") or adaptive_level)
+                if isinstance(upgraded.get("log"), list):
+                    adaptive_logs.extend(upgraded["log"])
+                conditions, ambiguities = self._enrich_conditions_with_evidence(conditions, snippets)
+                canonical_spec = self._build_canonical_spec(
+                    conditions,
+                    file_hash=file_hash,
+                    snippets=snippets,
+                    ambiguities=ambiguities,
+                    accuracy_mode=accuracy_on,
+                )
+                canonical_spec, evidence_summary = enforce_condition_evidence(canonical_spec)
+
+        if accuracy_on and should_upgrade_to_strict(
+            ambiguity_count=len(ambiguities),
+            evidence_coverage=float(evidence_summary.get("coverage") or 0.0),
+            validator_failed=False,
+            measurement_required=has_measurement_required(canonical_spec),
+            has_icd_shorthand=bool((risk_flags or {}).get("code_normalization")) or has_icd_shorthand_risk(canonical_spec),
+        ):
+            if adaptive_level != "strict":
+                strict_extracted = run_adaptive_extraction(
+                    focused_text,
+                    start_level=adaptive_level,
+                    force_level="strict",
+                )
+                snippets = strict_extracted.get("snippets") if isinstance(strict_extracted.get("snippets"), list) else snippets
+                adaptive_level = str(strict_extracted.get("level") or "strict")
+                if isinstance(strict_extracted.get("log"), list):
+                    adaptive_logs.extend(strict_extracted["log"])
+                conditions, ambiguities = self._enrich_conditions_with_evidence(conditions, snippets)
+                canonical_spec = self._build_canonical_spec(
+                    conditions,
+                    file_hash=file_hash,
+                    snippets=snippets,
+                    ambiguities=ambiguities,
+                    accuracy_mode=accuracy_on,
+                )
+                canonical_spec, evidence_summary = enforce_condition_evidence(canonical_spec)
+
+        if accuracy_on:
+            revised_spec, critic_extra = await self._critic_cohort_spec(
+                snippets=snippets,
+                canonical_spec=canonical_spec,
+            )
+            critic_notes.extend(critic_extra)
+            canonical_spec, evidence_summary = enforce_condition_evidence(
+                revised_spec if isinstance(revised_spec, dict) else canonical_spec
+            )
+            schema_validated_spec, schema_errors = validate_cohort_spec(canonical_spec)
+            canonical_spec = schema_validated_spec if isinstance(schema_validated_spec, dict) else canonical_spec
+            if schema_errors:
+                critic_notes.extend([f"spec_schema:{msg}" for msg in schema_errors])
+            type_warnings = validate_supported_types(canonical_spec)
+            if type_warnings:
+                critic_notes.extend([f"type_catalog:{msg}" for msg in type_warnings])
+
+        schema_map = _load_pdf_schema_map()
+        resolved_ambiguity = resolve_ambiguities(
+            spec=canonical_spec,
+            schema_map=schema_map,
+            pdf_hash=file_hash,
+            limit=3,
+        )
+        canonical_spec = resolved_ambiguity.get("spec") if isinstance(resolved_ambiguity.get("spec"), dict) else canonical_spec
+        ambiguities = resolved_ambiguity.get("ambiguities") if isinstance(resolved_ambiguity.get("ambiguities"), list) else []
+        ambiguity_questions = resolved_ambiguity.get("questions") if isinstance(resolved_ambiguity.get("questions"), list) else []
+        strict_ambiguity_mode = _PDF_STRICT_AMBIGUITY_MODE or accuracy_on
+
+        if strict_ambiguity_mode and ambiguities:
+            blocked_result = {
+                "columns": [],
+                "rows": [],
+                "step_counts": [],
+                "row_count": 0,
+                "total_count": None,
+                "error": "Ambiguity resolution required before SQL compilation.",
+                "warning": ["모호한 조건이 있어 SQL 생성을 중단했습니다. ambiguity를 먼저 확정하세요."],
+            }
+            final_response = {
+                "status": "needs_user_input",
+                "pdf_hash": file_hash,
+                "canonical_hash": canonical_hash,
+                "filename": str(filename or "").strip() or "uploaded.pdf",
+                "user_id": str(user_id or "").strip() or None,
+                "relax_mode": relax_mode,
+                "deterministic": deterministic,
+                "accuracy_mode": accuracy_on,
+                "pdf_page_count": page_count,
+                "pdf_pages_scanned": pages_scanned,
+                "pipeline_version": pipeline_version,
+                "model": model_name,
+                "prompt_hash": prompt_hash,
+                "cohort_definition": conditions.get("cohort_definition", {}),
+                "cohort_spec": canonical_spec,
+                "ambiguity_resolution_required": True,
+                "ambiguities": ambiguities,
+                "ambiguity_questions": ambiguity_questions,
+                "snippets": snippets,
+                "adaptive_extract": {
+                    "level": adaptive_level,
+                    "log": adaptive_logs,
+                    "risk": adaptive_extract.get("risk") if isinstance(adaptive_extract.get("risk"), dict) else {},
+                    "evidence_summary": evidence_summary,
+                },
+                "mapped_variables": [],
+                "cohort_conditions": conditions.get("cohort_definition", {}).get("extraction_details", {}).get("cohort_criteria", {}).get("population", []),
+                "features": [],
+                "generated_sql": {"cohort_sql": None, "count_sql": None, "debug_count_sql": None},
+                "validation_report": {
+                    "enabled": _PDF_VALIDATION_ENABLED,
+                    "status": "blocked",
+                    "accuracy_mode": accuracy_on,
+                    "invariants": [],
+                    "stepwise_counts": [],
+                    "anomalies": [],
+                    "negative_samples": [],
+                    "messages": ["Ambiguity resolution is required before SQL compilation.", *critic_notes],
+                },
+                "accuracy_report": self._build_accuracy_metrics(
+                    canonical_spec=canonical_spec,
+                    validation_report={"status": "blocked"},
+                ),
+                "db_result": blocked_result,
+                "next_action": {"type": "resolve_ambiguities", "ambiguities": ambiguity_questions or ambiguities},
+            }
+            return final_response
+
+        precheck_intent = self._canonical_spec_to_intent(canonical_spec) if accuracy_on else {"steps": []}
+        if accuracy_on:
+            schema_missing = self._validate_schema_map_requirements(
+                schema_map=schema_map,
+                canonical_spec=canonical_spec,
+                intent=precheck_intent,
+            )
+            if schema_missing:
+                blocked_result = {
+                    "columns": [],
+                    "rows": [],
+                    "step_counts": [],
+                    "row_count": 0,
+                    "total_count": None,
+                    "error": "SchemaMap is incomplete for accuracy mode.",
+                    "warning": ["SchemaMap 필수 항목이 누락되어 SQL 생성을 중단했습니다."],
+                }
+                return {
+                    "status": "needs_user_input",
+                    "pdf_hash": file_hash,
+                    "canonical_hash": canonical_hash,
+                    "filename": str(filename or "").strip() or "uploaded.pdf",
+                    "user_id": str(user_id or "").strip() or None,
+                    "relax_mode": relax_mode,
+                    "deterministic": deterministic,
+                    "accuracy_mode": accuracy_on,
+                    "pdf_page_count": page_count,
+                    "pdf_pages_scanned": pages_scanned,
+                    "pipeline_version": pipeline_version,
+                    "model": model_name,
+                    "prompt_hash": prompt_hash,
+                    "cohort_definition": conditions.get("cohort_definition", {}),
+                    "cohort_spec": canonical_spec,
+                    "ambiguity_resolution_required": True,
+                    "ambiguities": ambiguities,
+                    "ambiguity_questions": ambiguity_questions,
+                    "snippets": snippets,
+                    "adaptive_extract": {
+                        "level": adaptive_level,
+                        "log": adaptive_logs,
+                        "risk": adaptive_extract.get("risk") if isinstance(adaptive_extract.get("risk"), dict) else {},
+                        "evidence_summary": evidence_summary,
+                    },
+                    "mapped_variables": [],
+                    "cohort_conditions": conditions.get("cohort_definition", {}).get("extraction_details", {}).get("cohort_criteria", {}).get("population", []),
+                    "features": [],
+                    "generated_sql": {"cohort_sql": None, "count_sql": None, "debug_count_sql": None, "intent": precheck_intent},
+                    "validation_report": {
+                        "enabled": _PDF_VALIDATION_ENABLED,
+                        "status": "blocked",
+                        "accuracy_mode": True,
+                        "invariants": [],
+                        "stepwise_counts": [],
+                        "anomalies": [],
+                        "negative_samples": [],
+                        "messages": ["SchemaMap is incomplete.", *critic_notes],
+                    },
+                    "accuracy_report": self._build_accuracy_metrics(
+                        canonical_spec=canonical_spec,
+                        validation_report={"status": "blocked"},
+                    ),
+                    "db_result": blocked_result,
+                    "next_action": {"type": "schema_map_required", "missing": schema_missing},
+                }
         
         # 2단계: SQL 생성
         logger.info(f"2단계: SQL 생성 시작 (Relax Mode: {relax_mode}, Deterministic: {deterministic})")
-        sql_result = await self._generate_sql_from_conditions(conditions, relax_mode=relax_mode, deterministic=deterministic)
+        sql_result = await self._generate_sql_from_conditions(
+            conditions,
+            population_policy=population_policy,
+            canonical_spec=canonical_spec,
+            schema_map=schema_map,
+            accuracy_mode=accuracy_on,
+            relax_mode=relax_mode,
+            deterministic=deterministic,
+        )
+        intent_payload = sql_result.get("intent") if isinstance(sql_result, dict) else {}
         
         # 3. SQL 정제 및 최적화 힌트 추가
         for key in ["cohort_sql", "count_sql", "debug_count_sql"]:
@@ -1640,6 +3642,72 @@ WHERE {operator_exists} (
                     sql_result["warning"] = []
                 sql_result["warning"].append(msg)
 
+        sql_result = apply_oracle_compiler_guards(sql_result, accuracy_mode=accuracy_on)
+        compiler_guard = sql_result.get("compiler_guard") if isinstance(sql_result.get("compiler_guard"), dict) else {}
+        if accuracy_on and bool(sql_result.get("blocked")):
+            blocked_result = {
+                "columns": [],
+                "rows": [],
+                "step_counts": [],
+                "row_count": 0,
+                "total_count": None,
+                "error": "SQL compile blocked by anti-pattern guard.",
+                "warning": [str(v.get("message") or "") for v in compiler_guard.get("violations", []) if isinstance(v, dict)],
+            }
+            return {
+                "status": "validation_failed",
+                "pdf_hash": file_hash,
+                "canonical_hash": canonical_hash,
+                "filename": str(filename or "").strip() or "uploaded.pdf",
+                "user_id": str(user_id or "").strip() or None,
+                "relax_mode": relax_mode,
+                "deterministic": deterministic,
+                "accuracy_mode": accuracy_on,
+                "pdf_page_count": page_count,
+                "pdf_pages_scanned": pages_scanned,
+                "pipeline_version": pipeline_version,
+                "model": model_name,
+                "prompt_hash": prompt_hash,
+                "cohort_definition": conditions.get("cohort_definition", {}),
+                "cohort_spec": canonical_spec,
+                "ambiguity_resolution_required": bool(ambiguities),
+                "ambiguities": ambiguities,
+                "ambiguity_questions": ambiguity_questions,
+                "snippets": snippets,
+                "adaptive_extract": {
+                    "level": adaptive_level,
+                    "log": adaptive_logs,
+                    "risk": adaptive_extract.get("risk") if isinstance(adaptive_extract.get("risk"), dict) else {},
+                    "evidence_summary": evidence_summary,
+                },
+                "mapped_variables": [],
+                "cohort_conditions": conditions.get("cohort_definition", {}).get("extraction_details", {}).get("cohort_criteria", {}).get("population", []),
+                "features": [],
+                "generated_sql": {
+                    "cohort_sql": sql_result.get("cohort_sql"),
+                    "count_sql": sql_result.get("count_sql"),
+                    "debug_count_sql": sql_result.get("debug_count_sql"),
+                    "intent": intent_payload if isinstance(intent_payload, dict) else {},
+                    "compiler_guard": compiler_guard,
+                },
+                "validation_report": {
+                    "enabled": _PDF_VALIDATION_ENABLED,
+                    "status": "failed",
+                    "accuracy_mode": True,
+                    "invariants": [],
+                    "stepwise_counts": [],
+                    "anomalies": [],
+                    "negative_samples": [],
+                    "messages": ["Compiler guard blocked anti-pattern SQL in accuracy mode."],
+                },
+                "accuracy_report": self._build_accuracy_metrics(
+                    canonical_spec=canonical_spec,
+                    validation_report={"status": "failed"},
+                ),
+                "db_result": blocked_result,
+                "next_action": {"type": "fix_compiler_anti_patterns", "violations": compiler_guard.get("violations", [])},
+            }
+
         # 4. DB 실행 (Auto-Relaxation Loop applied)
         logger.info("3단계: SQL 실행 및 결과 집계 (Auto-Relaxation)")
         db_result = {
@@ -1654,7 +3722,12 @@ WHERE {operator_exists} (
         
         # 1st Attempt
         try:
-            main_res = await asyncio.to_thread(execute_sql, sql_result["cohort_sql"])
+            main_res = await asyncio.to_thread(
+                execute_sql,
+                sql_result["cohort_sql"],
+                accuracy_mode=accuracy_on,
+                query_tag="pdf_cohort_main",
+            )
             
             # 0명인 경우 & Relax Mode가 아닌 경우에도, 시스템적으로 자동 완화 시도
             if (not main_res.get("rows")) and (len(main_res.get("rows", [])) == 0):
@@ -1673,9 +3746,21 @@ WHERE {operator_exists} (
                 db_result["total_count"] = main_res.get("total_count")
 
             # 단계별 카운트 조회
-            debug_res = await asyncio.to_thread(execute_sql, sql_result["debug_count_sql"])
+            debug_res = await asyncio.to_thread(
+                execute_sql,
+                sql_result["debug_count_sql"],
+                accuracy_mode=accuracy_on,
+                query_tag="pdf_cohort_debug_counts",
+            )
             if "error" not in debug_res:
-                db_result["step_counts"] = debug_res.get("rows", [])
+                debug_cols = [str(col or "").lower() for col in (debug_res.get("columns") or [])]
+                step_rows: list[dict[str, Any]] = []
+                for row in debug_res.get("rows", []) or []:
+                    if isinstance(row, (list, tuple)):
+                        step_rows.append({col: value for col, value in zip(debug_cols, row)})
+                    elif isinstance(row, dict):
+                        step_rows.append(row)
+                db_result["step_counts"] = step_rows
         except Exception as e:
             logger.error(f"DB 실행 중 오류: {e}")
             logger.error(
@@ -1754,7 +3839,12 @@ WHERE {operator_exists} (
                 candidate_count_sql = f"SELECT COUNT(*) FROM ({candidate_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
 
                 # DB 재실행 (고도화된 쿼리로)
-                rag_db_res = await asyncio.to_thread(execute_sql, candidate_sql)
+                rag_db_res = await asyncio.to_thread(
+                    execute_sql,
+                    candidate_sql,
+                    accuracy_mode=accuracy_on,
+                    query_tag="pdf_rag_candidate",
+                )
                 
                 # [Error Recovery Logic] If RAG SQL fails, try to auto-repair
                 if "error" in rag_db_res:
@@ -1763,7 +3853,12 @@ WHERE {operator_exists} (
                     if fixed_sql:
                         logger.info(f"Auto-Repaired SQL: {fixed_sql[:100]}...")
                         # 재실행
-                        retry_res = await asyncio.to_thread(execute_sql, fixed_sql)
+                        retry_res = await asyncio.to_thread(
+                            execute_sql,
+                            fixed_sql,
+                            accuracy_mode=accuracy_on,
+                            query_tag="pdf_rag_repair",
+                        )
                         if "error" not in retry_res:
                             candidate_sql = fixed_sql
                             candidate_count_sql = f"SELECT COUNT(*) FROM ({fixed_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
@@ -1788,7 +3883,12 @@ WHERE {operator_exists} (
                      relaxed_sql = await self.fix_sql_with_error_async(candidate_sql, relax_prompt)
                      if relaxed_sql:
                          logger.info("Executing Relaxed SQL...")
-                         relaxed_res = await asyncio.to_thread(execute_sql, relaxed_sql)
+                         relaxed_res = await asyncio.to_thread(
+                             execute_sql,
+                             relaxed_sql,
+                             accuracy_mode=accuracy_on,
+                             query_tag="pdf_rag_relaxed",
+                         )
                          if "error" not in relaxed_res and len(relaxed_res.get("rows", [])) > 0:
                              candidate_sql = relaxed_sql
                              candidate_count_sql = f"SELECT COUNT(*) FROM ({relaxed_sql.replace('FETCH FIRST 100 ROWS ONLY', '')})"
@@ -1825,7 +3925,12 @@ WHERE {operator_exists} (
 
                         row_level_sql = await self.fix_sql_with_error_async(candidate_sql, rewrite_prompt)
                         if row_level_sql:
-                            row_level_res = await asyncio.to_thread(execute_sql, row_level_sql)
+                            row_level_res = await asyncio.to_thread(
+                                execute_sql,
+                                row_level_sql,
+                                accuracy_mode=accuracy_on,
+                                query_tag="pdf_rag_row_level_rewrite",
+                            )
                             row_level_columns = _normalize_result_columns(row_level_res.get("columns", []))
                             if "error" not in row_level_res and _has_identifier_columns(row_level_columns):
                                 logger.info("환자 단위 SQL 재작성 성공. 결과를 환자 행 기반으로 교체합니다.")
@@ -1860,28 +3965,73 @@ WHERE {operator_exists} (
         extracted_vars = (conditions.get("cohort_definition") or {}).get("variables") or []
         mapped_variables = self._map_clinical_variables(extracted_vars)
         features = self._build_features(mapped_variables)
+        validation_report = self._build_validation_report(
+            cohort_sql=str((sql_result or {}).get("cohort_sql") or ""),
+            db_result=db_result,
+            step_counts=db_result.get("step_counts", []) if isinstance(db_result.get("step_counts"), list) else [],
+            intent=intent_payload if isinstance(intent_payload, dict) else {},
+            population_policy=population_policy,
+            canonical_spec=canonical_spec,
+            schema_map=schema_map,
+            accuracy_mode=accuracy_on,
+        )
+        final_status = "completed"
+        if validation_report.get("status") == "failed":
+            final_status = "validation_failed"
+        elif ambiguities:
+            final_status = "completed_with_ambiguities"
+        if accuracy_on and str(validation_report.get("status") or "").strip().lower() != "passed":
+            final_status = "validation_failed"
+        accuracy_report = self._build_accuracy_metrics(
+            canonical_spec=canonical_spec,
+            validation_report=validation_report,
+        )
+        validation_summary = summarize_validation(validation_report)
+        validation_markdown = build_validation_markdown(validation_report, accuracy_mode=accuracy_on)
         
         # 6. 프론트엔드용 최종 스키마 조립 (메타데이터 포함)
         final_response = {
+            "status": final_status,
             "pdf_hash": file_hash,
             "canonical_hash": canonical_hash,
             "filename": str(filename or "").strip() or "uploaded.pdf",
             "user_id": str(user_id or "").strip() or None,
             "relax_mode": relax_mode,
             "deterministic": deterministic,
+            "accuracy_mode": accuracy_on,
             "pdf_page_count": page_count,
             "pdf_pages_scanned": pages_scanned,
             "pipeline_version": pipeline_version,
             "model": model_name,
             "prompt_hash": prompt_hash,
             "cohort_definition": conditions.get("cohort_definition", {}),
+            "cohort_spec": canonical_spec,
+            "ambiguity_resolution_required": bool(ambiguities),
+            "ambiguities": ambiguities,
+            "ambiguity_questions": ambiguity_questions,
+            "snippets": snippets,
+            "adaptive_extract": {
+                "level": adaptive_level,
+                "log": adaptive_logs,
+                "risk": adaptive_extract.get("risk") if isinstance(adaptive_extract.get("risk"), dict) else {},
+                "evidence_summary": evidence_summary,
+            },
             "mapped_variables": mapped_variables, # 별도 필드로 추가
             "cohort_conditions": conditions.get("cohort_definition", {}).get("extraction_details", {}).get("cohort_criteria", {}).get("population", []),
             "features": features,
             "generated_sql": {
                 "cohort_sql": sql_result.get("cohort_sql"),
                 "count_sql": sql_result.get("count_sql"),
-                "debug_count_sql": sql_result.get("debug_count_sql")
+                "debug_count_sql": sql_result.get("debug_count_sql"),
+                "intent": intent_payload if isinstance(intent_payload, dict) else {},
+                "compiler_guard": sql_result.get("compiler_guard") if isinstance(sql_result.get("compiler_guard"), dict) else {},
+            },
+            "validation_report": validation_report,
+            "validation_summary": validation_summary,
+            "validation_markdown": validation_markdown,
+            "accuracy_report": {
+                **accuracy_report,
+                "critic_notes": critic_notes,
             },
             "db_result": db_result
         }

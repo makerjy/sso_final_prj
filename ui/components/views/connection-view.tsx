@@ -103,7 +103,7 @@ export function ConnectionView() {
   const [lastChecked, setLastChecked] = useState<Date | null>(null)
   const [connectionConfig, setConnectionConfig] = useState({
     host: "",
-    port: "1521",
+    port: "",
     database: "",
     username: "",
     password: "",
@@ -337,11 +337,6 @@ export function ConnectionView() {
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 w-full max-w-none">
-      <div>
-        <h2 className="text-xl sm:text-2xl font-bold text-foreground">DB 연결 및 권한 설정</h2>
-        <p className="text-muted-foreground mt-1">데이터베이스 연결을 구성하고 접근 권한을 관리합니다.</p>
-      </div>
-
       {/* Connection Status */}
       <Card className={cn(
         "border-2 transition-colors",
@@ -393,7 +388,7 @@ export function ConnectionView() {
                 </p>
                 {oraAuthFailed && (
                   <p className="text-xs text-muted-foreground mt-1">
-                    DB 사용자명에는 앱 로그인 아이디가 아닌 Oracle 계정(예: team9_user)을 입력하세요.
+                    DB 사용자명에는 앱 로그인 아이디가 아닌 Oracle 계정을 입력하세요.
                   </p>
                 )}
                 {lastChecked && (
@@ -433,7 +428,7 @@ export function ConnectionView() {
                   id="host" 
                   value={connectionConfig.host}
                   onChange={(e) => setConnectionConfig(prev => ({ ...prev, host: e.target.value }))}
-                  placeholder="예: 152.70.37.240"
+                  placeholder="예: db.example.com"
                 />
               </div>
               <div className="space-y-2">
@@ -442,7 +437,7 @@ export function ConnectionView() {
                   id="port" 
                   value={connectionConfig.port}
                   onChange={(e) => setConnectionConfig(prev => ({ ...prev, port: e.target.value }))}
-                  placeholder="1521"
+                  placeholder="예: 1521"
                 />
               </div>
             </div>
@@ -452,7 +447,7 @@ export function ConnectionView() {
                 id="database" 
                 value={connectionConfig.database}
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, database: e.target.value }))}
-                placeholder="예: pdb1.subxxxx.oraclevcn.com"
+                placeholder="예: ORCLPDB1"
               />
             </div>
             <div className="space-y-2">
@@ -461,7 +456,7 @@ export function ConnectionView() {
                 id="username" 
                 value={connectionConfig.username}
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, username: e.target.value }))}
-                placeholder="예: team9_user (앱 로그인 ID 아님)"
+                placeholder="예: oracle_app_user (앱 로그인 ID 아님)"
               />
               <p className="text-xs text-muted-foreground">앱 로그인 아이디가 아니라 Oracle DB 계정을 입력하세요.</p>
             </div>

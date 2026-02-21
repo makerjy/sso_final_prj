@@ -16,6 +16,7 @@ class ChartSpec(BaseModel):
     x: Optional[str] = None
     y: Optional[str] = None
     group: Optional[str] = None
+    secondary_group: Optional[str] = None
     agg: Optional[str] = None
     size: Optional[str] = None
     animation_frame: Optional[str] = None
@@ -40,6 +41,10 @@ class AnalysisCard(BaseModel):
     reason: Optional[str] = None
     # Plotly figure JSON
     figure_json: Optional[Dict[str, Any]] = None
+    # Seaborn/Matplotlib 렌더 PNG(data URL)
+    image_data_url: Optional[str] = None
+    # 실제 렌더 엔진 식별자 (seaborn | plotly)
+    render_engine: Optional[str] = None
     # 코드 요약(디버깅용)
     code: Optional[str] = None
     # 자연어 요약(선택)

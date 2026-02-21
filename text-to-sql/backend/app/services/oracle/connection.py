@@ -4,6 +4,7 @@ import os
 import threading
 from typing import Any
 from pathlib import Path
+import logging
 
 from fastapi import HTTPException
 
@@ -22,6 +23,7 @@ _POOLS: dict[str, Any] = {}
 _POOL_LOCK = threading.Lock()
 _CLIENT_INIT = False
 _CLIENT_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
 _SSL_RETRY_ERROR_MARKERS = (
     "ORA-28759",
     "ORA-288",
@@ -30,7 +32,8 @@ _SSL_RETRY_ERROR_MARKERS = (
 
 def _pool_create_error(exc: Exception) -> HTTPException:
     detail = str(exc).strip()
-    if "ORA-01017" in detail.upper():
+    upper = detail.upper()
+    if "ORA-01017" in upper:
         return HTTPException(
             status_code=503,
             detail=(
@@ -38,7 +41,80 @@ def _pool_create_error(exc: Exception) -> HTTPException:
                 "Check username/password and save connection settings again."
             ),
         )
+    if "DPY-4011" in upper:
+        return HTTPException(
+            status_code=503,
+            detail=(
+                "Oracle connection closed by database/network (DPY-4011). "
+                "Check DSN(service name), SSL mode(tcps/wallet), and DB-side access rules."
+            ),
+        )
     return HTTPException(status_code=503, detail=f"Oracle pool create failed: {detail or exc}")
+
+
+def _build_dsn(
+    *,
+    host: str,
+    port: str,
+    database: str,
+    ssl_mode: str,
+) -> tuple[str, str]:
+    host_v = str(host or "").strip()
+    port_v = str(port or "").strip()
+    db_v = str(database or "").strip()
+    ssl_v = str(ssl_mode or "").strip().lower()
+    if not host_v or not port_v or not db_v:
+        return "", ""
+    if ssl_v in {"require", "verify-ca", "verify-full"}:
+        return f"tcps://{host_v}:{port_v}/{db_v}", f"{host_v}:{port_v}/{db_v}"
+    dsn = f"{host_v}:{port_v}/{db_v}"
+    return dsn, dsn
+
+
+def _env_connection_profile(settings: Any) -> dict[str, str]:
+    user = str(getattr(settings, "oracle_user", "") or "").strip()
+    password = str(getattr(settings, "oracle_password", "") or "")
+    dsn = str(getattr(settings, "oracle_dsn", "") or "").strip()
+    ssl_mode = str(os.getenv("ORACLE_SSL_MODE", "disable") or "disable").strip().lower()
+    tcp_fallback = ""
+
+    if not dsn:
+        env_host = str(os.getenv("ORACLE_HOST", "") or "").strip()
+        env_port = str(os.getenv("ORACLE_PORT", "") or "").strip()
+        env_service = str(os.getenv("ORACLE_SERVICE_NAME", "") or "").strip()
+        dsn, tcp_fallback = _build_dsn(
+            host=env_host,
+            port=env_port,
+            database=env_service,
+            ssl_mode=ssl_mode,
+        )
+
+    if not user or not password or not dsn:
+        return {}
+    return {
+        "user": user,
+        "password": password,
+        "dsn": dsn,
+        "ssl_mode": ssl_mode or "disable",
+        "tcp_fallback_dsn": tcp_fallback,
+    }
+
+
+def _create_pool_with_retry(lib: Any, pool_kwargs: dict[str, Any], *, ssl_mode: str, tcp_fallback_dsn: str) -> Any:
+    try:
+        return lib.create_pool(**pool_kwargs)
+    except Exception as exc:
+        upper_msg = str(exc).upper()
+        if (
+            str(pool_kwargs.get("dsn", "")).lower().startswith("tcps://")
+            and tcp_fallback_dsn
+            and ssl_mode == "require"
+            and any(marker in upper_msg for marker in _SSL_RETRY_ERROR_MARKERS)
+        ):
+            retry_kwargs = dict(pool_kwargs)
+            retry_kwargs["dsn"] = tcp_fallback_dsn
+            return lib.create_pool(**retry_kwargs)
+        raise
 
 
 def _has_client_lib(lib_path: Path) -> bool:
@@ -84,13 +160,37 @@ def _require_oracledb() -> Any:
     return oracledb
 
 
+def _oracle_driver_mode() -> str:
+    raw = str(os.getenv("ORACLE_DRIVER_MODE", "thin") or "thin").strip().lower()
+    if raw in {"thin", "thick", "auto"}:
+        return raw
+    return "thin"
+
+
+def resolve_call_timeout_ms(*, accuracy_mode: bool = False) -> int:
+    """Resolve per-connection Oracle call timeout (milliseconds)."""
+    settings = get_settings()
+    base_ms = max(180_000, int(getattr(settings, "db_timeout_sec", 180) or 180) * 1000)
+    if not accuracy_mode:
+        return base_ms
+    accuracy_ms = max(
+        180_000,
+        int(getattr(settings, "db_timeout_sec_accuracy", 180) or 180) * 1000,
+    )
+    return max(base_ms, accuracy_ms)
+
+
 def _init_oracle_client() -> None:
     global _CLIENT_INIT
     if _CLIENT_INIT:
         return
+    driver_mode = _oracle_driver_mode()
+    if driver_mode == "thin":
+        # Thin mode does not require Oracle Instant Client.
+        return
     lib = _require_oracledb()
     config_dir = os.getenv("ORACLE_TNS_ADMIN", "").strip()
-    explicit_lib_dir = bool(os.getenv("ORACLE_LIB_DIR", "").strip())
+    strict_thick = driver_mode == "thick"
     selected_path: Path | None = None
     for candidate in _candidate_client_dirs():
         if not candidate.exists():
@@ -99,7 +199,15 @@ def _init_oracle_client() -> None:
             selected_path = candidate
             break
     if selected_path is None:
-        # Keep thin mode if no Instant Client is available.
+        if strict_thick:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Oracle client init failed. ORACLE_DRIVER_MODE=thick but no Oracle client library "
+                    "was found. Set ORACLE_DRIVER_MODE=thin or provide ORACLE_LIB_DIR with Instant Client."
+                ),
+            )
+        # Auto mode: keep thin mode if no Instant Client is available.
         return
     lib_dir = str(selected_path)
     if not config_dir:
@@ -115,12 +223,12 @@ def _init_oracle_client() -> None:
             else:
                 lib.init_oracle_client(lib_dir=lib_dir)
         except Exception as exc:  # pragma: no cover - depends on client install
-            if explicit_lib_dir:
+            if strict_thick:
                 raise HTTPException(
                     status_code=500,
                     detail=f"Oracle client init failed. Check ORACLE_LIB_DIR/ORACLE_TNS_ADMIN. {exc}",
                 ) from exc
-            # Auto-detected client init failed: fall back to thin mode.
+            # Auto mode: client init failed, fall back to thin mode.
             return
         _CLIENT_INIT = True
 
@@ -164,17 +272,32 @@ def get_pool(user_id: str | None = None):
     database = str(overrides.get("database") or "").strip()
     ssl_mode = str(overrides.get("sslMode") or "").strip().lower()
     dsn_override = str(overrides.get("dsn") or "").strip()
-    dsn = settings.oracle_dsn
+
+    env_profile = _env_connection_profile(settings)
+    prefer_env = bool(env_profile)
+
+    dsn = ""
     tcp_fallback_dsn = ""
-    if dsn_override:
-        dsn = dsn_override
-    elif host and port and database:
-        if ssl_mode in {"require", "verify-ca", "verify-full"}:
-            dsn = f"tcps://{host}:{port}/{database}"
-            tcp_fallback_dsn = f"{host}:{port}/{database}"
+    source_label = "connection_settings"
+    if prefer_env:
+        dsn = str(env_profile.get("dsn") or "").strip()
+        ssl_mode = str(env_profile.get("ssl_mode") or "disable").strip().lower()
+        tcp_fallback_dsn = str(env_profile.get("tcp_fallback_dsn") or "").strip()
+        source_label = "env"
+    else:
+        if dsn_override:
+            dsn = dsn_override
+        elif host and port and database:
+            dsn, tcp_fallback_dsn = _build_dsn(
+                host=host,
+                port=port,
+                database=database,
+                ssl_mode=ssl_mode,
+            )
         else:
-            dsn = f"{host}:{port}/{database}"
-            tcp_fallback_dsn = dsn
+            dsn = str(getattr(settings, "oracle_dsn", "") or "").strip()
+            source_label = "env"
+
     if not dsn:
         raise HTTPException(
             status_code=503,
@@ -187,11 +310,15 @@ def get_pool(user_id: str | None = None):
         if existing is not None:
             return existing
 
-        username = str(overrides.get("username") or settings.oracle_user or "").strip()
-        password_value = overrides.get("password")
-        if password_value is None:
-            password_value = settings.oracle_password
-        password = str(password_value or "")
+        if prefer_env:
+            username = str(env_profile.get("user") or "").strip()
+            password = str(env_profile.get("password") or "")
+        else:
+            username = str(overrides.get("username") or settings.oracle_user or "").strip()
+            password_value = overrides.get("password")
+            if password_value is None:
+                password_value = settings.oracle_password
+            password = str(password_value or "")
         if password != password.strip():
             password = password.strip()
         if not username:
@@ -214,26 +341,62 @@ def get_pool(user_id: str | None = None):
             "timeout": settings.oracle_pool_timeout_sec,
         }
         try:
-            created = lib.create_pool(**pool_kwargs)
+            created = _create_pool_with_retry(
+                lib,
+                pool_kwargs,
+                ssl_mode=ssl_mode,
+                tcp_fallback_dsn=tcp_fallback_dsn,
+            )
         except Exception as exc:
-            # When sslMode=require is set without a wallet/tns config,
-            # Oracle connections can fail during SSL negotiation; retry
-            # with plain TCP once for best-effort compatibility.
-            upper_msg = str(exc).upper()
-            if (
-                str(dsn).lower().startswith("tcps://")
-                and tcp_fallback_dsn
-                and ssl_mode == "require"
-                and any(marker in upper_msg for marker in _SSL_RETRY_ERROR_MARKERS)
-                and not dsn_override
-            ):
+            # If env profile was preferred but failed, try user/runtime settings once.
+            if prefer_env and (dsn_override or (host and port and database)):
                 try:
-                    pool_kwargs["dsn"] = tcp_fallback_dsn
-                    created = lib.create_pool(**pool_kwargs)
+                    fallback_dsn = dsn_override
+                    fallback_tcp = ""
+                    fallback_ssl_mode = str(overrides.get("sslMode") or "").strip().lower()
+                    if not fallback_dsn:
+                        fallback_dsn, fallback_tcp = _build_dsn(
+                            host=host,
+                            port=port,
+                            database=database,
+                            ssl_mode=fallback_ssl_mode,
+                        )
+                    if fallback_dsn:
+                        fallback_username = str(overrides.get("username") or "").strip()
+                        fallback_password = str(overrides.get("password") or "").strip()
+                        if fallback_username and fallback_password:
+                            fallback_kwargs = {
+                                "user": fallback_username,
+                                "password": fallback_password,
+                                "dsn": fallback_dsn,
+                                "min": settings.oracle_pool_min,
+                                "max": settings.oracle_pool_max,
+                                "increment": settings.oracle_pool_inc,
+                                "timeout": settings.oracle_pool_timeout_sec,
+                            }
+                            created = _create_pool_with_retry(
+                                lib,
+                                fallback_kwargs,
+                                ssl_mode=fallback_ssl_mode,
+                                tcp_fallback_dsn=fallback_tcp,
+                            )
+                            source_label = "connection_settings"
+                        else:
+                            raise _pool_create_error(exc) from exc
+                    else:
+                        raise _pool_create_error(exc) from exc
                 except Exception as retry_exc:
-                    raise _pool_create_error(retry_exc) from retry_exc
+                    retry_http = _pool_create_error(retry_exc)
+                    raise HTTPException(
+                        status_code=retry_http.status_code,
+                        detail=f"{retry_http.detail} (source={source_label})",
+                    ) from retry_exc
             else:
-                raise _pool_create_error(exc) from exc
+                err_http = _pool_create_error(exc)
+                raise HTTPException(
+                    status_code=err_http.status_code,
+                    detail=f"{err_http.detail} (source={source_label})",
+                ) from exc
         _POOLS[key] = created
         return created
 
@@ -254,10 +417,15 @@ def reset_pool(user_id: str | None = None) -> None:
                 _close_pool(item)
 
 
-def acquire_connection(user_id: str | None = None):
+def acquire_connection(user_id: str | None = None, *, accuracy_mode: bool = False):
     pool = get_pool(user_id)
     try:
-        return pool.acquire()
+        conn = pool.acquire()
+        try:
+            conn.call_timeout = resolve_call_timeout_ms(accuracy_mode=accuracy_mode)
+        except Exception:
+            pass
+        return conn
     except Exception as exc:  # pragma: no cover - depends on driver
         message = str(exc)
         upper = message.upper()
@@ -276,12 +444,19 @@ def acquire_connection(user_id: str | None = None):
             # Recover stale/disconnected pools once before failing the request.
             reset_pool(user_id)
             try:
-                return get_pool(user_id).acquire()
+                conn = get_pool(user_id).acquire()
+                try:
+                    conn.call_timeout = resolve_call_timeout_ms(accuracy_mode=accuracy_mode)
+                except Exception:
+                    pass
+                return conn
             except Exception as retry_exc:
                 raise HTTPException(
                     status_code=503,
                     detail=f"Oracle pool unavailable: {retry_exc}",
                 ) from retry_exc
+        if "DPY-4011" in upper:
+            logger.warning("Oracle acquire failed with DPY-4011 (accuracy_mode=%s): %s", accuracy_mode, message)
         raise HTTPException(
             status_code=503, detail=f"Oracle pool unavailable: {exc}") from exc
 

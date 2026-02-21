@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.config import get_settings
+from app.services.runtime.request_context import get_request_llm_model
 
 try:
     from openai import OpenAI  # type: ignore
@@ -31,8 +32,9 @@ class LLMClient:
         *,
         expect_json: bool = False,
     ) -> dict[str, Any]:
+        requested_model = get_request_llm_model()
         kwargs: dict[str, Any] = {
-            "model": model,
+            "model": requested_model or model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": self._settings.llm_temperature,

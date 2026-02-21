@@ -39,11 +39,28 @@ import {
   RefreshCw,
   Copy,
   Download,
+  Maximize2,
+  Plus,
+  Check,
+  Mic,
+  X,
   Trash2,
   BookmarkPlus
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/components/auth-provider"
+import { CohortLibraryDialog } from "@/components/cohort-library-dialog"
+import {
+  type ActiveCohortContext,
+  type SavedCohort,
+  LEGACY_PENDING_PDF_COHORT_CONTEXT_KEY,
+  PENDING_ACTIVE_COHORT_CONTEXT_KEY,
+  clearPendingActiveCohortContext,
+  normalizeActiveCohortContext,
+  scopedStorageKey,
+  toActiveCohortContext,
+  toSavedCohort,
+} from "@/lib/cohort-library"
 
 interface ChatMessage {
   id: string
@@ -120,6 +137,12 @@ interface QueryAnswerResponse {
   suggestions_source?: string
 }
 
+interface QueryTranscribeResponse {
+  text?: string
+  source?: string
+  model?: string
+}
+
 interface VisualizationChartSpec {
   chart_type?: string
   x?: string
@@ -133,6 +156,8 @@ interface VisualizationAnalysisCard {
   reason?: string
   summary?: string
   figure_json?: Record<string, unknown>
+  image_data_url?: string
+  render_engine?: string
   code?: string
 }
 
@@ -143,6 +168,18 @@ interface VisualizationResponsePayload {
   insight?: string
 }
 
+type PdfCohortContext = {
+  pdfName: string
+  cohortSize?: number
+  keyVariables?: string[]
+  appliedAt: string
+}
+
+type PdfContextBannerState = {
+  context: PdfCohortContext | null
+  hasShownTableOnce: boolean
+}
+
 interface PersistedQueryState {
   query: string
   lastQuestion: string
@@ -150,6 +187,7 @@ interface PersistedQueryState {
   response: OneShotResponse | null
   runResult: RunResponse | null
   visualizationResult?: VisualizationResponsePayload | null
+  activeCohortContext?: ActiveCohortContext | null
   suggestedQuestions: string[]
   showResults: boolean
   showSqlPanel: boolean
@@ -188,14 +226,76 @@ interface CategoryTypeSummary {
   occurrences: number
 }
 
+type DashboardChartSpec = {
+  id: string
+  type: string
+  x?: string
+  y?: string
+  config?: Record<string, unknown>
+  thumbnailUrl?: string
+  pngUrl?: string
+}
+
+type DashboardColumnStatsRow = {
+  column: string
+  n: number
+  missing: number
+  nulls: number
+  min?: string | number
+  q1?: string | number
+  median?: string | number
+  q3?: string | number
+  max?: string | number
+  mean?: string | number
+}
+
+type DashboardCohortProvenance = {
+  source: "NONE" | "LIBRARY" | "PDF"
+  libraryCohortId?: string
+  libraryCohortName?: string
+  pdfCohortId?: string
+  pdfPaperTitle?: string
+  libraryUsed?: boolean
+}
+
+type DashboardPdfAnalysisSnapshot = {
+  pdfHash?: string
+  pdfName?: string
+  summaryKo?: string
+  criteriaSummaryKo?: string
+  variables?: string[]
+  inclusionExclusion?: Array<{
+    id: string
+    title: string
+    operationalDefinition: string
+    evidence?: string
+  }>
+  source?: string
+  analyzedAt?: string
+  libraryUsed?: boolean
+  libraryCohortId?: string
+  libraryCohortName?: string
+}
+
 const MAX_PERSIST_ROWS = 200
 const VIZ_CACHE_PREFIX = "viz_cache_v3:"
 const VIZ_CACHE_TTL_MS = 1000 * 60 * 60 * 24
+const PDF_CONTEXT_TABLE_ONCE_KEY_PREFIX = "ql_pdf_context_table_once"
+const COHORT_CONTEXT_SQL_LIMIT = 3200
 const CHART_CATEGORY_THRESHOLD = 10
 const CHART_CATEGORY_DEFAULT_COUNT = 10
 const BOX_PLOT_TRIGGER_MIN_W = 120
 const BOX_PLOT_TRIGGER_MAX_W = 360
 const BOX_PLOT_TRIGGER_EXTRA_PX = 64
+const DEFAULT_QUICK_QUESTIONS = [
+  "입원 환자 수를 월별 추이로 보여줘",
+  "가장 흔한 진단 코드는 무엇인가요?",
+  "ICU 재원일수가 긴 환자군을 알려줘",
+]
+const DEFAULT_CHAT_MODEL = "gpt-4o-mini"
+const FALLBACK_CHAT_MODELS = ["gpt-4o-mini", "gpt-4o"]
+const VOICE_WAVE_BAR_COUNT = 72
+const VOICE_WAVE_BASELINE = 0.08
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
 const hashText = (value: string) => {
@@ -225,6 +325,8 @@ const buildVizCacheKey = (sqlText: string, questionText: string, previewData: Pr
   })
   return `${VIZ_CACHE_PREFIX}${hashText(basis)}`
 }
+
+const composeVisualizationUserQuery = (questionText: string) => String(questionText || "").trim()
 
 const trimPreview = (preview?: PreviewData): PreviewData | undefined => {
   if (!preview) return preview
@@ -267,8 +369,690 @@ const readFiniteNumber = (value: unknown): number | null => {
   return Number.isFinite(num) ? num : null
 }
 
+const normalizeChartType = (chartType: unknown) => {
+  const normalized = String(chartType || "").trim().toLowerCase()
+  if (!normalized) return ""
+  const pyramidAliases = new Set(["pyamid", "pyrmaid", "pyramind", "piramid", "pyrmid"])
+  if (pyramidAliases.has(normalized)) return "pyramid"
+  return normalized
+}
+
+const isPyramidChartType = (chartType: unknown) => normalizeChartType(chartType) === "pyramid"
+
+const hasRenderableDatum = (value: unknown): boolean => {
+  if (value == null) return false
+  if (typeof value === "number") return Number.isFinite(value)
+  if (typeof value === "string") return value.trim().length > 0
+  if (value instanceof Date) return Number.isFinite(value.getTime())
+  return true
+}
+
+const arrayHasRenderableDatum = (values: unknown[]): boolean => {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      if (arrayHasRenderableDatum(value)) return true
+      continue
+    }
+    if (hasRenderableDatum(value)) return true
+  }
+  return false
+}
+
+const arrayHasFiniteNumber = (values: unknown[]): boolean => {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      if (arrayHasFiniteNumber(value)) return true
+      continue
+    }
+    if (readFiniteNumber(value) != null) return true
+  }
+  return false
+}
+
+const traceHasRenderableData = (rawTrace: unknown) => {
+  if (!isRecord(rawTrace)) return false
+  const traceType = String(rawTrace.type || "").toLowerCase()
+  const orientation = String(rawTrace.orientation || "").toLowerCase()
+  const x = rawTrace.x
+  const y = rawTrace.y
+  const values = rawTrace.values
+  const z = rawTrace.z
+
+  if (traceType === "bar" || traceType === "histogram") {
+    const valueAxis = orientation === "h" ? x : y
+    const categoryAxis = orientation === "h" ? y : x
+    if (!Array.isArray(valueAxis) || !valueAxis.length) return false
+    if (!arrayHasFiniteNumber(valueAxis)) return false
+    if (Array.isArray(categoryAxis)) return arrayHasRenderableDatum(categoryAxis)
+    return true
+  }
+  if (traceType === "pie") {
+    return Array.isArray(values) && values.length > 0 && arrayHasFiniteNumber(values)
+  }
+  if (traceType === "heatmap") {
+    return Array.isArray(z) && z.length > 0 && arrayHasFiniteNumber(z)
+  }
+  if (Array.isArray(x) && Array.isArray(y)) {
+    return arrayHasRenderableDatum(x) && arrayHasRenderableDatum(y)
+  }
+  if (Array.isArray(values)) return arrayHasRenderableDatum(values)
+  if (Array.isArray(z)) return arrayHasRenderableDatum(z)
+  if (Array.isArray(x)) return arrayHasRenderableDatum(x)
+  if (Array.isArray(y)) return arrayHasRenderableDatum(y)
+  return false
+}
+
+const figureHasRenderableData = (figure: { data?: unknown[]; layout?: Record<string, unknown> } | null) =>
+  Boolean(Array.isArray(figure?.data) && figure.data.some((trace) => traceHasRenderableData(trace)))
+
+const normalizePendingPdfCohortContext = (value: unknown): ActiveCohortContext | null => {
+  const normalized = normalizeActiveCohortContext(value)
+  if (!normalized) return null
+  return {
+    ...normalized,
+    cohortSql: String(normalized.cohortSql || "").slice(0, COHORT_CONTEXT_SQL_LIMIT),
+  }
+}
+
+const buildCohortStarterQuestions = (context: ActiveCohortContext) => {
+  const cohortLabel = context.filename || context.cohortName || "이 코호트"
+  return [
+    `${cohortLabel}의 연령/성별 분포를 보여줘`,
+    `${cohortLabel}의 30일 재입원율과 사망률을 보여줘`,
+    `${cohortLabel}에서 ICU 입실 여부별 평균 재원일수를 비교해줘`,
+  ]
+}
+
+const toPdfCohortContext = (context: ActiveCohortContext): PdfCohortContext => ({
+  pdfName: context.filename || context.cohortName || "저장 코호트",
+  cohortSize: context.patientCount != null ? Math.round(context.patientCount) : undefined,
+  keyVariables: Array.isArray(context.variables) ? context.variables : [],
+  appliedAt: new Date(context.ts || Date.now()).toISOString(),
+})
+
+const buildDashboardCohortProvenance = (
+  context: ActiveCohortContext | null
+): DashboardCohortProvenance => {
+  if (!context) return { source: "NONE" }
+  const sourceTag = String(context.source || "").toLowerCase()
+  const libraryUsed = /library|selector/.test(sourceTag)
+  if (context.type === "PDF_DERIVED") {
+    return {
+      source: "PDF",
+      libraryCohortId: context.cohortId || undefined,
+      libraryCohortName: context.cohortName || undefined,
+      pdfCohortId: context.pdfHash || context.cohortId || undefined,
+      pdfPaperTitle: context.filename || context.cohortName || undefined,
+      libraryUsed,
+    }
+  }
+  return {
+    source: "LIBRARY",
+    libraryCohortId: context.cohortId || undefined,
+    libraryCohortName: context.cohortName || undefined,
+    libraryUsed: true,
+  }
+}
+
+const buildDashboardPdfAnalysisSnapshot = (
+  context: ActiveCohortContext | null
+): DashboardPdfAnalysisSnapshot | undefined => {
+  if (!context || context.type !== "PDF_DERIVED") return undefined
+  const sourceTag = String(context.source || "").toLowerCase()
+  const libraryUsed = /library|selector/.test(sourceTag)
+  const variables = Array.isArray(context.variables)
+    ? context.variables.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 24)
+    : []
+  const inclusionExclusion = Array.isArray(context.inclusionExclusion)
+    ? context.inclusionExclusion
+        .map((item, index) => ({
+          id: String(item?.id || `ie-${index + 1}`).trim() || `ie-${index + 1}`,
+          title: String(item?.title || `조건 ${index + 1}`).trim() || `조건 ${index + 1}`,
+          operationalDefinition: String(item?.operationalDefinition || "").trim(),
+          evidence: String(item?.evidence || "").trim() || undefined,
+        }))
+        .filter((item) => Boolean(item.operationalDefinition))
+        .slice(0, 20)
+    : []
+
+  return {
+    pdfHash: context.pdfHash || context.cohortId || undefined,
+    pdfName: context.filename || context.cohortName || undefined,
+    summaryKo: String(context.summaryKo || context.paperSummary || "").trim() || undefined,
+    criteriaSummaryKo: String(context.criteriaSummaryKo || context.sqlFilterSummary || "").trim() || undefined,
+    variables: variables.length ? variables : undefined,
+    inclusionExclusion: inclusionExclusion.length ? inclusionExclusion : undefined,
+    source: context.source || undefined,
+    analyzedAt: Number.isFinite(context.ts) ? new Date(context.ts).toISOString() : undefined,
+    libraryUsed,
+    libraryCohortId: context.cohortId || undefined,
+    libraryCohortName: context.cohortName || undefined,
+  }
+}
+
+const toDashboardStatsRows = (rows: SimpleStatsRow[]): DashboardColumnStatsRow[] =>
+  rows.map((row) => ({
+    column: row.column,
+    n: row.count,
+    missing: row.missingCount,
+    nulls: row.nullCount,
+    min: row.min ?? undefined,
+    q1: row.q1 ?? undefined,
+    median: row.median ?? undefined,
+    q3: row.q3 ?? undefined,
+    max: row.max ?? undefined,
+    mean: row.avg ?? undefined,
+  }))
+
+const buildPdfContextTableOnceKey = (userKey: string, context: ActiveCohortContext) => {
+  const owner = (userKey || "anonymous").trim() || "anonymous"
+  const pdfHash = context.pdfHash || "nohash"
+  const ts = Number.isFinite(context.ts) ? Math.round(context.ts) : 0
+  return `${PDF_CONTEXT_TABLE_ONCE_KEY_PREFIX}:${owner}:${pdfHash}:${ts}`
+}
+
 const getAxisKey = (trace: Record<string, unknown>): "x" | "y" =>
   String(trace.orientation || "").toLowerCase() === "h" ? "y" : "x"
+
+type AxisDomain =
+  | { kind: "numeric"; min: number; max: number }
+  | { kind: "date"; min: number; max: number }
+  | { kind: "categorical"; values: Set<string> }
+  | null
+
+const readDateMs = (value: unknown): number | null => {
+  if (value instanceof Date) {
+    const ms = value.getTime()
+    return Number.isFinite(ms) ? ms : null
+  }
+  const text = String(value ?? "").trim()
+  if (!text) return null
+  const ms = Date.parse(text)
+  return Number.isFinite(ms) ? ms : null
+}
+
+const inferAxisValueKind = (values: unknown[]): "numeric" | "date" | "categorical" => {
+  if (!values.length) return "categorical"
+  const numericCount = values.reduce(
+    (count: number, value) => (readFiniteNumber(value) != null ? count + 1 : count),
+    0
+  )
+  if (numericCount / values.length >= 0.85) return "numeric"
+  const dateCount = values.reduce(
+    (count: number, value) => (readDateMs(value) != null ? count + 1 : count),
+    0
+  )
+  if (dateCount / values.length >= 0.85) return "date"
+  return "categorical"
+}
+
+const buildAxisDomainFromRecords = (
+  records: Array<Record<string, unknown>>,
+  column?: string
+): AxisDomain => {
+  if (!column) return null
+  const rawValues = records
+    .map((row) => row?.[column])
+    .filter((value) => {
+      if (value == null) return false
+      return String(value).trim().length > 0
+    })
+  if (!rawValues.length) return null
+  const kind = inferAxisValueKind(rawValues)
+  if (kind === "numeric") {
+    const numericValues = rawValues
+      .map((value) => readFiniteNumber(value))
+      .filter((value): value is number => value != null)
+    if (!numericValues.length) return null
+    return { kind: "numeric", min: Math.min(...numericValues), max: Math.max(...numericValues) }
+  }
+  if (kind === "date") {
+    const dateValues = rawValues
+      .map((value) => readDateMs(value))
+      .filter((value): value is number => value != null)
+    if (!dateValues.length) return null
+    return { kind: "date", min: Math.min(...dateValues), max: Math.max(...dateValues) }
+  }
+  return {
+    kind: "categorical",
+    values: new Set(rawValues.map((value) => String(value ?? "").trim()).filter(Boolean)),
+  }
+}
+
+const filterTraceByIndexes = (
+  trace: Record<string, unknown>,
+  axisKey: "x" | "y",
+  axisValues: unknown[],
+  filteredIndexes: number[]
+) => {
+  if (!filteredIndexes.length) return trace
+  if (filteredIndexes.length === axisValues.length) return trace
+
+  const next = { ...trace } as Record<string, unknown>
+  next[axisKey] = filteredIndexes.map((idx) => axisValues[idx])
+
+  const otherAxisKey = axisKey === "x" ? "y" : "x"
+  const otherAxis = next[otherAxisKey]
+  if (Array.isArray(otherAxis) && otherAxis.length === axisValues.length) {
+    next[otherAxisKey] = filteredIndexes.map((idx) => otherAxis[idx])
+  }
+
+  const traceText = next.text
+  if (Array.isArray(traceText) && traceText.length === axisValues.length) {
+    next.text = filteredIndexes.map((idx) => traceText[idx])
+  }
+
+  const traceCustomData = next.customdata
+  if (Array.isArray(traceCustomData) && traceCustomData.length === axisValues.length) {
+    next.customdata = filteredIndexes.map((idx) => traceCustomData[idx])
+  }
+
+  if (isRecord(next.marker)) {
+    const marker = { ...next.marker }
+    const markerColor = marker.color
+    if (Array.isArray(markerColor) && markerColor.length === axisValues.length) {
+      marker.color = filteredIndexes.map((idx) => markerColor[idx])
+    }
+    next.marker = marker
+  }
+
+  return next
+}
+
+const clampFigureToAxisDomain = (
+  figure: { data?: unknown[]; layout?: Record<string, unknown> } | null,
+  axisDomain: AxisDomain
+): { data?: unknown[]; layout?: Record<string, unknown> } | null => {
+  if (!figure || !axisDomain || !Array.isArray(figure.data)) return figure
+  const epsilon = 1e-9
+  const filteredData = figure.data.map((rawTrace) => {
+    if (!isRecord(rawTrace)) return rawTrace
+    const trace = { ...rawTrace } as Record<string, unknown>
+    const axisKey = getAxisKey(trace)
+    const axisValues = trace[axisKey]
+    if (!Array.isArray(axisValues) || !axisValues.length) return trace
+
+    const filteredIndexes: number[] = []
+    for (let idx = 0; idx < axisValues.length; idx += 1) {
+      const value = axisValues[idx]
+      if (axisDomain.kind === "numeric") {
+        const num = readFiniteNumber(value)
+        if (num != null && num >= axisDomain.min - epsilon && num <= axisDomain.max + epsilon) {
+          filteredIndexes.push(idx)
+        }
+        continue
+      }
+      if (axisDomain.kind === "date") {
+        const ms = readDateMs(value)
+        if (ms != null && ms >= axisDomain.min - epsilon && ms <= axisDomain.max + epsilon) {
+          filteredIndexes.push(idx)
+        }
+        continue
+      }
+      const normalized = String(value ?? "").trim()
+      if (axisDomain.values.has(normalized)) filteredIndexes.push(idx)
+    }
+    return filterTraceByIndexes(trace, axisKey, axisValues, filteredIndexes)
+  })
+
+  return {
+    ...figure,
+    data: filteredData,
+  }
+}
+
+const isPreferredChartType = (
+  chartType: unknown,
+  preferred: "line" | "bar" | "pie" | null | undefined
+) => {
+  const normalized = normalizeChartType(chartType)
+  if (!preferred) return false
+  if (preferred === "pie") return normalized === "pie" || normalized === "nested_pie" || normalized === "sunburst"
+  if (preferred === "line") return normalized === "line" || normalized === "line_scatter" || normalized === "area"
+  if (preferred === "bar") return normalized.startsWith("bar") || normalized === "pyramid"
+  return false
+}
+
+const formatChartTypeLabel = (chartType: unknown) => {
+  const normalized = normalizeChartType(chartType)
+  if (!normalized) return "PLOT"
+  if (normalized === "pyramid") return "PYRAMID (MIRRORED)"
+  return normalized.replace(/_/g, " ").toUpperCase()
+}
+
+const CHART_COLORWAY = [
+  "#1d4ed8",
+  "#0f766e",
+  "#c2410c",
+  "#be123c",
+  "#6d28d9",
+  "#0ea5e9",
+  "#0369a1",
+  "#4d7c0f",
+]
+
+const normalizePlotLayout = (
+  layout: Record<string, unknown> | null | undefined,
+  minMargin: { l: number; r: number; t: number; b: number }
+): Record<string, unknown> => {
+  const baseLayout = isRecord(layout) ? { ...layout } : {}
+  delete baseLayout.height
+  delete baseLayout.width
+
+  const sourceMargin = isRecord(baseLayout.margin) ? baseLayout.margin : {}
+  const marginLeft = readFiniteNumber(sourceMargin.l)
+  const marginRight = readFiniteNumber(sourceMargin.r)
+  const marginTop = readFiniteNumber(sourceMargin.t)
+  const marginBottom = readFiniteNumber(sourceMargin.b)
+
+  const xaxis = isRecord(baseLayout.xaxis)
+    ? { ...baseLayout.xaxis, automargin: true }
+    : { automargin: true }
+  const yaxis = isRecord(baseLayout.yaxis)
+    ? { ...baseLayout.yaxis, automargin: true }
+    : { automargin: true }
+
+  return {
+    ...baseLayout,
+    autosize: true,
+    margin: {
+      ...sourceMargin,
+      l: Math.max(minMargin.l, marginLeft ?? 0),
+      r: Math.max(minMargin.r, marginRight ?? 0),
+      t: Math.max(minMargin.t, marginTop ?? 0),
+      b: Math.max(minMargin.b, marginBottom ?? 0),
+    },
+    font: {
+      family: "Pretendard, 'Noto Sans KR', system-ui, -apple-system, sans-serif",
+      size: 13,
+      color: "#0f172a",
+      ...(isRecord(baseLayout.font) ? baseLayout.font : {}),
+    },
+    colorway: Array.isArray(baseLayout.colorway) && baseLayout.colorway.length ? baseLayout.colorway : CHART_COLORWAY,
+    hovermode: baseLayout.hovermode || "x unified",
+    hoverlabel: {
+      bgcolor: "rgba(15, 23, 42, 0.88)",
+      bordercolor: "rgba(148, 163, 184, 0.45)",
+      font: { color: "#f8fafc", size: 12 },
+      ...(isRecord(baseLayout.hoverlabel) ? baseLayout.hoverlabel : {}),
+    },
+    legend: {
+      orientation: "h",
+      y: 1.04,
+      x: 0,
+      yanchor: "bottom",
+      xanchor: "left",
+      bgcolor: "rgba(255,255,255,0)",
+      borderwidth: 0,
+      font: { size: 11, color: "#334155" },
+      ...(isRecord(baseLayout.legend) ? baseLayout.legend : {}),
+    },
+    xaxis: {
+      showgrid: true,
+      gridcolor: "rgba(148,163,184,0.18)",
+      zeroline: false,
+      showline: true,
+      linecolor: "rgba(148,163,184,0.35)",
+      ticks: "outside",
+      ticklen: 5,
+      tickcolor: "rgba(148,163,184,0.65)",
+      tickfont: { color: "#475569", size: 12 },
+      ...xaxis,
+    },
+    yaxis: {
+      showgrid: true,
+      gridcolor: "rgba(148,163,184,0.18)",
+      zeroline: false,
+      showline: true,
+      linecolor: "rgba(148,163,184,0.35)",
+      ticks: "outside",
+      ticklen: 5,
+      tickcolor: "rgba(148,163,184,0.65)",
+      tickfont: { color: "#475569", size: 12 },
+      ...yaxis,
+    },
+    uniformtext: {
+      minsize: 10,
+      mode: "hide",
+      ...(isRecord(baseLayout.uniformtext) ? baseLayout.uniformtext : {}),
+    },
+    paper_bgcolor: "transparent",
+    plot_bgcolor: "transparent",
+  }
+}
+
+const styleFigureData = (data: unknown[] | undefined) => {
+  if (!Array.isArray(data)) return []
+  return data.map((rawTrace, index) => {
+    if (!isRecord(rawTrace)) return rawTrace
+    const trace = { ...rawTrace } as Record<string, unknown>
+    const traceType = String(trace.type || "").toLowerCase()
+    const paletteColor = CHART_COLORWAY[index % CHART_COLORWAY.length]
+
+    if (traceType === "scatter") {
+      const mode = String(trace.mode || "")
+      const hasLines = mode.includes("lines")
+      const hasMarkers = mode.includes("markers") || !mode
+      const line = isRecord(trace.line) ? { ...trace.line } : {}
+      if (hasLines) {
+        if (!line.color) line.color = paletteColor
+        if (!readFiniteNumber(line.width)) line.width = 2.8
+        if (!line.shape) line.shape = "spline"
+        if (line.shape === "spline" && !readFiniteNumber(line.smoothing)) line.smoothing = 0.55
+      }
+      if (Object.keys(line).length) trace.line = line
+
+      if (hasMarkers) {
+        const marker = isRecord(trace.marker) ? { ...trace.marker } : {}
+        if (!marker.color) marker.color = paletteColor
+        if (!readFiniteNumber(marker.size)) marker.size = hasLines ? 6 : 8
+        if (!readFiniteNumber(marker.opacity)) marker.opacity = 0.92
+        const markerLine = isRecord(marker.line) ? { ...marker.line } : {}
+        if (!markerLine.color) markerLine.color = "rgba(255,255,255,0.95)"
+        if (!readFiniteNumber(markerLine.width)) markerLine.width = hasLines ? 1.2 : 0.8
+        marker.line = markerLine
+        trace.marker = marker
+      }
+      return trace
+    }
+
+    if (traceType === "bar") {
+      const isHorizontal = String(trace.orientation || "").toLowerCase() === "h"
+      const marker = isRecord(trace.marker) ? { ...trace.marker } : {}
+      if (!marker.color) marker.color = paletteColor
+      if (!readFiniteNumber(marker.opacity)) marker.opacity = 0.92
+      const markerLine = isRecord(marker.line) ? { ...marker.line } : {}
+      if (!markerLine.color) markerLine.color = "rgba(255,255,255,0.85)"
+      if (!readFiniteNumber(markerLine.width)) markerLine.width = 0.9
+      marker.line = markerLine
+      trace.marker = marker
+      if (!trace.textposition) trace.textposition = "auto"
+      if (!trace.hovertemplate) {
+        trace.hovertemplate = isHorizontal
+          ? "%{y}<br>%{x:,.3g}<extra></extra>"
+          : "%{x}<br>%{y:,.3g}<extra></extra>"
+      }
+      if (trace.cliponaxis == null) trace.cliponaxis = false
+      return trace
+    }
+
+    if (traceType === "pie") {
+      const marker = isRecord(trace.marker) ? { ...trace.marker } : {}
+      if (!Array.isArray(marker.colors) || !marker.colors.length) marker.colors = CHART_COLORWAY
+      const markerLine = isRecord(marker.line) ? { ...marker.line } : {}
+      if (!markerLine.color) markerLine.color = "white"
+      if (!readFiniteNumber(markerLine.width)) markerLine.width = 1.4
+      marker.line = markerLine
+      trace.marker = marker
+      if (!trace.textinfo) trace.textinfo = "label+percent"
+      if (!trace.textposition) trace.textposition = "inside"
+      return trace
+    }
+
+    if (traceType === "heatmap") {
+      if (!trace.colorscale) trace.colorscale = "YlGnBu"
+      if (!readFiniteNumber(trace.xgap)) trace.xgap = 1
+      if (!readFiniteNumber(trace.ygap)) trace.ygap = 1
+      return trace
+    }
+
+    return trace
+  })
+}
+
+const prepareFigureForRender = (
+  figure: { data?: unknown[]; layout?: Record<string, unknown> } | null,
+  minMargin: { l: number; r: number; t: number; b: number }
+) => {
+  if (!figure) return null
+  return {
+    data: styleFigureData(figure.data),
+    layout: normalizePlotLayout(figure.layout, minMargin),
+  }
+}
+
+const buildAutoAnalysesFromPreview = (
+  columns: string[],
+  records: Array<Record<string, unknown>>
+): VisualizationAnalysisCard[] => {
+  if (!columns.length || !records.length) return []
+  const numericColumns = columns.filter((col) =>
+    records.some((row) => readFiniteNumber(row?.[col]) != null)
+  )
+  if (!numericColumns.length) return []
+
+  const categoryColumns = columns.filter((col) => !numericColumns.includes(col))
+  const xKey = categoryColumns[0] || columns[0]
+  const yKey = numericColumns.find((col) => col !== xKey) || numericColumns[0]
+  if (!xKey || !yKey) return []
+
+  const grouped = new Map<string, { total: number; count: number; order: number }>()
+  records.forEach((row, rowIndex) => {
+    const xRaw = row?.[xKey]
+    const x = String(xRaw ?? "").trim()
+    if (!x) return
+    const y = readFiniteNumber(row?.[yKey])
+    if (y == null) return
+    if (!grouped.has(x)) grouped.set(x, { total: 0, count: 0, order: rowIndex })
+    const bucket = grouped.get(x)!
+    bucket.total += y
+    bucket.count += 1
+  })
+  let points = Array.from(grouped.entries()).map(([x, bucket]) => ({
+    x,
+    y: Number((bucket.count ? bucket.total / bucket.count : 0).toFixed(4)),
+    order: bucket.order,
+  }))
+  if (!points.length) return []
+
+  const numericX = points.every((point) => readFiniteNumber(point.x) != null)
+  const dateX = !numericX && points.every((point) => readDateMs(point.x) != null)
+  if (numericX) {
+    points = points.sort((a, b) => Number(a.x) - Number(b.x))
+  } else if (dateX) {
+    points = points.sort((a, b) => Number(readDateMs(a.x)) - Number(readDateMs(b.x)))
+  } else {
+    points = points.sort((a, b) => a.order - b.order)
+  }
+
+  const limitedPoints = points.slice(0, 60)
+  const piePoints = [...points].sort((a, b) => b.y - a.y).slice(0, 12)
+  const lollipopPoints = [...points].sort((a, b) => b.y - a.y).slice(0, 20)
+  const lollipopStemX = lollipopPoints.flatMap((point) => [point.x, point.x, null])
+  const lollipopStemY = lollipopPoints.flatMap((point) => [0, point.y, null])
+  const baseLayout = {
+    autosize: true,
+    margin: { l: 56, r: 24, t: 24, b: 56 },
+    xaxis: { title: xKey },
+    yaxis: { title: yKey },
+    paper_bgcolor: "transparent",
+    plot_bgcolor: "transparent",
+  }
+
+  return [
+    {
+      chart_spec: { chart_type: "line", x: xKey, y: yKey, agg: "avg" },
+      reason: "자동 대안(추세 확인)",
+      summary: "자동 대안 차트입니다.",
+      figure_json: {
+        data: [
+          {
+            type: "scatter",
+            mode: "lines+markers",
+            x: limitedPoints.map((point) => point.x),
+            y: limitedPoints.map((point) => point.y),
+            name: yKey,
+          },
+        ],
+        layout: baseLayout,
+      } as Record<string, unknown>,
+    },
+    {
+      chart_spec: { chart_type: "lollipop", x: xKey, y: yKey, agg: "avg" },
+      reason: "자동 대안(Graph Gallery 스타일 순위 비교)",
+      summary: "자동 대안 차트입니다.",
+      figure_json: {
+        data: [
+          {
+            type: "scatter",
+            mode: "lines",
+            x: lollipopStemX,
+            y: lollipopStemY,
+            name: "stem",
+            hoverinfo: "skip",
+            showlegend: false,
+            line: { shape: "linear", color: "rgba(100,116,139,0.5)", width: 2 },
+          },
+          {
+            type: "scatter",
+            mode: "markers",
+            x: lollipopPoints.map((point) => point.x),
+            y: lollipopPoints.map((point) => point.y),
+            name: yKey,
+            marker: { size: 9 },
+          },
+        ],
+        layout: baseLayout,
+      } as Record<string, unknown>,
+    },
+    {
+      chart_spec: { chart_type: "pie", x: xKey, y: yKey, agg: "sum" },
+      reason: "자동 대안(비율 비교)",
+      summary: "자동 대안 차트입니다.",
+      figure_json: {
+        data: [
+          {
+            type: "pie",
+            labels: piePoints.map((point) => point.x),
+            values: piePoints.map((point) => point.y),
+            name: yKey,
+            hole: 0.32,
+          },
+        ],
+        layout: {
+          ...baseLayout,
+          margin: { l: 36, r: 36, t: 24, b: 24 },
+        },
+      } as Record<string, unknown>,
+    },
+    {
+      chart_spec: { chart_type: "bar", x: xKey, y: yKey, agg: "avg" },
+      reason: "자동 대안(범주 비교)",
+      summary: "자동 대안 차트입니다.",
+      figure_json: {
+        data: [
+          {
+            type: "bar",
+            x: limitedPoints.map((point) => point.x),
+            y: limitedPoints.map((point) => point.y),
+            name: yKey,
+          },
+        ],
+        layout: baseLayout,
+      } as Record<string, unknown>,
+    },
+  ]
+}
 
 const collectCategoryTypeSummariesFromFigure = (
   figure: { data?: unknown[]; layout?: Record<string, unknown> } | null
@@ -281,6 +1065,7 @@ const collectCategoryTypeSummariesFromFigure = (
     const axisKey = getAxisKey(rawTrace)
     const axisValues = rawTrace[axisKey]
     if (!Array.isArray(axisValues) || !axisValues.length) continue
+    if (inferAxisValueKind(axisValues) !== "categorical") continue
     for (const rawValue of axisValues) {
       const value = String(rawValue ?? "").trim()
       if (!value) continue
@@ -306,48 +1091,13 @@ const filterFigureByCategories = (
     const axisKey = getAxisKey(trace)
     const axisValues = trace[axisKey]
     if (!Array.isArray(axisValues) || !axisValues.length) return trace
+    if (inferAxisValueKind(axisValues) !== "categorical") return trace
     const normalizedAxis = axisValues.map((value) => String(value ?? "").trim())
     const filteredIndexes: number[] = []
     for (let i = 0; i < normalizedAxis.length; i += 1) {
       if (allowed.has(normalizedAxis[i])) filteredIndexes.push(i)
     }
-    if (!filteredIndexes.length) {
-      trace[axisKey] = []
-      const otherAxisKey = axisKey === "x" ? "y" : "x"
-      if (Array.isArray(trace[otherAxisKey]) && trace[otherAxisKey].length === axisValues.length) {
-        trace[otherAxisKey] = []
-      }
-      return trace
-    }
-
-    trace[axisKey] = filteredIndexes.map((idx) => axisValues[idx])
-
-    const otherAxisKey = axisKey === "x" ? "y" : "x"
-    const otherAxis = trace[otherAxisKey]
-    if (Array.isArray(otherAxis) && otherAxis.length === axisValues.length) {
-      trace[otherAxisKey] = filteredIndexes.map((idx) => otherAxis[idx])
-    }
-
-    const traceText = trace.text
-    if (Array.isArray(traceText) && traceText.length === axisValues.length) {
-      trace.text = filteredIndexes.map((idx) => traceText[idx])
-    }
-
-    const traceCustomData = trace.customdata
-    if (Array.isArray(traceCustomData) && traceCustomData.length === axisValues.length) {
-      trace.customdata = filteredIndexes.map((idx) => traceCustomData[idx])
-    }
-
-    if (isRecord(trace.marker)) {
-      const marker = { ...trace.marker }
-      const markerColor = marker.color
-      if (Array.isArray(markerColor) && markerColor.length === axisValues.length) {
-        marker.color = filteredIndexes.map((idx) => markerColor[idx])
-      }
-      trace.marker = marker
-    }
-
-    return trace
+    return filterTraceByIndexes(trace, axisKey, axisValues, filteredIndexes)
   })
 
   return {
@@ -419,23 +1169,58 @@ const serializeMessages = (messages: ChatMessage[]): PersistedChatMessage[] =>
     timestamp: message.timestamp.toISOString(),
   }))
 
-const deserializeMessages = (messages: PersistedChatMessage[]): ChatMessage[] =>
-  messages.map((message) => {
-    const parsed = new Date(message.timestamp)
-    return {
-      ...message,
-      timestamp: Number.isNaN(parsed.getTime()) ? new Date() : parsed,
-    }
+const pickSupportedRecordingMimeType = () => {
+  if (typeof window === "undefined" || typeof window.MediaRecorder === "undefined") return ""
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/ogg",
+    "audio/mp4",
+  ]
+  const supported = candidates.find((item) => window.MediaRecorder.isTypeSupported(item))
+  return supported || ""
+}
+
+const blobToDataUrl = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ""))
+    reader.onerror = () => reject(new Error("오디오 데이터를 읽지 못했습니다."))
+    reader.readAsDataURL(blob)
   })
+
+const formatVoiceElapsed = (elapsedMs: number) => {
+  const safeMs = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0
+  const totalSec = Math.floor(safeMs / 1000)
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${String(min)}:${String(sec).padStart(2, "0")}`
+}
+
+const buildVoiceWaveLevels = (base = VOICE_WAVE_BASELINE) =>
+  Array.from({ length: VOICE_WAVE_BAR_COUNT }, () => base)
+
+const normalizeChatModelOptions = (raw: string) => {
+  const parsed = String(raw || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.toLowerCase().startsWith("gpt-4"))
+    .filter((item) => item.length > 0)
+  const unique = Array.from(new Set([...parsed, ...FALLBACK_CHAT_MODELS]))
+  return unique
+}
 
 export function QueryView() {
   const { user, isHydrated: isAuthHydrated } = useAuth()
-  const runtimeLocalApiFallback =
-    typeof window !== "undefined" &&
-    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
-      ? "http://localhost:8001"
-      : ""
-  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || runtimeLocalApiFallback).replace(/\/$/, "")
+  // Prefer direct backend host access in browser to avoid rewrite proxy hangups on long requests.
+  // If direct access fails, fetchWithTimeout falls back to same-origin rewrite path.
+  const apiBaseUrl = (
+    process.env.NEXT_PUBLIC_API_BASE_URL ||
+    (typeof window !== "undefined"
+      ? `${window.location.protocol}//${window.location.hostname}:${process.env.NEXT_PUBLIC_API_PORT || "8002"}`
+      : "")
+  ).replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
   // Keep visualization on same-origin rewrite path to avoid bypassing /visualize proxy.
   const vizUrl = (path: string) => path
@@ -451,31 +1236,106 @@ export function QueryView() {
   const pendingDashboardQueryKey = chatHistoryUser
     ? `ql_pending_dashboard_query:${chatHistoryUser}`
     : "ql_pending_dashboard_query"
+  const pendingActiveCohortContextKey = scopedStorageKey(PENDING_ACTIVE_COHORT_CONTEXT_KEY, chatHistoryUser)
+  const pendingLegacyPdfCohortContextKey = scopedStorageKey(LEGACY_PENDING_PDF_COHORT_CONTEXT_KEY, chatHistoryUser)
+  const modelStorageKey = chatHistoryUser
+    ? `ql_chat_model:${chatHistoryUser}`
+    : "ql_chat_model"
+  const modelOptions = useMemo(() => {
+    const configured = normalizeChatModelOptions(process.env.NEXT_PUBLIC_LLM_MODEL_OPTIONS || "")
+    return configured.length > 0 ? configured : FALLBACK_CHAT_MODELS
+  }, [])
   const ONESHOT_TIMEOUT_MS = 90_000
-  const RUN_TIMEOUT_MS = 130_000
+  const RUN_TIMEOUT_MS = 190_000
   const VISUALIZE_TIMEOUT_MS = 120_000
   const VISUALIZE_MAX_ROWS = 1200
   const ANSWER_TIMEOUT_MS = 35_000
   const ANSWER_MAX_ROWS = 120
   const ANSWER_MAX_COLS = 20
-  const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 45000) => {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), timeoutMs)
-    try {
-      return await fetch(input, { ...init, signal: controller.signal })
-    } catch (error: any) {
-      const message = String(error?.message || "")
-      const isAbort =
-        error?.name === "AbortError" ||
-        error?.name === "TimeoutError" ||
-        /aborted/i.test(message)
-      if (isAbort) {
-        throw new Error("요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.")
-      }
-      throw error
-    } finally {
-      clearTimeout(timeout)
+  const isNetworkFetchError = (error: unknown) => {
+    const name = String((error as any)?.name || "")
+    const message = String((error as any)?.message || "").toLowerCase()
+    return (
+      name === "TypeError" ||
+      message.includes("failed to fetch") ||
+      message.includes("networkerror") ||
+      message.includes("load failed")
+    )
+  }
+  const normalizeRequestErrorMessage = (error: unknown, fallbackMessage: string) => {
+    const raw = String((error as any)?.message || "").trim()
+    const lowered = raw.toLowerCase()
+    if (!raw) return fallbackMessage
+    if (
+      lowered.includes("failed to fetch") ||
+      lowered.includes("networkerror") ||
+      lowered.includes("load failed") ||
+      lowered.includes("network request failed")
+    ) {
+      return "API 서버 연결에 실패했습니다. 백엔드가 실행 중인지 확인하고 잠시 후 다시 시도해주세요."
     }
+    if (
+      lowered === "internal server error" ||
+      lowered.includes("500 internal server error") ||
+      lowered.includes("500: internal server error")
+    ) {
+      return "서버에서 요청을 처리하는 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+    }
+    return raw
+  }
+  const isRetryableServerErrorMessage = (message: string) => {
+    const lowered = String(message || "").toLowerCase()
+    return (
+      lowered.includes("internal server error") ||
+      lowered.includes("socket hang up") ||
+      lowered.includes("econnreset") ||
+      lowered.includes("bad gateway") ||
+      lowered.includes("gateway timeout") ||
+      lowered.includes("service unavailable")
+    )
+  }
+  const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+  const resolveFetchRetryTargets = (input: RequestInfo): RequestInfo[] => {
+    if (typeof input !== "string") return [input]
+    const targets: RequestInfo[] = [input]
+    if (apiBaseUrl && /^https?:\/\//i.test(input) && input.startsWith(apiBaseUrl)) {
+      const relativePath = input.slice(apiBaseUrl.length)
+      if (relativePath.startsWith("/")) {
+        targets.push(relativePath)
+      }
+    }
+    return targets
+  }
+  const fetchWithTimeout = async (input: RequestInfo, init: RequestInit = {}, timeoutMs = 45000) => {
+    const targets = resolveFetchRetryTargets(input)
+    let lastError: unknown = null
+    for (const target of targets) {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), timeoutMs)
+      try {
+        return await fetch(target, { ...init, signal: controller.signal })
+      } catch (error: any) {
+        lastError = error
+        const message = String(error?.message || "")
+        const isAbort =
+          error?.name === "AbortError" ||
+          error?.name === "TimeoutError" ||
+          /aborted/i.test(message)
+        if (isAbort) {
+          throw new Error("요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.")
+        }
+        const shouldRetry = isNetworkFetchError(error) && target !== targets[targets.length - 1]
+        if (shouldRetry) continue
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+    if (isNetworkFetchError(lastError)) {
+      throw new Error(
+        "API 서버 연결에 실패했습니다. 백엔드가 실행 중인지 확인하고 잠시 후 다시 시도해주세요."
+      )
+    }
+    throw lastError instanceof Error ? lastError : new Error("요청에 실패했습니다.")
   }
   const sampleRowsForVisualization = (rows: any[][], maxRows: number) => {
     if (!Array.isArray(rows) || rows.length <= maxRows) return rows
@@ -525,6 +1385,7 @@ export function QueryView() {
           rows,
           total_rows: totalRows,
           fetched_rows: fetchedRows,
+          model: selectedModel || undefined,
         }),
       }, ANSWER_TIMEOUT_MS)
       if (!res.ok) return { answerText: fallback, suggestedQuestions: fallbackSuggestions }
@@ -549,6 +1410,14 @@ export function QueryView() {
     }
   }
   const [query, setQuery] = useState("")
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_CHAT_MODEL)
+  const [isSpeechSupported, setIsSpeechSupported] = useState(false)
+  const [isListening, setIsListening] = useState(false)
+  const [isVoiceModeOn, setIsVoiceModeOn] = useState(false)
+  const [isVoiceTranscribing, setIsVoiceTranscribing] = useState(false)
+  const [voiceElapsedMs, setVoiceElapsedMs] = useState(0)
+  const [voiceWaveLevels, setVoiceWaveLevels] = useState<number[]>(() => buildVoiceWaveLevels())
+  const [voiceInterimText, setVoiceInterimText] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [loadingProgress, setLoadingProgress] = useState(0)
   const [showResults, setShowResults] = useState(false)
@@ -567,6 +1436,8 @@ export function QueryView() {
   const [activeTabId, setActiveTabId] = useState<string>("")
   const [boardSaving, setBoardSaving] = useState(false)
   const [boardMessage, setBoardMessage] = useState<string | null>(null)
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
+  const [isSqlCopied, setIsSqlCopied] = useState(false)
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false)
   const [isPastQueriesDialogOpen, setIsPastQueriesDialogOpen] = useState(false)
   const [saveTitle, setSaveTitle] = useState("")
@@ -577,11 +1448,15 @@ export function QueryView() {
   const [saveFoldersLoading, setSaveFoldersLoading] = useState(false)
   const [lastQuestion, setLastQuestion] = useState<string>("")
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])
-  const [quickQuestions, setQuickQuestions] = useState<string[]>([
-    "입원 환자 수를 월별 추이로 보여줘",
-    "가장 흔한 진단 코드는 무엇인가요?",
-    "ICU 재원일수가 긴 환자군을 알려줘",
-  ])
+  const [activeCohortContext, setActiveCohortContext] = useState<ActiveCohortContext | null>(null)
+  const [savedCohorts, setSavedCohorts] = useState<SavedCohort[]>([])
+  const [isCohortLibraryLoading, setIsCohortLibraryLoading] = useState(false)
+  const [isCohortLibraryOpen, setIsCohortLibraryOpen] = useState(false)
+  const [pdfContextBanner, setPdfContextBanner] = useState<PdfContextBannerState>({
+    context: null,
+    hasShownTableOnce: true,
+  })
+  const [quickQuestions, setQuickQuestions] = useState<string[]>(DEFAULT_QUICK_QUESTIONS)
   const [isHydrated, setIsHydrated] = useState(false)
   const [isSqlDragging, setIsSqlDragging] = useState(false)
   const [isDesktopLayout, setIsDesktopLayout] = useState(false)
@@ -597,7 +1472,24 @@ export function QueryView() {
   const [selectedChartCategoryCount, setSelectedChartCategoryCount] = useState<string>(String(CHART_CATEGORY_DEFAULT_COUNT))
   const [draftChartCategoryValues, setDraftChartCategoryValues] = useState<string[]>([])
   const [draftChartCategoryCount, setDraftChartCategoryCount] = useState<string>(String(CHART_CATEGORY_DEFAULT_COUNT))
+  const [selectedAnalysisIndex, setSelectedAnalysisIndex] = useState(0)
+  const [recommendedRenderMode, setRecommendedRenderMode] = useState<"interactive" | "seaborn">("interactive")
+  const [isVisualizationZoomOpen, setIsVisualizationZoomOpen] = useState(false)
   const saveTimerRef = useRef<number | null>(null)
+  const messageCopyTimerRef = useRef<number | null>(null)
+  const sqlCopyTimerRef = useRef<number | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const recordedChunksRef = useRef<Blob[]>([])
+  const voiceStopActionRef = useRef<"cancel" | "transcribe">("cancel")
+  const voiceStartedAtRef = useRef<number | null>(null)
+  const voiceTimerRef = useRef<number | null>(null)
+  const voiceWaveRafRef = useRef<number | null>(null)
+  const voiceAudioContextRef = useRef<AudioContext | null>(null)
+  const voiceAnalyserRef = useRef<AnalyserNode | null>(null)
+  const voiceSourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const voiceWaveBytesRef = useRef<Uint8Array | null>(null)
+  const voiceWaveLastUpdateRef = useRef(0)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
   const lastAutoScrolledMessageIdRef = useRef<string>("")
@@ -618,7 +1510,12 @@ export function QueryView() {
   })
   const requestTokenRef = useRef(0)
   const activeTabIdRef = useRef("")
+  const activeCohortContextRef = useRef<ActiveCohortContext | null>(null)
   const statsBoxMeasureRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    activeCohortContextRef.current = activeCohortContext
+  }, [activeCohortContext])
 
   useEffect(() => {
     if (!isLoading) {
@@ -687,81 +1584,145 @@ export function QueryView() {
     [statsRows]
   )
   const displaySql = (isEditing ? editedSql : runResult?.sql || currentSql) || ""
+  useEffect(() => {
+    setIsSqlCopied(false)
+  }, [displaySql])
   const activeTab = useMemo(
     () => resultTabs.find((item) => item.id === activeTabId) || null,
     [resultTabs, activeTabId]
   )
   const preferredDashboardChartType = activeTab?.preferredChartType || null
+  const topRecommendedAnalyses = useMemo(() => {
+    const analyses = Array.isArray(visualizationResult?.analyses)
+      ? visualizationResult.analyses.filter((item) => {
+          const hasFigure = isRecord(item?.figure_json)
+          const imageDataUrl = String(item?.image_data_url || "")
+          const hasImage = imageDataUrl.startsWith("data:image/")
+          return hasFigure || hasImage
+        })
+      : []
+    const ranked = [...analyses]
+    const preferredIndex = ranked.findIndex((item) =>
+      isPreferredChartType(item?.chart_spec?.chart_type, preferredDashboardChartType)
+    )
+    if (preferredIndex > 0) {
+      const [preferred] = ranked.splice(preferredIndex, 1)
+      ranked.unshift(preferred)
+    }
+    const top: VisualizationAnalysisCard[] = []
+    const selectedIndexes = new Set<number>()
+    const existingTypes = new Set<string>()
+    const pushByIndex = (index: number) => {
+      if (index < 0 || index >= ranked.length) return
+      if (selectedIndexes.has(index)) return
+      const item = ranked[index]
+      const chartType = normalizeChartType(item?.chart_spec?.chart_type)
+      if (chartType && existingTypes.has(chartType)) return
+      top.push(item)
+      selectedIndexes.add(index)
+      if (chartType) existingTypes.add(chartType)
+    }
+
+    if (ranked.length) pushByIndex(0)
+
+    const varietyPriority = [
+      "treemap",
+      "confusion_matrix",
+      "heatmap",
+      "lollipop",
+      "line_scatter",
+      "line",
+      "area",
+      "bar_grouped",
+      "bar_stacked",
+      "bar_hstack",
+      "bar_hgroup",
+      "pyramid",
+      "bar_basic",
+      "bar",
+      "pie",
+      "nested_pie",
+      "sunburst",
+      "dynamic_scatter",
+      "scatter",
+      "hist",
+      "violin",
+      "box",
+    ]
+    for (const chartType of varietyPriority) {
+      if (top.length >= 3) break
+      const idx = ranked.findIndex(
+        (item, index) =>
+          !selectedIndexes.has(index) &&
+          normalizeChartType(item?.chart_spec?.chart_type) === chartType
+      )
+      if (idx >= 0) pushByIndex(idx)
+    }
+
+    for (let index = 0; index < ranked.length && top.length < 3; index += 1) {
+      pushByIndex(index)
+    }
+
+    for (const autoItem of buildAutoAnalysesFromPreview(previewColumns, previewRecords as Array<Record<string, unknown>>)) {
+      if (top.length >= 3) break
+      const autoType = normalizeChartType(autoItem?.chart_spec?.chart_type)
+      if (autoType && existingTypes.has(autoType)) continue
+      top.push(autoItem)
+      if (autoType) existingTypes.add(autoType)
+    }
+    return top.slice(0, 3)
+  }, [visualizationResult, preferredDashboardChartType, previewColumns, previewRecords])
+  useEffect(() => {
+    setSelectedAnalysisIndex(0)
+  }, [activeTabId, visualizationResult, preferredDashboardChartType])
+  useEffect(() => {
+    if (!topRecommendedAnalyses.length) {
+      if (selectedAnalysisIndex !== 0) setSelectedAnalysisIndex(0)
+      return
+    }
+    if (selectedAnalysisIndex >= topRecommendedAnalyses.length) {
+      setSelectedAnalysisIndex(0)
+    }
+  }, [topRecommendedAnalyses, selectedAnalysisIndex])
   const recommendedAnalysis = useMemo(() => {
-    const analyses = Array.isArray(visualizationResult?.analyses) ? visualizationResult.analyses : []
-    if (!analyses.length) return null
-    if (preferredDashboardChartType === "pie") {
-      return (
-        analyses.find((item) => {
-          const chartType = String(item?.chart_spec?.chart_type || "").toLowerCase()
-          return chartType === "pie" || chartType === "nested_pie" || chartType === "sunburst"
-        }) || analyses[0]
-      )
-    }
-    if (preferredDashboardChartType === "line") {
-      return (
-        analyses.find(
-          (item) => String(item?.chart_spec?.chart_type || "").toLowerCase() === "line"
-        ) || analyses[0]
-      )
-    }
-    if (preferredDashboardChartType === "bar") {
-      return (
-        analyses.find(
-          (item) => String(item?.chart_spec?.chart_type || "").toLowerCase().startsWith("bar")
-        ) || analyses[0]
-      )
-    }
-    return analyses[0]
-  }, [visualizationResult, preferredDashboardChartType])
+    if (!topRecommendedAnalyses.length) return null
+    return topRecommendedAnalyses[selectedAnalysisIndex] || topRecommendedAnalyses[0] || null
+  }, [topRecommendedAnalyses, selectedAnalysisIndex])
   const recommendedFigure = useMemo(() => {
     const fig = recommendedAnalysis?.figure_json
     if (fig && typeof fig === "object") return fig as { data?: unknown[]; layout?: Record<string, unknown> }
     return null
   }, [recommendedAnalysis])
-  const normalizedRecommendedLayout = useMemo<Record<string, unknown>>(() => {
-    const baseLayout = isRecord(recommendedFigure?.layout) ? { ...recommendedFigure.layout } : {}
-    delete baseLayout.height
-    delete baseLayout.width
-
-    const sourceMargin = isRecord(baseLayout.margin) ? baseLayout.margin : {}
-    const marginLeft = readFiniteNumber(sourceMargin.l)
-    const marginRight = readFiniteNumber(sourceMargin.r)
-    const marginTop = readFiniteNumber(sourceMargin.t)
-    const marginBottom = readFiniteNumber(sourceMargin.b)
-
-    const xaxis = isRecord(baseLayout.xaxis)
-      ? { ...baseLayout.xaxis, automargin: true }
-      : { automargin: true }
-    const yaxis = isRecord(baseLayout.yaxis)
-      ? { ...baseLayout.yaxis, automargin: true }
-      : { automargin: true }
-
-    return {
-      ...baseLayout,
-      autosize: true,
-      margin: {
-        ...sourceMargin,
-        l: Math.max(64, marginLeft ?? 0),
-        r: Math.max(24, marginRight ?? 0),
-        t: Math.max(20, marginTop ?? 0),
-        b: Math.max(56, marginBottom ?? 0),
-      },
-      xaxis,
-      yaxis,
-      paper_bgcolor: "transparent",
-      plot_bgcolor: "transparent",
+  const recommendedImageDataUrl = useMemo(() => {
+    const raw = String(recommendedAnalysis?.image_data_url || "").trim()
+    return raw.startsWith("data:image/") ? raw : null
+  }, [recommendedAnalysis])
+  const hasRecommendedSeabornImage = Boolean(recommendedImageDataUrl)
+  const recommendedRenderEngine = useMemo(() => {
+    const raw = String(recommendedAnalysis?.render_engine || "").trim().toLowerCase()
+    if (!raw) return null
+    if (raw === "seaborn") return "SEABORN"
+    if (raw === "plotly") return "PLOTLY"
+    return raw.toUpperCase()
+  }, [recommendedAnalysis])
+  const selectedXAxisDomain = useMemo(
+    () =>
+      buildAxisDomainFromRecords(
+        previewRecords as Array<Record<string, unknown>>,
+        recommendedAnalysis?.chart_spec?.x
+      ),
+    [previewRecords, recommendedAnalysis]
+  )
+  const axisSyncedRecommendedFigure = useMemo(() => {
+    if (isPyramidChartType(recommendedAnalysis?.chart_spec?.chart_type)) {
+      return recommendedFigure
     }
-  }, [recommendedFigure])
+    return clampFigureToAxisDomain(recommendedFigure, selectedXAxisDomain)
+  }, [recommendedFigure, selectedXAxisDomain, recommendedAnalysis?.chart_spec?.chart_type])
   const recommendedChart = useMemo(() => {
     const spec = recommendedAnalysis?.chart_spec
     if (!spec || !previewRecords.length) return null
-    const chartType = String(spec.chart_type || "bar").toLowerCase()
+    const chartType = normalizeChartType(spec.chart_type || "bar")
     const xKey = spec.x && previewColumns.includes(spec.x) ? spec.x : previewColumns[0]
     const candidateY = spec.y && previewColumns.includes(spec.y) ? spec.y : previewColumns.find((col) => {
       const v = previewRecords[0]?.[col]
@@ -854,7 +1815,222 @@ export function QueryView() {
     }
   }, [previewColumns, previewRecords])
   const chartForRender = recommendedChart || fallbackChart
+  const pyramidFallbackFigure = useMemo(() => {
+    const spec = recommendedAnalysis?.chart_spec
+    if (!isPyramidChartType(spec?.chart_type) || !previewRecords.length) return null
+    const xKey = spec?.x && previewColumns.includes(spec.x) ? spec.x : previewColumns[0]
+    if (!xKey) return null
+
+    const agg = String(spec?.agg || "sum").toLowerCase()
+    const shouldAverage = agg === "avg" || agg === "mean"
+    const yKey = spec?.y && previewColumns.includes(spec.y) ? spec.y : ""
+
+    const buildFigure = (
+      categories: string[],
+      leftValues: number[],
+      rightValues: number[],
+      leftName: string,
+      rightName: string
+    ) => {
+      if (!categories.length) return null
+      const maxAbs = Math.max(
+        1,
+        ...leftValues.map((value) => Math.abs(value)),
+        ...rightValues.map((value) => Math.abs(value))
+      )
+      const tickValues = [-maxAbs, -maxAbs / 2, 0, maxAbs / 2, maxAbs]
+      const tickText = tickValues.map((value) =>
+        Math.abs(value) >= 1000 ? Math.round(Math.abs(value)).toLocaleString() : Math.abs(value).toFixed(1)
+      )
+      const leftAbs = leftValues.map((value) => Math.abs(value))
+      const rightAbs = rightValues.map((value) => Math.abs(value))
+      return {
+        data: [
+          {
+            type: "bar",
+            orientation: "h",
+            y: categories,
+            x: leftAbs.map((value) => -value),
+            name: leftName,
+            marker: { color: "#2563eb" },
+            customdata: leftAbs,
+            textposition: "none",
+            hovertemplate: `${xKey}: %{y}<br>${leftName}: %{customdata:,.3f}<extra></extra>`,
+          },
+          {
+            type: "bar",
+            orientation: "h",
+            y: categories,
+            x: rightAbs,
+            name: rightName,
+            marker: { color: "#ef4444" },
+            customdata: rightAbs,
+            textposition: "none",
+            hovertemplate: `${xKey}: %{y}<br>${rightName}: %{customdata:,.3f}<extra></extra>`,
+          },
+        ],
+        layout: {
+          autosize: true,
+          barmode: "relative",
+          bargap: 0.22,
+          margin: { l: 88, r: 28, t: 22, b: 44 },
+          xaxis: {
+            title: yKey || "value",
+            tickvals: tickValues,
+            ticktext: tickText,
+            zeroline: true,
+            zerolinecolor: "rgba(148,163,184,0.45)",
+          },
+          yaxis: {
+            title: xKey,
+            automargin: true,
+            categoryorder: "array",
+            categoryarray: categories,
+          },
+          hovermode: "y unified",
+          legend: { orientation: "h", x: 0, y: 1.04 },
+          paper_bgcolor: "transparent",
+          plot_bgcolor: "transparent",
+        },
+      }
+    }
+
+    const groupKey = spec?.group && previewColumns.includes(spec.group) ? spec.group : ""
+    if (groupKey) {
+      const categoryOrder: string[] = []
+      const grouped = new Map<
+        string,
+        Map<
+          string,
+          {
+            total: number
+            count: number
+          }
+        >
+      >()
+      const groupTotals = new Map<string, number>()
+      for (const row of previewRecords) {
+        const category = String(row?.[xKey] ?? "").trim()
+        const group = String(row?.[groupKey] ?? "").trim()
+        if (!category || !group) continue
+        if (!grouped.has(category)) {
+          grouped.set(category, new Map())
+          categoryOrder.push(category)
+        }
+        const value = agg === "count" ? 1 : readFiniteNumber(row?.[yKey])
+        if (value == null) continue
+        const groupMap = grouped.get(category)!
+        const bucket = groupMap.get(group) || { total: 0, count: 0 }
+        bucket.total += value
+        bucket.count += 1
+        groupMap.set(group, bucket)
+        groupTotals.set(group, (groupTotals.get(group) || 0) + Math.abs(value))
+      }
+
+      const groupOrder = Array.from(groupTotals.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([name]) => name)
+      if (groupOrder.length >= 2) {
+        const leftName = groupOrder[0]
+        const rightName = groupOrder[1]
+        const categories: string[] = []
+        const leftValues: number[] = []
+        const rightValues: number[] = []
+        for (const category of categoryOrder) {
+          const groupMap = grouped.get(category)
+          if (!groupMap) continue
+          const leftBucket = groupMap.get(leftName)
+          const rightBucket = groupMap.get(rightName)
+          const leftValue =
+            leftBucket == null
+              ? 0
+              : shouldAverage
+                ? leftBucket.count > 0
+                  ? leftBucket.total / leftBucket.count
+                  : 0
+                : leftBucket.total
+          const rightValue =
+            rightBucket == null
+              ? 0
+              : shouldAverage
+                ? rightBucket.count > 0
+                  ? rightBucket.total / rightBucket.count
+                  : 0
+                : rightBucket.total
+          if (Math.abs(leftValue) < 1e-9 && Math.abs(rightValue) < 1e-9) continue
+          categories.push(category)
+          leftValues.push(leftValue)
+          rightValues.push(rightValue)
+        }
+        const figure = buildFigure(categories, leftValues, rightValues, leftName, rightName)
+        if (figure) return figure
+      }
+    }
+
+    const numericColumns = previewColumns.filter((column) =>
+      previewRecords.some((row) => readFiniteNumber(row?.[column]) != null)
+    )
+    const leftMetric = yKey && numericColumns.includes(yKey) ? yKey : numericColumns[0]
+    const rightMetric = numericColumns.find((column) => column !== leftMetric && column !== xKey)
+    if (!leftMetric || !rightMetric) return null
+
+    const categoryOrder: string[] = []
+    const buckets = new Map<
+      string,
+      {
+        leftTotal: number
+        leftCount: number
+        rightTotal: number
+        rightCount: number
+      }
+    >()
+    for (const row of previewRecords) {
+      const category = String(row?.[xKey] ?? "").trim()
+      if (!category) continue
+      const leftValue = readFiniteNumber(row?.[leftMetric])
+      const rightValue = readFiniteNumber(row?.[rightMetric])
+      if (leftValue == null && rightValue == null) continue
+      if (!buckets.has(category)) {
+        buckets.set(category, { leftTotal: 0, leftCount: 0, rightTotal: 0, rightCount: 0 })
+        categoryOrder.push(category)
+      }
+      const bucket = buckets.get(category)!
+      if (leftValue != null) {
+        bucket.leftTotal += leftValue
+        bucket.leftCount += 1
+      }
+      if (rightValue != null) {
+        bucket.rightTotal += rightValue
+        bucket.rightCount += 1
+      }
+    }
+
+    const categories: string[] = []
+    const leftValues: number[] = []
+    const rightValues: number[] = []
+    for (const category of categoryOrder) {
+      const bucket = buckets.get(category)
+      if (!bucket) continue
+      const leftValue = shouldAverage
+        ? bucket.leftCount > 0
+          ? bucket.leftTotal / bucket.leftCount
+          : 0
+        : bucket.leftTotal
+      const rightValue = shouldAverage
+        ? bucket.rightCount > 0
+          ? bucket.rightTotal / bucket.rightCount
+          : 0
+        : bucket.rightTotal
+      if (Math.abs(leftValue) < 1e-9 && Math.abs(rightValue) < 1e-9) continue
+      categories.push(category)
+      leftValues.push(leftValue)
+      rightValues.push(rightValue)
+    }
+
+    return buildFigure(categories, leftValues, rightValues, leftMetric, rightMetric)
+  }, [recommendedAnalysis, previewColumns, previewRecords])
   const localFallbackFigure = useMemo(() => {
+    if (pyramidFallbackFigure) return pyramidFallbackFigure
     if (!chartForRender?.data?.length) return null
 
     if (chartForRender.type === "scatter") {
@@ -903,8 +2079,8 @@ export function QueryView() {
         plot_bgcolor: "transparent",
       },
     }
-  }, [chartForRender])
-  const activeVisualizationFigure = recommendedFigure || localFallbackFigure
+  }, [chartForRender, pyramidFallbackFigure])
+  const activeVisualizationFigure = axisSyncedRecommendedFigure || localFallbackFigure
   const chartCategorySummaries = useMemo(
     () => collectCategoryTypeSummariesFromFigure(activeVisualizationFigure),
     [activeVisualizationFigure]
@@ -913,7 +2089,8 @@ export function QueryView() {
     () => chartCategorySummaries.map((item) => item.value),
     [chartCategorySummaries]
   )
-  const isChartCategoryPickerEnabled = chartCategories.length > CHART_CATEGORY_THRESHOLD
+  const isChartCategoryPickerEnabled =
+    selectedXAxisDomain?.kind === "categorical" && chartCategories.length > CHART_CATEGORY_THRESHOLD
   const chartCategoryCountOptions = useMemo(() => {
     if (!isChartCategoryPickerEnabled) return []
     const total = chartCategories.length
@@ -1061,12 +2238,34 @@ export function QueryView() {
     setIsChartCategoryPickerOpen(false)
   }
   const filteredRecommendedFigure = useMemo(
-    () => filterFigureByCategories(recommendedFigure, effectiveSelectedChartCategories),
-    [recommendedFigure, effectiveSelectedChartCategories]
+    () => filterFigureByCategories(axisSyncedRecommendedFigure, effectiveSelectedChartCategories),
+    [axisSyncedRecommendedFigure, effectiveSelectedChartCategories]
   )
   const filteredLocalFallbackFigure = useMemo(
     () => filterFigureByCategories(localFallbackFigure, effectiveSelectedChartCategories),
     [localFallbackFigure, effectiveSelectedChartCategories]
+  )
+  const recommendedFigureForRender = useMemo(
+    () => prepareFigureForRender(filteredRecommendedFigure, { l: 64, r: 24, t: 20, b: 56 }),
+    [filteredRecommendedFigure]
+  )
+  const hasRecommendedPlotlyFigure = figureHasRenderableData(recommendedFigureForRender)
+  useEffect(() => {
+    if (hasRecommendedPlotlyFigure) {
+      if (recommendedRenderMode !== "interactive") setRecommendedRenderMode("interactive")
+      return
+    }
+    if (hasRecommendedSeabornImage && recommendedRenderMode !== "seaborn") {
+      setRecommendedRenderMode("seaborn")
+    }
+  }, [hasRecommendedPlotlyFigure, hasRecommendedSeabornImage, recommendedRenderMode, recommendedAnalysis])
+  const showRecommendedInteractive = hasRecommendedPlotlyFigure && recommendedRenderMode === "interactive"
+  const showRecommendedSeaborn = hasRecommendedSeabornImage && !showRecommendedInteractive
+  const canUseChartCategoryFilter =
+    isChartCategoryPickerEnabled && hasRecommendedPlotlyFigure && recommendedRenderMode === "interactive"
+  const localFallbackFigureForRender = useMemo(
+    () => prepareFigureForRender(filteredLocalFallbackFigure, { l: 56, r: 24, t: 20, b: 56 }),
+    [filteredLocalFallbackFigure]
   )
 
   const survivalFigure = useMemo(() => {
@@ -1148,6 +2347,96 @@ export function QueryView() {
       },
     }
   }, [survivalChartData, medianSurvival, totalPatients, totalEvents])
+  const survivalFigureForRender = useMemo(
+    () => prepareFigureForRender(survivalFigure, { l: 56, r: 24, t: 22, b: 56 }),
+    [survivalFigure]
+  )
+  const zoomChartPayload = useMemo(() => {
+    if (showRecommendedSeaborn && recommendedImageDataUrl) {
+      const chartType = formatChartTypeLabel(recommendedAnalysis?.chart_spec?.chart_type || "chart")
+      return {
+        title: `시각화 확대 보기 (${chartType})`,
+        imageDataUrl: recommendedImageDataUrl,
+        renderEngine: recommendedRenderEngine || "SEABORN",
+      }
+    }
+    if (showRecommendedInteractive && recommendedFigureForRender) {
+      const chartType = formatChartTypeLabel(recommendedAnalysis?.chart_spec?.chart_type || "plotly")
+      return {
+        title: `시각화 확대 보기 (${chartType})`,
+        data: Array.isArray(recommendedFigureForRender.data) ? recommendedFigureForRender.data : [],
+        layout: normalizePlotLayout(recommendedFigureForRender.layout || {}, { l: 72, r: 36, t: 36, b: 72 }),
+      }
+    }
+    if (recommendedImageDataUrl) {
+      const chartType = formatChartTypeLabel(recommendedAnalysis?.chart_spec?.chart_type || "chart")
+      return {
+        title: `시각화 확대 보기 (${chartType})`,
+        imageDataUrl: recommendedImageDataUrl,
+        renderEngine: recommendedRenderEngine || "SEABORN",
+      }
+    }
+    if (recommendedFigureForRender) {
+      const chartType = formatChartTypeLabel(recommendedAnalysis?.chart_spec?.chart_type || "plotly")
+      return {
+        title: `시각화 확대 보기 (${chartType})`,
+        data: Array.isArray(recommendedFigureForRender.data) ? recommendedFigureForRender.data : [],
+        layout: normalizePlotLayout(recommendedFigureForRender.layout || {}, { l: 72, r: 36, t: 36, b: 72 }),
+      }
+    }
+    if (localFallbackFigureForRender) {
+      const chartType = chartForRender?.type || recommendedAnalysis?.chart_spec?.chart_type || "plotly"
+      return {
+        title: `시각화 확대 보기 (${formatChartTypeLabel(chartType)})`,
+        data: Array.isArray(localFallbackFigureForRender.data) ? localFallbackFigureForRender.data : [],
+        layout: normalizePlotLayout(
+          (localFallbackFigureForRender.layout || {}) as Record<string, unknown>,
+          { l: 72, r: 36, t: 36, b: 72 }
+        ),
+      }
+    }
+    if (survivalFigureForRender) {
+      return {
+        title: "시각화 확대 보기 (SURVIVAL)",
+        data: Array.isArray(survivalFigureForRender.data) ? survivalFigureForRender.data : [],
+        layout: normalizePlotLayout((survivalFigureForRender.layout || {}) as Record<string, unknown>, {
+          l: 72,
+          r: 36,
+          t: 36,
+          b: 72,
+        }),
+      }
+    }
+    return null
+  }, [
+    showRecommendedSeaborn,
+    showRecommendedInteractive,
+    recommendedImageDataUrl,
+    recommendedFigureForRender,
+    recommendedRenderEngine,
+    recommendedAnalysis,
+    localFallbackFigureForRender,
+    chartForRender,
+    survivalFigureForRender,
+  ])
+  const hasZoomChart = Boolean(
+    String((zoomChartPayload as any)?.imageDataUrl || "").startsWith("data:image/") ||
+    Boolean((zoomChartPayload as any)?.data?.length)
+  )
+  useEffect(() => {
+    if (!hasZoomChart && isVisualizationZoomOpen) {
+      setIsVisualizationZoomOpen(false)
+    }
+  }, [hasZoomChart, isVisualizationZoomOpen])
+  const handleOpenVisualizationZoom = () => {
+    if (!hasZoomChart) return
+    setIsVisualizationZoomOpen(true)
+  }
+  const handleVisualizationPanelClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null
+    if (target?.closest(".modebar")) return
+    handleOpenVisualizationZoom()
+  }
 
   const statsBoxPlotFigures = useMemo<Array<{ column: string; figure: { data: unknown[]; layout: Record<string, unknown> } }>>(() => {
     if (!previewRecords.length || !boxPlotEligibleRows.length) return []
@@ -1167,19 +2456,64 @@ export function QueryView() {
               type: "box",
               name: row.column,
               y: values,
-              boxpoints: "outliers",
-              marker: { color: "#60a5fa", opacity: 0.72 },
-              line: { color: "#3b82f6" },
+              boxpoints: "all",
+              jitter: 0.45,
+              pointpos: 0,
+              boxmean: "sd",
+              whiskerwidth: 0.8,
+              fillcolor: "rgba(59, 130, 246, 0.2)",
+              marker: {
+                color: "rgba(37, 99, 235, 0.5)",
+                opacity: 0.85,
+                size: 6,
+                line: { color: "rgba(29, 78, 216, 0.5)", width: 0.7 },
+              },
+              line: { color: "#1d4ed8", width: 2 },
+              hovertemplate: `${row.column}<br>값: %{y:,.3f}<extra></extra>`,
+            },
+            {
+              type: "scatter",
+              mode: "markers",
+              x: [row.column],
+              y: [values.reduce((sum, value) => sum + value, 0) / values.length],
+              name: "평균",
+              marker: {
+                color: "#ef4444",
+                size: 10,
+                symbol: "diamond",
+                line: { color: "white", width: 1.2 },
+              },
+              hovertemplate: `평균<br>${row.column}: %{y:,.3f}<extra></extra>`,
             },
           ],
           layout: {
             autosize: true,
-            margin: { l: 52, r: 20, t: 10, b: 28 },
-            yaxis: { title: row.column, automargin: true },
-            xaxis: { title: "", showticklabels: false, automargin: true },
+            margin: { l: 56, r: 20, t: 20, b: 32 },
+            yaxis: {
+              title: row.column,
+              automargin: true,
+              gridcolor: "rgba(148, 163, 184, 0.25)",
+              zeroline: false,
+            },
+            xaxis: {
+              title: "",
+              automargin: true,
+              showticklabels: false,
+              showgrid: false,
+              zeroline: false,
+            },
             paper_bgcolor: "transparent",
-            plot_bgcolor: "transparent",
-            showlegend: false,
+            plot_bgcolor: "rgba(148, 163, 184, 0.06)",
+            showlegend: true,
+            legend: {
+              orientation: "h",
+              x: 1,
+              xanchor: "right",
+              y: 1.05,
+              yanchor: "bottom",
+              font: { size: 11 },
+            },
+            hovermode: "closest",
           },
         },
       })
@@ -1234,8 +2568,20 @@ export function QueryView() {
     return `${base} 평균 기준으로 '${topNumeric.column}' 컬럼이 가장 큽니다(평균 ${formatStatNumber(topNumeric.avg)}).`
   }, [summary, previewColumns, previewRowCount, statsRows])
   const chartInterpretation = useMemo(() => {
-    if (recommendedAnalysis?.summary) return recommendedAnalysis.summary
-    if (recommendedAnalysis?.reason) return recommendedAnalysis.reason
+    const normalizedType = normalizeChartType(recommendedAnalysis?.chart_spec?.chart_type)
+    const pyramidGuide =
+      "피라미드 차트는 일반 막대처럼 한쪽 방향 비교가 아니라, 0축 기준 좌/우 대칭으로 두 집단을 동시에 비교하는 차트입니다."
+    if (recommendedAnalysis?.summary) {
+      return normalizedType === "pyramid"
+        ? `${recommendedAnalysis.summary} ${pyramidGuide}`
+        : recommendedAnalysis.summary
+    }
+    if (recommendedAnalysis?.reason) {
+      return normalizedType === "pyramid"
+        ? `${recommendedAnalysis.reason} ${pyramidGuide}`
+        : recommendedAnalysis.reason
+    }
+    if (normalizedType === "pyramid") return pyramidGuide
     if (recommendedChart) {
       return `차트 유형은 ${recommendedChart.type.toUpperCase()}이며, X축은 ${recommendedChart.xKey}, Y축은 ${recommendedChart.yKey} 기준입니다.`
     }
@@ -1368,6 +2714,16 @@ export function QueryView() {
   const insightHeadline = insightPoints[0] || integratedInsight
   const formattedDisplaySql = useMemo(() => formatSqlForDisplay(displaySql), [displaySql])
   const highlightedDisplaySql = useMemo(() => highlightSqlForDisplay(displaySql), [displaySql])
+  const cohortStarterQuestions = useMemo(
+    () => (activeCohortContext ? buildCohortStarterQuestions(activeCohortContext) : []),
+    [activeCohortContext]
+  )
+  const visibleBannerQuestions = cohortStarterQuestions.length > 0 ? cohortStarterQuestions : quickQuestions.slice(0, 3)
+  const isPdfContextTableVisible =
+    Boolean(activeCohortContext) &&
+    Boolean(pdfContextBanner.context) &&
+    !pdfContextBanner.hasShownTableOnce &&
+    messages.length === 0
   const visibleQuickQuestions = quickQuestions.slice(0, 3)
   const latestVisibleTabs = useMemo(
     () => resultTabs.slice(0, visibleTabLimit),
@@ -1384,7 +2740,11 @@ export function QueryView() {
     return `${chars.slice(0, maxChars).join("")}...`
   }
   const hasConversation =
-    messages.length > 0 || Boolean(response) || Boolean(runResult) || query.trim().length > 0
+    messages.length > 0 ||
+    Boolean(response) ||
+    Boolean(runResult) ||
+    query.trim().length > 0 ||
+    Boolean(activeCohortContext)
   const shouldShowResizablePanels = showResults && isDesktopLayout
   const chatPanelStyle = shouldShowResizablePanels ? { width: `${100 - resultsPanelWidth}%` } : undefined
   const resultsPanelStyle = shouldShowResizablePanels ? { width: `${resultsPanelWidth}%` } : undefined
@@ -1460,7 +2820,13 @@ export function QueryView() {
     previewData: PreviewData | null,
     targetTabId?: string
   ) => {
-    if (!sqlText?.trim() || !previewData?.columns?.length || !previewData?.rows?.length) {
+    const visualizationUserQuery = composeVisualizationUserQuery(questionText)
+    if (
+      !sqlText?.trim() ||
+      !visualizationUserQuery ||
+      !previewData?.columns?.length ||
+      !previewData?.rows?.length
+    ) {
       if (isTargetTabActive(targetTabId)) {
         setVisualizationResult(null)
         setVisualizationError(null)
@@ -1490,7 +2856,7 @@ export function QueryView() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            user_query: questionText || lastQuestion || "",
+            user_query: visualizationUserQuery,
             sql: sqlText,
             rows: sampledRecords.length ? sampledRecords : records,
           }),
@@ -1785,9 +3151,19 @@ export function QueryView() {
     const text = await res.text()
     try {
       const json = JSON.parse(text)
-      if (json?.detail) return String(json.detail)
+      const detail = json?.detail
+      if (typeof detail === "string" && detail.trim()) {
+        return normalizeRequestErrorMessage({ message: detail.trim() }, detail.trim())
+      }
+      if (detail && typeof detail === "object") {
+        const message = String((detail as any).message || "").trim()
+        if (message) return normalizeRequestErrorMessage({ message }, message)
+      }
+      const message = String(json?.message || "").trim()
+      if (message) return normalizeRequestErrorMessage({ message }, message)
     } catch {}
-    return text || `${res.status} ${res.statusText}`
+    const fallback = text || `${res.status} ${res.statusText}`
+    return normalizeRequestErrorMessage({ message: fallback }, fallback)
   }
 
   const buildAssistantMessage = (data: OneShotResponse) => {
@@ -1835,6 +3211,40 @@ export function QueryView() {
     return [base, riskLabel].filter(Boolean).join(" ")
   }
 
+  const applyPdfContextBanner = (context: ActiveCohortContext | null) => {
+    if (!context) {
+      setPdfContextBanner({ context: null, hasShownTableOnce: true })
+      return
+    }
+    let hasShownTableOnce = false
+    if (typeof window !== "undefined") {
+      const key = buildPdfContextTableOnceKey(chatHistoryUser, context)
+      hasShownTableOnce = window.sessionStorage.getItem(key) === "1"
+    }
+    setPdfContextBanner({
+      context: toPdfCohortContext(context),
+      hasShownTableOnce,
+    })
+  }
+
+  const markPdfContextTableAsShown = (context: ActiveCohortContext | null) => {
+    if (!context) return
+    if (typeof window !== "undefined") {
+      const key = buildPdfContextTableOnceKey(chatHistoryUser, context)
+      window.sessionStorage.setItem(key, "1")
+    }
+    setPdfContextBanner((prev) =>
+      prev.context ? { ...prev, hasShownTableOnce: true } : prev
+    )
+  }
+
+  const clearActiveCohortContext = () => {
+    requestTokenRef.current += 1
+    setIsLoading(false)
+    applyActiveCohort(null, { regenerateDefaultQuestions: true })
+    clearPendingActiveCohortContext(chatHistoryUser)
+  }
+
   useEffect(() => {
     if (!isAuthHydrated || !chatHistoryUser) return
     const loadChatState = async () => {
@@ -1850,36 +3260,81 @@ export function QueryView() {
       setIsEditing(false)
       setLastQuestion("")
       setSuggestedQuestions([])
-      try {
-        const res = await fetchWithTimeout(
-          apiUrl(`/chat/history?user=${encodeURIComponent(chatHistoryUser)}`),
-          {},
-          12000
-        )
-        if (!res.ok) return
-        const data = await res.json()
-        const state = data?.state as Partial<PersistedQueryState> | null
-        if (!state) return
-        if (typeof state.query === "string") setQuery(state.query)
-        if (Array.isArray(state.messages)) setMessages(deserializeMessages(state.messages))
-        if (state.response) setResponse(state.response)
-        if (state.runResult) setRunResult(state.runResult)
-        if (state.visualizationResult) setVisualizationResult(state.visualizationResult)
-        if (typeof state.lastQuestion === "string") setLastQuestion(state.lastQuestion)
-        if (Array.isArray(state.suggestedQuestions)) setSuggestedQuestions(state.suggestedQuestions)
-        if (typeof state.showResults === "boolean") setShowResults(state.showResults)
-        if (typeof state.showSqlPanel === "boolean") setShowSqlPanel(state.showSqlPanel)
-        if (typeof state.showQueryResultPanel === "boolean") setShowQueryResultPanel(state.showQueryResultPanel)
-        if (typeof state.editedSql === "string") setEditedSql(state.editedSql)
-        if (typeof state.isEditing === "boolean") setIsEditing(state.isEditing)
-      } catch {
-        // ignore hydration errors
-      } finally {
-        setIsHydrated(true)
-      }
+      setQuickQuestions(DEFAULT_QUICK_QUESTIONS)
+      activeCohortContextRef.current = null
+      setActiveCohortContext(null)
+      applyPdfContextBanner(null)
+      clearPendingActiveCohortContext(chatHistoryUser)
+      fetch(apiUrl("/chat/history"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: chatHistoryUser, state: null })
+      }).catch(() => {})
+      setIsHydrated(true)
     }
     loadChatState()
   }, [apiBaseUrl, isAuthHydrated, chatHistoryUser])
+
+  useEffect(() => {
+    if (!isAuthHydrated || !chatHistoryUser) return
+    let nextModel = DEFAULT_CHAT_MODEL
+    try {
+      const saved = localStorage.getItem(modelStorageKey)
+      if (saved) nextModel = saved
+    } catch {}
+    if (!modelOptions.includes(nextModel)) {
+      nextModel = modelOptions[0] || DEFAULT_CHAT_MODEL
+    }
+    setSelectedModel(nextModel)
+  }, [isAuthHydrated, chatHistoryUser, modelStorageKey, modelOptions])
+
+  useEffect(() => {
+    if (!isAuthHydrated || !chatHistoryUser) return
+    const normalized = modelOptions.includes(selectedModel)
+      ? selectedModel
+      : modelOptions[0] || DEFAULT_CHAT_MODEL
+    try {
+      localStorage.setItem(modelStorageKey, normalized)
+    } catch {}
+    if (normalized !== selectedModel) {
+      setSelectedModel(normalized)
+    }
+  }, [isAuthHydrated, chatHistoryUser, modelStorageKey, modelOptions, selectedModel])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const supported = Boolean(
+      window.navigator?.mediaDevices?.getUserMedia &&
+      typeof window.MediaRecorder !== "undefined"
+    )
+    setIsSpeechSupported(supported)
+    return () => {
+      clearVoiceTimer()
+      stopVoiceWaveMonitor()
+      const recorder = mediaRecorderRef.current
+      if (recorder && recorder.state !== "inactive") {
+        try {
+          recorder.stop()
+        } catch {}
+      }
+      mediaRecorderRef.current = null
+      voiceStopActionRef.current = "cancel"
+      const stream = mediaStreamRef.current
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop())
+      }
+      mediaStreamRef.current = null
+      recordedChunksRef.current = []
+      if (messageCopyTimerRef.current !== null) {
+        window.clearTimeout(messageCopyTimerRef.current)
+        messageCopyTimerRef.current = null
+      }
+      if (sqlCopyTimerRef.current !== null) {
+        window.clearTimeout(sqlCopyTimerRef.current)
+        sqlCopyTimerRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!isHydrated || !chatHistoryUser) return
@@ -1893,6 +3348,7 @@ export function QueryView() {
       response: sanitizeResponse(response),
       runResult: sanitizeRunResult(runResult),
       visualizationResult: sanitizeVisualizationResult(visualizationResult),
+      activeCohortContext,
       suggestedQuestions,
       showResults,
       showSqlPanel,
@@ -1920,6 +3376,7 @@ export function QueryView() {
     response,
     runResult,
     visualizationResult,
+    activeCohortContext,
     suggestedQuestions,
     showResults,
     showSqlPanel,
@@ -1930,23 +3387,95 @@ export function QueryView() {
     chatHistoryUser,
   ])
 
-  useEffect(() => {
-    const loadQuestions = async () => {
-      try {
-        const res = await fetchWithTimeout(apiUrlWithUser("/query/demo/questions"), {}, 15000)
-        if (!res.ok) return
-        const data = await res.json()
-        if (Array.isArray(data?.questions) && data.questions.length) {
-          setQuickQuestions(data.questions.slice(0, 3))
-        }
-      } catch {}
+  const loadDefaultQuestions = async (syncSuggested = false) => {
+    try {
+      const res = await fetchWithTimeout(apiUrlWithUser("/query/demo/questions"), {}, 15000)
+      if (!res.ok) {
+        setQuickQuestions(DEFAULT_QUICK_QUESTIONS)
+        if (syncSuggested) setSuggestedQuestions(DEFAULT_QUICK_QUESTIONS.slice(0, 3))
+        return DEFAULT_QUICK_QUESTIONS
+      }
+      const data = await res.json()
+      const next = Array.isArray(data?.questions) && data.questions.length
+        ? data.questions.slice(0, 3)
+        : DEFAULT_QUICK_QUESTIONS
+      setQuickQuestions(next)
+      if (syncSuggested) setSuggestedQuestions(next.slice(0, 3))
+      return next
+    } catch {
+      setQuickQuestions(DEFAULT_QUICK_QUESTIONS)
+      if (syncSuggested) setSuggestedQuestions(DEFAULT_QUICK_QUESTIONS.slice(0, 3))
+      return DEFAULT_QUICK_QUESTIONS
     }
-    loadQuestions()
+  }
+
+  useEffect(() => {
+    void loadDefaultQuestions(false)
   }, [chatHistoryUser])
+
+  const loadSavedCohortLibrary = async () => {
+    setIsCohortLibraryLoading(true)
+    try {
+      const res = await fetchWithTimeout(apiUrlWithUser("/cohort/library?limit=200"), {}, 15000)
+      if (!res.ok) {
+        setSavedCohorts([])
+        return
+      }
+      const payload = await res.json()
+      const rawItems = Array.isArray(payload?.items)
+        ? payload.items
+        : Array.isArray(payload?.cohorts)
+          ? payload.cohorts
+          : []
+      const parsed = rawItems
+        .map((item: unknown) => toSavedCohort(item))
+        .filter((item: SavedCohort | null): item is SavedCohort => item !== null)
+      setSavedCohorts(parsed)
+    } catch {
+      setSavedCohorts([])
+    } finally {
+      setIsCohortLibraryLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadSavedCohortLibrary()
+  }, [apiBaseUrl, chatHistoryUser])
+
+  const applyActiveCohort = (context: ActiveCohortContext | null, options?: { regenerateDefaultQuestions?: boolean }) => {
+    activeCohortContextRef.current = context
+    setActiveCohortContext(context)
+    applyPdfContextBanner(context)
+    if (!context) {
+      if (options?.regenerateDefaultQuestions) {
+        void loadDefaultQuestions(true)
+      } else {
+        setQuickQuestions(DEFAULT_QUICK_QUESTIONS)
+        setSuggestedQuestions(DEFAULT_QUICK_QUESTIONS.slice(0, 3))
+      }
+      return
+    }
+    const starterQuestions = buildCohortStarterQuestions(context)
+    if (starterQuestions.length) {
+      setQuickQuestions(starterQuestions)
+      setSuggestedQuestions((prev) => (prev.length ? prev : starterQuestions))
+    }
+  }
+
+  const handleApplySavedCohortForQuery = (cohort: SavedCohort) => {
+    const context = toActiveCohortContext(cohort, "query-selector")
+    applyActiveCohort(context)
+    setIsCohortLibraryOpen(false)
+  }
 
   const runQuery = async (questionText: string) => {
     const trimmed = questionText.trim()
-    if (!trimmed) return
+    if (!trimmed || isLoading) return
+    const currentActiveContext = activeCohortContextRef.current
+
+    if (currentActiveContext) {
+      markPdfContextTableAsShown(currentActiveContext)
+    }
 
     const tab = createResultTab(trimmed)
     setResultTabs((prev) => [tab, ...prev])
@@ -1978,26 +3507,56 @@ export function QueryView() {
     // Preserve recent conversational context so follow-up questions
     // ("그 결과에서...", "그 조건으로...") are interpreted correctly.
     const conversationSeed = [...messages, newMessage]
-    const conversation = conversationSeed
+    const baseConversation = conversationSeed
       .slice(-10)
       .map((item) => ({ role: item.role, content: item.content }))
+    const conversation = baseConversation
     setMessages(prev => [...prev, newMessage])
     setQuery("")
 
     try {
-      const res = await fetchWithTimeout(apiUrl("/query/oneshot"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: trimmed,
-          conversation,
-          user_id: chatHistoryUser,
-          user_name: chatUser,
-          user_role: chatUserRole,
-        })
-      }, ONESHOT_TIMEOUT_MS)
-      if (!res.ok) {
-        throw new Error(await readError(res))
+      const oneshotBody = {
+        question: trimmed,
+        conversation,
+        model: selectedModel || undefined,
+        user_id: chatHistoryUser,
+        user_name: chatUser,
+        user_role: chatUserRole,
+        cohort_apply: Boolean(currentActiveContext),
+        cohort_id: currentActiveContext?.cohortId || undefined,
+        cohort_name: currentActiveContext?.cohortName || undefined,
+        cohort_type: currentActiveContext?.type || undefined,
+        cohort_sql: currentActiveContext?.cohortSql || undefined,
+      }
+      const maxAttempts = 3
+      let res: Response | null = null
+      let lastMessage = ""
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          res = await fetchWithTimeout(apiUrl("/query/oneshot"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(oneshotBody),
+          }, ONESHOT_TIMEOUT_MS)
+        } catch (fetchErr: any) {
+          lastMessage = normalizeRequestErrorMessage(fetchErr, "요청이 실패했습니다.")
+          const retryable = isNetworkFetchError(fetchErr) || isRetryableServerErrorMessage(lastMessage)
+          if (!retryable || attempt >= maxAttempts) {
+            throw new Error(lastMessage)
+          }
+          await sleepMs(250 * attempt)
+          continue
+        }
+        if (res.ok) break
+        lastMessage = await readError(res)
+        const retryable = res.status >= 500 || isRetryableServerErrorMessage(lastMessage)
+        if (!retryable || attempt >= maxAttempts) {
+          throw new Error(lastMessage)
+        }
+        await sleepMs(250 * attempt)
+      }
+      if (!res || !res.ok) {
+        throw new Error(lastMessage || "요청이 실패했습니다.")
       }
       if (requestToken !== requestTokenRef.current) return
       const data: OneShotResponse = await res.json()
@@ -2123,7 +3682,7 @@ export function QueryView() {
       const message =
         err?.name === "AbortError"
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-          : err?.message || "요청이 실패했습니다."
+          : normalizeRequestErrorMessage(err, "요청이 실패했습니다.")
       if (activeTabIdRef.current === tab.id) {
         setError(message)
       }
@@ -2148,15 +3707,348 @@ export function QueryView() {
   }
 
   const handleSubmit = async () => {
+    if (isLoading) return
     await runQuery(query)
   }
 
-  const handleCopyMessage = async (text: string) => {
+  const stopVoiceMediaStream = (stream: MediaStream | null) => {
+    if (!stream) return
+    stream.getTracks().forEach((track) => track.stop())
+  }
+
+  const clearVoiceTimer = () => {
+    if (voiceTimerRef.current) {
+      window.clearInterval(voiceTimerRef.current)
+      voiceTimerRef.current = null
+    }
+    voiceStartedAtRef.current = null
+  }
+
+  const resetVoiceWaveLevels = () => {
+    setVoiceWaveLevels(buildVoiceWaveLevels())
+  }
+
+  const stopVoiceWaveMonitor = () => {
+    if (voiceWaveRafRef.current) {
+      window.cancelAnimationFrame(voiceWaveRafRef.current)
+      voiceWaveRafRef.current = null
+    }
+    voiceWaveLastUpdateRef.current = 0
+    if (voiceSourceRef.current) {
+      try {
+        voiceSourceRef.current.disconnect()
+      } catch {}
+      voiceSourceRef.current = null
+    }
+    if (voiceAnalyserRef.current) {
+      try {
+        voiceAnalyserRef.current.disconnect()
+      } catch {}
+      voiceAnalyserRef.current = null
+    }
+    voiceWaveBytesRef.current = null
+    const ctx = voiceAudioContextRef.current
+    voiceAudioContextRef.current = null
+    if (ctx) {
+      void ctx.close().catch(() => {})
+    }
+    resetVoiceWaveLevels()
+  }
+
+  const startVoiceWaveMonitor = (stream: MediaStream) => {
+    if (typeof window === "undefined") return
+    stopVoiceWaveMonitor()
+    const audioWindow = window as Window & { webkitAudioContext?: typeof AudioContext }
+    const AudioCtor = audioWindow.AudioContext || audioWindow.webkitAudioContext
+    if (!AudioCtor) return
+    try {
+      const audioContext = new AudioCtor()
+      const source = audioContext.createMediaStreamSource(stream)
+      const analyser = audioContext.createAnalyser()
+      analyser.fftSize = 1024
+      analyser.smoothingTimeConstant = 0.78
+      source.connect(analyser)
+
+      const bytes = new Uint8Array(analyser.frequencyBinCount)
+      voiceAudioContextRef.current = audioContext
+      voiceSourceRef.current = source
+      voiceAnalyserRef.current = analyser
+      voiceWaveBytesRef.current = bytes
+      voiceWaveLastUpdateRef.current = 0
+
+      void audioContext.resume().catch(() => {})
+
+      const render = (timestamp: number) => {
+        const activeAnalyser = voiceAnalyserRef.current
+        const activeBytes = voiceWaveBytesRef.current
+        if (!activeAnalyser || !activeBytes) return
+        activeAnalyser.getByteFrequencyData(activeBytes)
+        if (timestamp - voiceWaveLastUpdateRef.current >= 45) {
+          const bucketSize = Math.max(1, Math.floor(activeBytes.length / VOICE_WAVE_BAR_COUNT))
+          const nextLevels: number[] = []
+          for (let i = 0; i < VOICE_WAVE_BAR_COUNT; i += 1) {
+            const start = i * bucketSize
+            const end = i === VOICE_WAVE_BAR_COUNT - 1 ? activeBytes.length : Math.min(activeBytes.length, start + bucketSize)
+            if (start >= activeBytes.length) {
+              nextLevels.push(VOICE_WAVE_BASELINE)
+              continue
+            }
+            let sum = 0
+            for (let j = start; j < end; j += 1) {
+              sum += activeBytes[j]
+            }
+            const count = Math.max(1, end - start)
+            const mean = sum / count / 255
+            const normalized = Math.max(VOICE_WAVE_BASELINE, Math.pow(mean, 0.85))
+            nextLevels.push(Math.min(1, normalized))
+          }
+          setVoiceWaveLevels(nextLevels)
+          voiceWaveLastUpdateRef.current = timestamp
+        }
+        voiceWaveRafRef.current = window.requestAnimationFrame(render)
+      }
+
+      voiceWaveRafRef.current = window.requestAnimationFrame(render)
+    } catch {
+      stopVoiceWaveMonitor()
+    }
+  }
+
+  const startVoiceTimer = () => {
+    clearVoiceTimer()
+    const startedAt = Date.now()
+    voiceStartedAtRef.current = startedAt
+    setVoiceElapsedMs(0)
+    voiceTimerRef.current = window.setInterval(() => {
+      const base = voiceStartedAtRef.current || startedAt
+      setVoiceElapsedMs(Math.max(0, Date.now() - base))
+    }, 180)
+  }
+
+  const transcribeVoiceBlob = async (audioBlob: Blob) => {
+    const browserLanguage =
+      typeof window !== "undefined" ? String(window.navigator?.language || "").trim() : ""
+    const language = browserLanguage.split("-")[0]?.toLowerCase() || "ko"
+    const audioDataUrl = await blobToDataUrl(audioBlob)
+    const res = await fetchWithTimeout(
+      apiUrl("/query/transcribe"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audio_data_url: audioDataUrl,
+          language,
+        }),
+      },
+      90_000
+    )
+    if (!res.ok) {
+      const message = await readError(res)
+      throw new Error(message || "음성 인식 요청에 실패했습니다.")
+    }
+    const data: QueryTranscribeResponse = await res.json()
+    const text = String(data?.text || "").trim()
+    if (!text) {
+      throw new Error("음성 인식 결과가 비어 있습니다.")
+    }
+    return text
+  }
+
+  const stopVoiceRecorder = (action: "cancel" | "transcribe") => {
+    const recorder = mediaRecorderRef.current
+    if (!recorder) return
+    voiceStopActionRef.current = action
+    setIsVoiceModeOn(false)
+    setIsListening(false)
+    clearVoiceTimer()
+    stopVoiceWaveMonitor()
+    setVoiceInterimText(action === "transcribe" ? "음성을 텍스트로 변환 중..." : "")
+    try {
+      if (recorder.state !== "inactive") {
+        recorder.stop()
+      }
+    } catch {
+      mediaRecorderRef.current = null
+      stopVoiceMediaStream(mediaStreamRef.current)
+      mediaStreamRef.current = null
+      recordedChunksRef.current = []
+      voiceStopActionRef.current = "cancel"
+      setVoiceElapsedMs(0)
+      setVoiceInterimText("")
+      setBoardMessage("음성 녹음을 종료하지 못했습니다. 다시 시도해 주세요.")
+    }
+  }
+
+  const handleCancelVoiceInput = () => {
+    if (!isVoiceModeOn) return
+    stopVoiceRecorder("cancel")
+  }
+
+  const handleConfirmVoiceInput = () => {
+    if (!isVoiceModeOn) return
+    stopVoiceRecorder("transcribe")
+  }
+
+  const handleToggleVoiceInput = () => {
+    if (!isSpeechSupported) {
+      setBoardMessage("현재 브라우저는 음성 녹음을 지원하지 않습니다.")
+      return
+    }
+    if (isVoiceTranscribing || isVoiceModeOn) {
+      return
+    }
+
+    setBoardMessage(null)
+    setIsVoiceTranscribing(false)
+    setVoiceInterimText("")
+    void (async () => {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder === "undefined") {
+          throw new Error("unsupported")
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        })
+        stopVoiceMediaStream(mediaStreamRef.current)
+        mediaStreamRef.current = stream
+
+        const mimeType = pickSupportedRecordingMimeType()
+        const recorder = mimeType
+          ? new window.MediaRecorder(stream, { mimeType })
+          : new window.MediaRecorder(stream)
+        voiceStopActionRef.current = "cancel"
+        recordedChunksRef.current = []
+
+        recorder.ondataavailable = (event: BlobEvent) => {
+          if (event.data && event.data.size > 0) {
+            recordedChunksRef.current.push(event.data)
+          }
+        }
+
+        recorder.onerror = () => {
+          clearVoiceTimer()
+          stopVoiceWaveMonitor()
+          voiceStopActionRef.current = "cancel"
+          setIsVoiceModeOn(false)
+          setIsListening(false)
+          setVoiceElapsedMs(0)
+          setVoiceInterimText("")
+          setBoardMessage("녹음 중 오류가 발생했습니다. 다시 시도해 주세요.")
+        }
+
+        recorder.onstop = () => {
+          clearVoiceTimer()
+          stopVoiceWaveMonitor()
+          const stopAction = voiceStopActionRef.current
+          voiceStopActionRef.current = "cancel"
+          const chunks = [...recordedChunksRef.current]
+          recordedChunksRef.current = []
+          mediaRecorderRef.current = null
+          stopVoiceMediaStream(mediaStreamRef.current)
+          mediaStreamRef.current = null
+          setIsVoiceModeOn(false)
+          setIsListening(false)
+          setVoiceElapsedMs(0)
+
+          if (stopAction !== "transcribe") {
+            setVoiceInterimText("")
+            return
+          }
+
+          const recordedBlob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" })
+          if (!recordedBlob.size) {
+            setVoiceInterimText("")
+            setBoardMessage("녹음된 음성이 없습니다. 다시 시도해 주세요.")
+            return
+          }
+
+          setIsVoiceTranscribing(true)
+          setVoiceInterimText("음성을 텍스트로 변환 중...")
+          void (async () => {
+            try {
+              const transcribedText = await transcribeVoiceBlob(recordedBlob)
+              setQuery((prev) =>
+                prev.trim().length > 0 ? `${prev.trimEnd()} ${transcribedText}` : transcribedText
+              )
+              setBoardMessage(null)
+            } catch (err: unknown) {
+              const message = normalizeRequestErrorMessage(err, "음성 인식에 실패했습니다.")
+              setBoardMessage(message)
+            } finally {
+              setIsVoiceTranscribing(false)
+              setVoiceInterimText("")
+            }
+          })()
+        }
+
+        mediaRecorderRef.current = recorder
+        recorder.start(250)
+        startVoiceWaveMonitor(stream)
+        setIsVoiceModeOn(true)
+        setIsListening(true)
+        setVoiceInterimText("듣는 중...")
+        startVoiceTimer()
+      } catch (err: unknown) {
+        clearVoiceTimer()
+        stopVoiceWaveMonitor()
+        stopVoiceMediaStream(mediaStreamRef.current)
+        mediaStreamRef.current = null
+        mediaRecorderRef.current = null
+        recordedChunksRef.current = []
+        voiceStopActionRef.current = "cancel"
+        setIsVoiceModeOn(false)
+        setIsListening(false)
+        setVoiceElapsedMs(0)
+        const name = String((err as any)?.name || "").toLowerCase()
+        if (name === "notallowederror" || name === "securityerror") {
+          setBoardMessage("마이크 권한이 필요합니다. 브라우저 설정에서 허용해 주세요.")
+        } else {
+          setBoardMessage("음성 녹음을 시작하지 못했습니다. 마이크를 확인해 주세요.")
+        }
+        setVoiceInterimText("")
+      }
+    })()
+  }
+
+  useEffect(() => {
+    if (isLoading) {
+      const recorder = mediaRecorderRef.current
+      if (recorder && recorder.state !== "inactive") {
+        voiceStopActionRef.current = "cancel"
+        try {
+          recorder.stop()
+        } catch {}
+      }
+      clearVoiceTimer()
+      stopVoiceWaveMonitor()
+      setIsVoiceTranscribing(false)
+      setIsVoiceModeOn(false)
+      setIsListening(false)
+      setVoiceElapsedMs(0)
+      setVoiceInterimText("")
+    }
+  }, [isLoading])
+
+  const handleCopyMessage = async (messageId: string, text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
     try {
       await navigator.clipboard.writeText(text)
-    } catch {}
+      setCopiedMessageId(messageId)
+      if (messageCopyTimerRef.current !== null) {
+        window.clearTimeout(messageCopyTimerRef.current)
+      }
+      messageCopyTimerRef.current = window.setTimeout(() => {
+        setCopiedMessageId((current) => (current === messageId ? null : current))
+        messageCopyTimerRef.current = null
+      }, 1600)
+    } catch {
+      setBoardMessage("클립보드 복사에 실패했습니다.")
+    }
   }
 
   const handleRerunMessage = async (text: string) => {
@@ -2274,6 +4166,8 @@ export function QueryView() {
         : selectedFolder?.name || deriveDashboardCategory(finalTitle)
 
     const category = folderName || deriveDashboardCategory(finalTitle)
+    const nowIso = new Date().toISOString()
+    const saveTs = Date.now()
     const metrics = [
       { label: "행 수", value: String(effectiveTotalRows ?? 0) },
       { label: "전체 행 수", value: previewTotalCount != null ? String(previewTotalCount) : "-" },
@@ -2291,7 +4185,7 @@ export function QueryView() {
           }
         : undefined
     const resolvedChartType: "line" | "bar" | "pie" = (() => {
-      const specType = String(recommendedAnalysis?.chart_spec?.chart_type || "").toLowerCase()
+      const specType = normalizeChartType(recommendedAnalysis?.chart_spec?.chart_type || "")
       if (specType === "line") return "line"
       if (specType === "pie" || specType === "nested_pie" || specType === "sunburst") return "pie"
       if (chartForRender?.type === "line") return "line"
@@ -2301,18 +4195,55 @@ export function QueryView() {
     const savedInsight = normalizeInsightText(
       String(visualizationResult?.insight || activeTab?.insight || "").trim()
     )
+    const cohortProvenance = buildDashboardCohortProvenance(activeCohortContextRef.current)
+    const pdfAnalysisPayload = buildDashboardPdfAnalysisSnapshot(activeCohortContextRef.current)
+    const statsPayload = toDashboardStatsRows(statsRows)
+
+    const analysisRecommendedCharts: DashboardChartSpec[] = topRecommendedAnalyses
+      .slice(0, 3)
+      .map((analysis, index) => {
+        const chartType = normalizeChartType(analysis?.chart_spec?.chart_type || "chart").toUpperCase() || "CHART"
+        const imageDataUrl = String(analysis?.image_data_url || "").trim()
+        const imagePayload = imageDataUrl.startsWith("data:image/") ? imageDataUrl : undefined
+        return {
+          id: `recommended-${saveTs}-${index + 1}`,
+          type: chartType,
+          x: analysis?.chart_spec?.x || undefined,
+          y: analysis?.chart_spec?.y || undefined,
+          config: {
+            chartSpec: analysis?.chart_spec || null,
+            figureJson: analysis?.figure_json || null,
+            reason: analysis?.reason || "",
+            summary: analysis?.summary || "",
+            renderEngine: analysis?.render_engine || "",
+          },
+          thumbnailUrl: imagePayload,
+          pngUrl: imagePayload,
+        }
+      })
+
+    const recommendedChartsPayload = [...analysisRecommendedCharts]
+
+    const primaryChartPayload: DashboardChartSpec | undefined = analysisRecommendedCharts[0]
 
     const newEntry = {
       id: `dashboard-${Date.now()}`,
       title: finalTitle,
       description: summary || "쿼리 결과 요약",
       insight: savedInsight || undefined,
+      llmSummary: savedInsight || undefined,
       query: displaySql || currentSql,
       lastRun: "방금 전",
+      executedAt: nowIso,
       isPinned: true,
       category,
       folderId: folderId || undefined,
       preview: previewPayload,
+      cohort: cohortProvenance,
+      pdfAnalysis: pdfAnalysisPayload,
+      stats: statsPayload,
+      recommendedCharts: recommendedChartsPayload,
+      primaryChart: primaryChartPayload,
       metrics,
       chartType: resolvedChartType,
     }
@@ -2333,6 +4264,12 @@ export function QueryView() {
             total_count: previewTotalCount,
             summary: summary || "",
             insight: savedInsight || "",
+            llm_summary: savedInsight || "",
+            cohort: cohortProvenance,
+            pdf_analysis: pdfAnalysisPayload,
+            stats: statsPayload,
+            recommended_charts: recommendedChartsPayload,
+            primary_chart: primaryChartPayload,
             mode: mode || "",
             entry: newEntry,
             new_folder:
@@ -2340,7 +4277,7 @@ export function QueryView() {
                 ? {
                     id: folderId,
                     name: folderName,
-                    createdAt: new Date().toISOString(),
+                    createdAt: nowIso,
                   }
                 : null,
           },
@@ -2373,11 +4310,18 @@ export function QueryView() {
     addAssistantMessage?: boolean
     tabId?: string
   }) => {
+    const currentActiveContext = activeCohortContextRef.current
     const body: Record<string, any> = {
       user_ack: true,
+      model: selectedModel || undefined,
       user_id: chatHistoryUser,
       user_name: chatUser,
       user_role: chatUserRole,
+      cohort_apply: Boolean(currentActiveContext),
+      cohort_id: currentActiveContext?.cohortId || undefined,
+      cohort_name: currentActiveContext?.cohortName || undefined,
+      cohort_type: currentActiveContext?.type || undefined,
+      cohort_sql: currentActiveContext?.cohortSql || undefined,
     }
     if (qid) {
       body.qid = qid
@@ -2389,13 +4333,35 @@ export function QueryView() {
       body.question = questionForSuggestions.trim()
     }
 
-    const res = await fetchWithTimeout(apiUrl("/query/run"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    }, RUN_TIMEOUT_MS)
-    if (!res.ok) {
-      throw new Error(await readError(res))
+    const maxAttempts = 3
+    let res: Response | null = null
+    let lastMessage = ""
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        res = await fetchWithTimeout(apiUrl("/query/run"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }, RUN_TIMEOUT_MS)
+      } catch (fetchErr: any) {
+        lastMessage = normalizeRequestErrorMessage(fetchErr, "실행이 실패했습니다.")
+        const retryable = isNetworkFetchError(fetchErr) || isRetryableServerErrorMessage(lastMessage)
+        if (!retryable || attempt >= maxAttempts) {
+          throw new Error(lastMessage)
+        }
+        await sleepMs(250 * attempt)
+        continue
+      }
+      if (res.ok) break
+      lastMessage = await readError(res)
+      const retryable = res.status >= 500 || isRetryableServerErrorMessage(lastMessage)
+      if (!retryable || attempt >= maxAttempts) {
+        throw new Error(lastMessage)
+      }
+      await sleepMs(250 * attempt)
+    }
+    if (!res || !res.ok) {
+      throw new Error(lastMessage || "실행이 실패했습니다.")
     }
 
     const data: RunResponse = await res.json()
@@ -2486,7 +4452,7 @@ export function QueryView() {
       const message =
         err?.name === "AbortError"
           ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-          : err?.message || "실행이 실패했습니다."
+          : normalizeRequestErrorMessage(err, "실행이 실패했습니다.")
       setError(message)
       updateActiveTab({ status: "error", error: message })
       setMessages(prev => [
@@ -2504,12 +4470,57 @@ export function QueryView() {
   }
 
   useEffect(() => {
+    const applyPendingCohortContext = () => {
+      if (typeof window === "undefined") return false
+      const raw =
+        localStorage.getItem(pendingActiveCohortContextKey) ||
+        localStorage.getItem(PENDING_ACTIVE_COHORT_CONTEXT_KEY) ||
+        localStorage.getItem(pendingLegacyPdfCohortContextKey) ||
+        localStorage.getItem(LEGACY_PENDING_PDF_COHORT_CONTEXT_KEY)
+      if (!raw) return false
+      clearPendingActiveCohortContext(chatHistoryUser)
+
+      let parsed: unknown = null
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        return false
+      }
+      const context = normalizePendingPdfCohortContext(parsed)
+      if (!context) return false
+
+      const starterQuestions = buildCohortStarterQuestions(context)
+      requestTokenRef.current += 1
+      setIsLoading(false)
+      setError(null)
+      setBoardMessage(null)
+      setMessages([])
+      setResponse(null)
+      setRunResult(null)
+      setVisualizationResult(null)
+      setVisualizationError(null)
+      setShowResults(false)
+      setShowSqlPanel(false)
+      setShowQueryResultPanel(false)
+      setEditedSql("")
+      setIsEditing(false)
+      setQuery("")
+      setLastQuestion("")
+      setSuggestedQuestions(starterQuestions)
+      setQuickQuestions(starterQuestions)
+      setResultTabs([])
+      setActiveTabId("")
+      activeTabIdRef.current = ""
+      applyActiveCohort(context)
+      return true
+    }
+
     const runPendingDashboardQuery = async () => {
-      if (typeof window === "undefined") return
+      if (typeof window === "undefined") return false
       const raw =
         localStorage.getItem(pendingDashboardQueryKey) ||
         localStorage.getItem("ql_pending_dashboard_query")
-      if (!raw) return
+      if (!raw) return false
       localStorage.removeItem(pendingDashboardQueryKey)
       localStorage.removeItem("ql_pending_dashboard_query")
 
@@ -2517,16 +4528,17 @@ export function QueryView() {
       try {
         parsed = JSON.parse(raw)
       } catch {
-        return
+        return false
       }
       const sqlText = String(parsed?.sql || "").trim()
-      if (!sqlText) return
+      if (!sqlText) return false
 
       const questionText = String(parsed?.question || "").trim() || "대시보드 저장 쿼리"
       const preferredChartType =
         parsed?.chartType === "line" || parsed?.chartType === "bar" || parsed?.chartType === "pie"
           ? parsed.chartType
           : null
+      applyActiveCohort(null)
       const tab = createResultTab(questionText)
       tab.sql = sqlText
       tab.editedSql = sqlText
@@ -2544,11 +4556,9 @@ export function QueryView() {
       setSuggestedQuestions([])
 
       try {
-        const questionForViz =
-          preferredChartType === "pie" ? `${questionText} 파이 차트로 비율 중심 시각화` : questionText
         await executeAdvancedSql({
           sql: sqlText,
-          questionForSuggestions: questionForViz,
+          questionForSuggestions: questionText,
           addAssistantMessage: true,
           tabId: tab.id,
         })
@@ -2556,29 +4566,46 @@ export function QueryView() {
         const message =
           err?.name === "AbortError"
             ? "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-            : err?.message || "실행이 실패했습니다."
+            : normalizeRequestErrorMessage(err, "실행이 실패했습니다.")
         setError(message)
         updateTab(tab.id, { status: "error", error: message })
       } finally {
         setIsLoading(false)
       }
+      return true
     }
 
-    runPendingDashboardQuery()
+    const runPendingEntries = async () => {
+      const dashboardHandled = await runPendingDashboardQuery()
+      if (dashboardHandled) return
+      applyPendingCohortContext()
+    }
+
+    void runPendingEntries()
     const onOpenQueryView = () => {
-      void runPendingDashboardQuery()
+      void runPendingEntries()
     }
     window.addEventListener("ql-open-query-view", onOpenQueryView)
     return () => {
       window.removeEventListener("ql-open-query-view", onOpenQueryView)
     }
-  }, [pendingDashboardQueryKey])
+  }, [chatHistoryUser, pendingDashboardQueryKey, pendingActiveCohortContextKey, pendingLegacyPdfCohortContextKey])
 
   const handleCopySql = async () => {
     if (!displaySql) return
     try {
       await navigator.clipboard.writeText(displaySql)
-    } catch {}
+      setIsSqlCopied(true)
+      if (sqlCopyTimerRef.current !== null) {
+        window.clearTimeout(sqlCopyTimerRef.current)
+      }
+      sqlCopyTimerRef.current = window.setTimeout(() => {
+        setIsSqlCopied(false)
+        sqlCopyTimerRef.current = null
+      }, 1600)
+    } catch {
+      setBoardMessage("클립보드 복사에 실패했습니다.")
+    }
   }
 
   const handleDownloadCsv = () => {
@@ -2622,10 +4649,14 @@ export function QueryView() {
     setIsEditing(false)
     setLastQuestion("")
     setSuggestedQuestions([])
+    applyActiveCohort(null)
     setError(null)
     setResultTabs([])
     activeTabIdRef.current = ""
     setActiveTabId("")
+    setCopiedMessageId(null)
+    setIsSqlCopied(false)
+    clearPendingActiveCohortContext(chatHistoryUser)
     fetch(apiUrl("/chat/history"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2673,6 +4704,93 @@ export function QueryView() {
           )}
           style={chatPanelStyle}
         >
+          {isPdfContextTableVisible && activeCohortContext && pdfContextBanner.context && (
+            <div className="shrink-0 border-b border-border bg-background/95 p-4">
+              <div className="rounded-lg border border-primary/25 bg-primary/5 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-[12px] font-semibold text-primary">
+                      <FileText className="h-3.5 w-3.5" />
+                      코호트 컨텍스트 적용됨
+                    </div>
+                    <p className="truncate text-[12px] text-muted-foreground">{pdfContextBanner.context.pdfName}</p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={clearActiveCohortContext}
+                  >
+                    해제
+                  </Button>
+                </div>
+                <div className="overflow-x-auto rounded-md border border-border/70 bg-background/90">
+                  <table className="w-full min-w-[460px] text-xs">
+                    <tbody>
+                      <tr className="border-b border-border/70">
+                        <th className="w-36 bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground">대상 환자 수</th>
+                        <td className="px-3 py-2 text-foreground">
+                          {pdfContextBanner.context.cohortSize != null
+                            ? `${pdfContextBanner.context.cohortSize.toLocaleString()}명`
+                            : "-"}
+                        </td>
+                      </tr>
+                      <tr className="border-b border-border/70">
+                        <th className="bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground">핵심 변수</th>
+                        <td className="px-3 py-2 text-foreground">
+                          {(() => {
+                            const vars = Array.isArray(pdfContextBanner.context?.keyVariables)
+                              ? pdfContextBanner.context.keyVariables
+                              : []
+                            if (!vars.length) return "-"
+                            const preview = vars.slice(0, 3).join(", ")
+                            const remains = Math.max(0, vars.length - 3)
+                            return remains > 0 ? `${preview} +${remains} more` : preview
+                          })()}
+                        </td>
+                      </tr>
+                      <tr className="border-b border-border/70">
+                        <th className="bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground">코호트 기준 요약</th>
+                        <td className="px-3 py-2 text-foreground">
+                          {activeCohortContext.criteriaSummaryKo || activeCohortContext.summaryKo || "-"}
+                        </td>
+                      </tr>
+                      <tr>
+                        <th className="bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground">적용 시각</th>
+                        <td className="px-3 py-2 text-foreground">
+                          {new Date(pdfContextBanner.context.appliedAt).toLocaleString()}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                {visibleBannerQuestions.length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-2 flex items-center gap-1 text-[11px] text-muted-foreground">
+                      <Sparkles className="h-3 w-3 text-primary" />
+                      추천 질문
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {visibleBannerQuestions.slice(0, 3).map((item) => (
+                        <Button
+                          key={`banner-cohort-question-${item}`}
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 rounded-full px-2.5 text-[11px] bg-background/80"
+                          onClick={() => handleQuickQuestion(item)}
+                          disabled={isLoading}
+                        >
+                          {item}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           {/* Messages */}
           <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 ? (
@@ -2682,7 +4800,9 @@ export function QueryView() {
                 </div>
                 <h3 className="font-medium text-foreground mb-2">질문을 입력하세요</h3>
                 <p className="text-sm text-muted-foreground max-w-sm">
-                  예: "65세 이상 환자 코호트를 만들고 생존 곡선을 보여줘"
+                  {activeCohortContext
+                    ? "상단 코호트 요약 표를 확인한 뒤 바로 질문할 수 있습니다."
+                    : '예: "65세 이상 환자 코호트를 만들고 생존 곡선을 보여줘"'}
                 </p>
                 {visibleQuickQuestions.length > 0 && (
                   <div className="mt-4 flex flex-col gap-2 w-full max-w-sm">
@@ -2721,14 +4841,18 @@ export function QueryView() {
                             variant="ghost"
                             size="icon-sm"
                             className="h-5 w-5 text-muted-foreground hover:text-foreground"
-                            title="복사"
+                            title={copiedMessageId === message.id ? "복사됨" : "복사"}
                             aria-label="질문 복사"
                             onClick={() => {
-                              void handleCopyMessage(message.content)
+                              void handleCopyMessage(message.id, message.content)
                             }}
                             disabled={!canActOnMessage}
                           >
-                            <Copy className="h-2.5 w-2.5" />
+                            {copiedMessageId === message.id ? (
+                              <Check className="h-2.5 w-2.5 text-emerald-500" />
+                            ) : (
+                              <Copy className="h-2.5 w-2.5" />
+                            )}
                           </Button>
                           <Button
                             type="button"
@@ -2753,11 +4877,33 @@ export function QueryView() {
                         </div>
                       </div>
                     ) : (
-                      <div className="max-w-[80%] rounded-lg bg-secondary p-3">
-                        <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
-                        <span className="mt-1 block text-[10px] opacity-70">
-                          {message.timestamp.toLocaleTimeString()}
-                        </span>
+                      <div className="group flex max-w-[80%] items-end gap-1">
+                        <div className="rounded-lg bg-secondary p-3">
+                          <p className="text-sm whitespace-pre-line break-words">{message.content}</p>
+                          <span className="mt-1 block text-[10px] opacity-70">
+                            {message.timestamp.toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-0.5 pb-0.5 opacity-100 transition-opacity md:pointer-events-none md:opacity-0 md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="h-5 w-5 text-muted-foreground hover:text-foreground"
+                            title={copiedMessageId === message.id ? "복사됨" : "복사"}
+                            aria-label="답변 복사"
+                            onClick={() => {
+                              void handleCopyMessage(message.id, message.content)
+                            }}
+                            disabled={!canActOnMessage}
+                          >
+                            {copiedMessageId === message.id ? (
+                              <Check className="h-2.5 w-2.5 text-emerald-500" />
+                            ) : (
+                              <Copy className="h-2.5 w-2.5" />
+                            )}
+                          </Button>
+                        </div>
                       </div>
                     )}
                     {showSuggestions && (
@@ -2801,12 +4947,34 @@ export function QueryView() {
 
           {/* Input */}
           <div className="p-4 border-t border-border">
-            <div className="flex gap-2">
+            <div className="rounded-2xl border border-border bg-card px-2.5 py-2 shadow-xs">
+              {activeCohortContext && (
+                <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-primary/25 bg-primary/5 px-2.5 py-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-[11px] font-medium text-primary">
+                      <FileText className="h-3.5 w-3.5" />
+                      코호트 컨텍스트 적용됨
+                    </div>
+                    <p className="truncate text-[11px] text-muted-foreground">
+                      {activeCohortContext.filename || activeCohortContext.cohortName}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={clearActiveCohortContext}
+                  >
+                    해제
+                  </Button>
+                </div>
+              )}
               <Textarea
                 placeholder="자연어로 질문하세요..."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="min-h-[60px] resize-none"
+                className="min-h-[64px] resize-none border-0 bg-transparent px-1 py-1.5 text-sm shadow-none focus-visible:ring-0"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault()
@@ -2814,13 +4982,142 @@ export function QueryView() {
                   }
                 }}
               />
-              <Button 
-                onClick={handleSubmit} 
-                disabled={isLoading || !query.trim()}
-                className="px-4"
-              >
-                <Send className="w-4 h-4" />
-              </Button>
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-8 w-8 rounded-full"
+                    title="코호트 라이브러리 열기"
+                    aria-label="코호트 라이브러리 열기"
+                    onClick={() => {
+                      void loadSavedCohortLibrary()
+                      setIsCohortLibraryOpen(true)
+                    }}
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                  <Select value={selectedModel} onValueChange={setSelectedModel}>
+                    <SelectTrigger className="h-8 w-[152px] rounded-full border-border/70 bg-background text-xs">
+                      <SelectValue placeholder="모델 선택" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {modelOptions.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <div className="relative">
+                    {isVoiceModeOn && (
+                      <span className="pointer-events-none absolute inset-0 rounded-full border border-primary/70 animate-ping" />
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className={cn(
+                        "relative h-8 w-8 rounded-full transition-colors",
+                        isVoiceModeOn && "bg-primary/10 text-primary",
+                        isVoiceTranscribing && "bg-primary/10 text-primary"
+                      )}
+                      title={
+                        isVoiceTranscribing
+                          ? "음성 변환 중"
+                          : isVoiceModeOn
+                            ? "음성 입력 중지"
+                            : "음성 입력 시작"
+                      }
+                      aria-label={
+                        isVoiceTranscribing
+                          ? "음성 변환 중"
+                          : isVoiceModeOn
+                            ? "음성 입력 중지"
+                            : "음성 입력 시작"
+                      }
+                      onClick={handleToggleVoiceInput}
+                      disabled={!isSpeechSupported || isVoiceTranscribing || isVoiceModeOn}
+                    >
+                      {isVoiceTranscribing ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Mic className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+                <Button
+                  onClick={handleSubmit}
+                  disabled={isLoading || isVoiceModeOn || isVoiceTranscribing || !query.trim()}
+                  className="h-9 w-9 rounded-full p-0"
+                  title="전송"
+                  aria-label="전송"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              </div>
+              {isVoiceModeOn && (
+                <div className="mt-2 flex items-center gap-2 rounded-full border border-border bg-card/95 px-2 py-1.5 text-foreground shadow-sm">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={handleCancelVoiceInput}
+                    className="h-9 w-9 rounded-full border border-border bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                    title="녹음 취소"
+                    aria-label="녹음 취소"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                  <div className="min-w-0 flex-1 px-1">
+                    <div className="h-7 overflow-hidden rounded-full border border-border/70 bg-muted/30 px-2">
+                      <div className="flex h-full items-center gap-[3px]">
+                        {voiceWaveLevels.map((level, idx) => (
+                          <span
+                            key={`voice-wave-${idx}`}
+                            className="w-[2px] rounded-full bg-primary transition-[height,opacity] duration-75 ease-out"
+                            style={{
+                              height: `${4 + Math.round(level * 18)}px`,
+                              opacity: 0.2 + Math.min(0.8, level),
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="w-11 text-right text-lg font-semibold tabular-nums tracking-tight text-foreground">
+                    {formatVoiceElapsed(voiceElapsedMs)}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={handleConfirmVoiceInput}
+                    className="h-9 w-9 rounded-full bg-primary text-primary-foreground hover:bg-primary/90"
+                    title="녹음 확정"
+                    aria-label="녹음 확정"
+                    disabled={!isListening}
+                  >
+                    <Check className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+              {isVoiceTranscribing && (
+                <div className="mt-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-2 py-1.5 text-[11px] text-primary">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span className="font-medium">음성 변환 중...</span>
+                  <span className="min-w-0 truncate text-muted-foreground">
+                    {voiceInterimText || "녹음된 음성을 텍스트로 변환하고 있습니다."}
+                  </span>
+                </div>
+              )}
+              {!isSpeechSupported && (
+                <div className="mt-2 px-1 text-[11px] text-muted-foreground">
+                  이 브라우저는 음성 녹음을 지원하지 않습니다.
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -2966,8 +5263,8 @@ export function QueryView() {
                         </Button>
                       )}
                       <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={handleCopySql}>
-                        <Copy className="w-3 h-3" />
-                        복사
+                        {isSqlCopied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                        {isSqlCopied ? "복사됨" : "복사"}
                       </Button>
                       <Button
                         variant="ghost"
@@ -3265,8 +5562,23 @@ export function QueryView() {
 
               <Card>
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">시각화 차트</CardTitle>
-                  <CardDescription className="text-xs">결과 테이블 기반 시각화</CardDescription>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <CardTitle className="text-sm">시각화 차트</CardTitle>
+                      <CardDescription className="text-xs">결과 테이블 기반 시각화</CardDescription>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1 text-xs"
+                      onClick={handleOpenVisualizationZoom}
+                      disabled={!hasZoomChart}
+                    >
+                      <Maximize2 className="h-3 w-3" />
+                      확대 보기
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent>
                   {visualizationLoading ? (
@@ -3277,12 +5589,34 @@ export function QueryView() {
                     <div className="rounded-lg border border-dashed border-border p-6 text-xs text-muted-foreground">
                       결과 컬럼이 1개라 시각화를 표시할 수 없습니다. 최소 2개 컬럼이 필요합니다.
                     </div>
-                  ) : recommendedFigure ? (
+                  ) : (hasRecommendedSeabornImage || hasRecommendedPlotlyFigure) ? (
                     <div className="space-y-3">
+                      {topRecommendedAnalyses.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {topRecommendedAnalyses.map((item, index) => {
+                            const active = index === selectedAnalysisIndex
+                            return (
+                              <Button
+                                key={`analysis-option-${index}-${String(item?.chart_spec?.chart_type || "plotly")}`}
+                                type="button"
+                                variant={active ? "default" : "outline"}
+                                size="sm"
+                                className="h-8 text-xs"
+                                onClick={() => setSelectedAnalysisIndex(index)}
+                              >
+                                추천 {index + 1}: {formatChartTypeLabel(item?.chart_spec?.chart_type)}
+                              </Button>
+                            )
+                          })}
+                        </div>
+                      )}
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
                         <Badge variant="outline">
-                          {String(recommendedAnalysis?.chart_spec?.chart_type || "plotly").toUpperCase()}
+                          {formatChartTypeLabel(recommendedAnalysis?.chart_spec?.chart_type || "plotly")}
                         </Badge>
+                        {recommendedRenderEngine && (
+                          <Badge variant="secondary">ENGINE: {recommendedRenderEngine}</Badge>
+                        )}
                         {recommendedAnalysis?.chart_spec?.x && (
                           <Badge variant="secondary">X: {recommendedAnalysis.chart_spec.x}</Badge>
                         )}
@@ -3290,7 +5624,7 @@ export function QueryView() {
                           <Badge variant="secondary">Y: {recommendedAnalysis.chart_spec.y}</Badge>
                         )}
                       </div>
-                      {isChartCategoryPickerEnabled && (
+                      {canUseChartCategoryFilter && (
                         <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-2 md:flex-row md:items-center md:justify-between">
                           <div className="text-xs text-muted-foreground">
                             X축 카테고리 {chartCategories.length}개 / 선택 {(effectiveSelectedChartCategories?.length ?? chartCategories.length)}개
@@ -3302,18 +5636,29 @@ export function QueryView() {
                             className="h-8 w-fit"
                             onClick={() => setIsChartCategoryPickerOpen(true)}
                           >
-                            종류 선택
+                            추가 필터
                           </Button>
                         </div>
                       )}
-                      <div className="h-[380px] w-full rounded-lg border border-border p-2 overflow-hidden">
-                        <Plot
-                          data={Array.isArray(filteredRecommendedFigure?.data) ? filteredRecommendedFigure.data : []}
-                          layout={normalizedRecommendedLayout}
-                          config={{ responsive: true, displaylogo: false, editable: true }}
-                          style={{ width: "100%", height: "100%" }}
-                          useResizeHandler
-                        />
+                      <div
+                        className="h-[380px] w-full rounded-lg border border-border p-2 overflow-hidden cursor-zoom-in"
+                        onClick={handleVisualizationPanelClick}
+                      >
+                        {showRecommendedSeaborn ? (
+                          <img
+                            src={recommendedImageDataUrl || ""}
+                            alt="seaborn chart"
+                            className="h-full w-full object-contain"
+                          />
+                        ) : (
+                          <Plot
+                            data={Array.isArray(recommendedFigureForRender?.data) ? recommendedFigureForRender.data : []}
+                            layout={recommendedFigureForRender?.layout || {}}
+                            config={{ responsive: true, displaylogo: false, editable: false }}
+                            style={{ width: "100%", height: "100%" }}
+                            useResizeHandler
+                          />
+                        )}
                       </div>
                       {(recommendedAnalysis?.reason || recommendedAnalysis?.summary) && (
                         <div className="rounded-lg border border-border bg-secondary/30 p-3 text-xs text-muted-foreground space-y-1">
@@ -3322,17 +5667,38 @@ export function QueryView() {
                         </div>
                       )}
                     </div>
-                  ) : localFallbackFigure && chartForRender ? (
+                  ) : localFallbackFigureForRender && Array.isArray(localFallbackFigureForRender.data) && localFallbackFigureForRender.data.length ? (
                     <div className="space-y-3">
+                      {topRecommendedAnalyses.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {topRecommendedAnalyses.map((item, index) => {
+                            const active = index === selectedAnalysisIndex
+                            return (
+                              <Button
+                                key={`analysis-fallback-option-${index}-${String(item?.chart_spec?.chart_type || "plotly")}`}
+                                type="button"
+                                variant={active ? "default" : "outline"}
+                                size="sm"
+                                className="h-8 text-xs"
+                                onClick={() => setSelectedAnalysisIndex(index)}
+                              >
+                                추천 {index + 1}: {formatChartTypeLabel(item?.chart_spec?.chart_type)}
+                              </Button>
+                            )
+                          })}
+                        </div>
+                      )}
                       {visualizationError && (
                         <div className="rounded-lg border border-amber-300/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
                           시각화 API 응답이 없어 로컬 폴백 차트를 표시합니다: {visualizationError}
                         </div>
                       )}
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Badge variant="outline">{chartForRender.type.toUpperCase()}</Badge>
-                        <Badge variant="secondary">X: {chartForRender.xKey}</Badge>
-                        <Badge variant="secondary">Y: {chartForRender.yKey}</Badge>
+                        <Badge variant="outline">
+                          {formatChartTypeLabel(chartForRender?.type || recommendedAnalysis?.chart_spec?.chart_type || "plotly")}
+                        </Badge>
+                        {chartForRender?.xKey && <Badge variant="secondary">X: {chartForRender.xKey}</Badge>}
+                        {chartForRender?.yKey && <Badge variant="secondary">Y: {chartForRender.yKey}</Badge>}
                         {!recommendedChart && <Badge variant="secondary">AUTO</Badge>}
                       </div>
                       {isChartCategoryPickerEnabled && (
@@ -3347,15 +5713,18 @@ export function QueryView() {
                             className="h-8 w-fit"
                             onClick={() => setIsChartCategoryPickerOpen(true)}
                           >
-                            종류 선택
+                            추가 필터
                           </Button>
                         </div>
                       )}
-                      <div className="h-[340px] w-full rounded-lg border border-border p-3 overflow-hidden">
+                      <div
+                        className="h-[340px] w-full rounded-lg border border-border p-3 overflow-hidden cursor-zoom-in"
+                        onClick={handleVisualizationPanelClick}
+                      >
                         <Plot
-                          data={Array.isArray(filteredLocalFallbackFigure?.data) ? filteredLocalFallbackFigure.data : []}
-                          layout={filteredLocalFallbackFigure?.layout || {}}
-                          config={{ responsive: true, displaylogo: false, editable: true }}
+                          data={Array.isArray(localFallbackFigureForRender?.data) ? localFallbackFigureForRender.data : []}
+                          layout={localFallbackFigureForRender?.layout || {}}
+                          config={{ responsive: true, displaylogo: false, editable: false }}
                           style={{ width: "100%", height: "100%" }}
                           useResizeHandler
                         />
@@ -3367,17 +5736,20 @@ export function QueryView() {
                         </div>
                       )}
                     </div>
-                  ) : survivalFigure ? (
+                  ) : survivalFigureForRender && Array.isArray(survivalFigureForRender.data) && survivalFigureForRender.data.length ? (
                     <div className="space-y-3">
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
                         <Badge variant="outline">SURVIVAL (PLOTLY)</Badge>
                         <Badge variant="secondary">Median: {medianSurvival.toFixed(2)}</Badge>
                       </div>
-                      <div className="h-[360px] w-full rounded-lg border border-border p-2 overflow-hidden">
+                      <div
+                        className="h-[360px] w-full rounded-lg border border-border p-2 overflow-hidden cursor-zoom-in"
+                        onClick={handleVisualizationPanelClick}
+                      >
                         <Plot
-                          data={Array.isArray(survivalFigure.data) ? survivalFigure.data : []}
-                          layout={survivalFigure.layout || {}}
-                          config={{ responsive: true, displaylogo: false, editable: true }}
+                          data={Array.isArray(survivalFigureForRender?.data) ? survivalFigureForRender.data : []}
+                          layout={survivalFigureForRender?.layout || {}}
+                          config={{ responsive: true, displaylogo: false, editable: false }}
                           style={{ width: "100%", height: "100%" }}
                           useResizeHandler
                         />
@@ -3423,10 +5795,10 @@ export function QueryView() {
       </div>
 
       <Dialog open={isChartCategoryPickerOpen} onOpenChange={setIsChartCategoryPickerOpen}>
-        <DialogContent className="w-[min(96vw,980px)] max-h-[90dvh] overflow-hidden p-0 sm:max-w-[980px]">
-          <div className="flex h-full max-h-[90dvh] flex-col">
+        <DialogContent className="w-[min(96vw,980px)] p-0 sm:max-w-[980px]">
+          <div className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto]">
             <DialogHeader className="border-b border-border/70 px-6 py-4 pr-12">
-              <DialogTitle>시각화 종류 선택</DialogTitle>
+              <DialogTitle>X축 카테고리 추가 필터</DialogTitle>
               <DialogDescription>
                 X축 카테고리가 많을 때 표시할 개수와 종류를 선택합니다.
               </DialogDescription>
@@ -3435,13 +5807,13 @@ export function QueryView() {
             {isChartCategoryPickerEnabled ? (
               <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
                 <div className="space-y-3">
-                  <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-secondary/20 p-3">
+                  <div className="rounded-lg border border-border/60 bg-secondary/20 p-3">
                     <div className="text-xs text-muted-foreground">
                       총 {chartCategories.length}개 / 선택 {(effectiveDraftChartCategories?.length ?? chartCategories.length)}개
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[auto_180px_minmax(0,1fr)] md:items-center">
                       <span className="text-xs text-muted-foreground">표시 개수</span>
-                      <div className="w-[160px]">
+                      <div className="w-full md:w-[180px]">
                         <Select value={draftChartCategoryCount} onValueChange={applyChartCategoryCountSelection}>
                           <SelectTrigger className="h-8">
                             <SelectValue placeholder="표시 개수 선택" />
@@ -3455,12 +5827,12 @@ export function QueryView() {
                           </SelectContent>
                         </Select>
                       </div>
-                      <div className="ml-auto flex items-center gap-2">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2 md:justify-end">
                         <Button
                           type="button"
                           variant="outline"
                           size="sm"
-                          className="h-8"
+                          className="h-8 whitespace-nowrap"
                           onClick={() =>
                             applyChartCategoryCountSelection(
                               String(Math.min(CHART_CATEGORY_DEFAULT_COUNT, chartCategories.length))
@@ -3473,7 +5845,7 @@ export function QueryView() {
                           type="button"
                           variant="outline"
                           size="sm"
-                          className="h-8"
+                          className="h-8 whitespace-nowrap"
                           onClick={() => applyChartCategoryCountSelection("all")}
                         >
                           전체 선택
@@ -3507,16 +5879,48 @@ export function QueryView() {
             ) : (
               <div className="px-6 py-4">
                 <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-                  X축 카테고리가 10개 이하라서 종류 선택 팝업이 필요하지 않습니다.
+                  X축 카테고리가 10개 이하라서 추가 필터 팝업이 필요하지 않습니다.
                 </div>
               </div>
             )}
 
-            <DialogFooter className="border-t border-border/70 px-6 py-4">
+            <DialogFooter className="border-t border-border/70 px-6 py-4 sm:justify-end">
               <Button onClick={handleApplyChartCategorySelection}>
                 적용
               </Button>
             </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isVisualizationZoomOpen} onOpenChange={setIsVisualizationZoomOpen}>
+        <DialogContent className="w-[min(98vw,1400px)] max-h-[95dvh] overflow-hidden p-0 sm:max-w-[1400px]">
+          <div className="flex h-full max-h-[95dvh] flex-col">
+            <DialogHeader className="border-b border-border/70 px-6 py-4 pr-12">
+              <DialogTitle>{zoomChartPayload?.title || "시각화 확대 보기"}</DialogTitle>
+              <DialogDescription>
+                현재 선택된 시각화를 확대해 확인할 수 있습니다.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="min-h-0 flex-1 px-6 py-4">
+              <div className="h-[72vh] min-h-[440px] w-full rounded-lg border border-border p-2 overflow-hidden">
+                {String((zoomChartPayload as any)?.imageDataUrl || "").startsWith("data:image/") ? (
+                  <img
+                    src={String((zoomChartPayload as any)?.imageDataUrl)}
+                    alt="zoomed seaborn chart"
+                    className="h-full w-full object-contain"
+                  />
+                ) : (
+                  <Plot
+                    data={Array.isArray((zoomChartPayload as any)?.data) ? (zoomChartPayload as any).data : []}
+                    layout={(zoomChartPayload as any)?.layout || {}}
+                    config={{ responsive: true, displaylogo: false, editable: false }}
+                    style={{ width: "100%", height: "100%" }}
+                    useResizeHandler
+                  />
+                )}
+              </div>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -3648,6 +6052,17 @@ export function QueryView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <CohortLibraryDialog
+        open={isCohortLibraryOpen}
+        onOpenChange={setIsCohortLibraryOpen}
+        cohorts={savedCohorts}
+        loading={isCohortLibraryLoading}
+        onRefresh={() => {
+          void loadSavedCohortLibrary()
+        }}
+        onSelectForQuery={handleApplySavedCohortForQuery}
+      />
     </div>
   )
 }

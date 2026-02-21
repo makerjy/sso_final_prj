@@ -22,14 +22,100 @@ from src.utils.logging import log_event
 
 _LOCAL_DOCS_CACHE: List[dict] | None = None
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+_SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([a-zA-Z0-9_.$]+)", re.IGNORECASE)
+_SQL_GROUP_BY_RE = re.compile(r"\bgroup\s+by\s+(.+?)(?:\border\s+by\b|\bhaving\b|\blimit\b|$)", re.IGNORECASE | re.DOTALL)
+_SQL_ORDER_BY_RE = re.compile(r"\border\s+by\s+(.+?)(?:\blimit\b|$)", re.IGNORECASE | re.DOTALL)
+_SQL_AGG_FN_RE = re.compile(r"\b(count|sum|avg|min|max|median|stddev|variance)\s*\(", re.IGNORECASE)
 
 
-def _build_query_text(user_query: str, df_schema: Dict[str, Any]) -> str:
+def _clip_text(text: str, *, max_chars: int) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars]}..."
+
+
+def _split_sql_clause_list(clause_text: str, *, max_items: int = 8) -> List[str]:
+    raw = str(clause_text or "").replace("\n", " ")
+    parts = [part.strip() for part in raw.split(",")]
+    cleaned = [part for part in parts if part]
+    return cleaned[:max_items]
+
+
+def _summarize_sql(sql: str) -> Dict[str, Any]:
+    text = str(sql or "").strip()
+    if not text:
+        return {
+            "tables": [],
+            "aggregates": [],
+            "group_by": [],
+            "order_by": [],
+            "has_where": False,
+            "has_having": False,
+        }
+
+    tables = []
+    seen_tables = set()
+    for match in _SQL_FROM_JOIN_RE.findall(text):
+        table = str(match or "").strip()
+        if not table:
+            continue
+        lower = table.lower()
+        if lower in seen_tables:
+            continue
+        seen_tables.add(lower)
+        tables.append(table)
+
+    aggregates = []
+    seen_aggs = set()
+    for fn in _SQL_AGG_FN_RE.findall(text):
+        name = str(fn or "").lower()
+        if name and name not in seen_aggs:
+            seen_aggs.add(name)
+            aggregates.append(name)
+
+    group_match = _SQL_GROUP_BY_RE.search(text)
+    order_match = _SQL_ORDER_BY_RE.search(text)
+    group_by = _split_sql_clause_list(group_match.group(1) if group_match else "")
+    order_by = _split_sql_clause_list(order_match.group(1) if order_match else "")
+
+    return {
+        "tables": tables[:12],
+        "aggregates": aggregates[:8],
+        "group_by": group_by,
+        "order_by": order_by,
+        "has_where": bool(re.search(r"\bwhere\b", text, flags=re.IGNORECASE)),
+        "has_having": bool(re.search(r"\bhaving\b", text, flags=re.IGNORECASE)),
+    }
+
+
+def _build_query_text(
+    user_query: str,
+    df_schema: Dict[str, Any],
+    *,
+    sql: str = "",
+    analysis_query: str = "",
+) -> str:
     columns = df_schema.get("columns", [])
     dtypes = df_schema.get("dtypes", {})
+    normalized_user_query = _clip_text(user_query, max_chars=1000)
+    normalized_analysis_query = _clip_text(analysis_query, max_chars=1000)
+    normalized_sql = _clip_text(sql, max_chars=3000)
+    sql_summary = _summarize_sql(sql)
     return (
         "User query:\n"
-        f"{user_query}\n\n"
+        f"{normalized_user_query}\n\n"
+        "Analysis focus query:\n"
+        f"{normalized_analysis_query}\n\n"
+        "SQL query:\n"
+        f"{normalized_sql}\n\n"
+        "SQL summary:\n"
+        f"- tables: {sql_summary['tables']}\n"
+        f"- aggregates: {sql_summary['aggregates']}\n"
+        f"- group_by: {sql_summary['group_by']}\n"
+        f"- order_by: {sql_summary['order_by']}\n"
+        f"- has_where: {sql_summary['has_where']}\n"
+        f"- has_having: {sql_summary['has_having']}\n\n"
         "DataFrame schema summary:\n"
         f"- columns: {columns}\n"
         f"- dtypes: {dtypes}\n"
@@ -132,17 +218,33 @@ def _local_search(query_text: str, *, k: int) -> List[str]:
     return [text for _, text in scored[: max(1, k)]]
 
 
-def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, Any]:
+def retrieve_context(
+    user_query: str,
+    df_schema: Dict[str, Any],
+    *,
+    sql: str = "",
+    analysis_query: str = "",
+) -> Dict[str, Any]:
     """Retrieve related context snippets from vector store."""
     if not RAG_ENABLED:
-        query_text = _build_query_text(user_query, df_schema)
+        query_text = _build_query_text(
+            user_query,
+            df_schema,
+            sql=sql,
+            analysis_query=analysis_query,
+        )
         local_snippets = _local_search(query_text, k=RAG_TOP_K)
         log_event("rag.search.skip", {"reason": "RAG_ENABLED=false", "local_fallback": len(local_snippets)})
         context_text = "\n\n".join(local_snippets)[:RAG_CONTEXT_MAX_CHARS]
         return {"snippets": local_snippets, "context_text": context_text, "scores": []}
 
     try:
-        query_text = _build_query_text(user_query, df_schema)
+        query_text = _build_query_text(
+            user_query,
+            df_schema,
+            sql=sql,
+            analysis_query=analysis_query,
+        )
         query_embedding = _embed_texts([query_text])[0]
 
         collection = get_mongo_collection()
@@ -183,7 +285,12 @@ def retrieve_context(user_query: str, df_schema: Dict[str, Any]) -> Dict[str, An
         }
     except Exception as exc:  # pragma: no cover - environment dependent
         log_event("rag.search.error", {"error": str(exc)})
-        query_text = _build_query_text(user_query, df_schema)
+        query_text = _build_query_text(
+            user_query,
+            df_schema,
+            sql=sql,
+            analysis_query=analysis_query,
+        )
         local_snippets = _local_search(query_text, k=RAG_TOP_K)
         context_text = "\n\n".join(local_snippets)[:RAG_CONTEXT_MAX_CHARS]
         log_event("rag.search.local_fallback", {"count": len(local_snippets)})

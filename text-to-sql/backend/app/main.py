@@ -1,7 +1,10 @@
-from fastapi import FastAPI
+import asyncio
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import os
 
+from app.core.config import get_settings
 from app.api.routes import (
     admin_budget,
     admin_metadata,
@@ -19,6 +22,20 @@ from app.api.routes import (
 
 app = FastAPI(title="RAG SQL Demo API", version="0.1.0")
 
+
+@app.middleware("http")
+async def request_timeout_middleware(request: Request, call_next):
+    # Keep API timeout above DB timeout. If upstream proxy (nginx/gunicorn) exists,
+    # make sure its timeout is also >= this value to avoid earlier disconnects.
+    timeout_sec = max(190, int(get_settings().api_request_timeout_sec))
+    try:
+        return await asyncio.wait_for(call_next(request), timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={"detail": f"Request timeout after {timeout_sec}s"},
+        )
+
 origins = [
     origin.strip()
     for origin in os.getenv(
@@ -35,6 +52,11 @@ if origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 app.include_router(admin_metadata.router, prefix="/admin/metadata", tags=["admin-metadata"])
 app.include_router(admin_metadata.rag_router, prefix="/admin/rag", tags=["admin-rag"])

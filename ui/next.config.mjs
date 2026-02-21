@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 const API_BASE_URL =
   process.env.API_BASE_URL ||
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  "http://localhost:8001"
+  "http://localhost:8002"
 const VIS_API_BASE_URL =
   process.env.VIS_API_BASE_URL ||
   process.env.NEXT_PUBLIC_VIS_API_BASE_URL ||

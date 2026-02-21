@@ -27,6 +27,7 @@ import {
     Database,
     Search,
     Loader2,
+    Bookmark,
     Clock3,
     Gauge,
 } from "lucide-react"
@@ -72,6 +73,9 @@ interface PdfResultPanelProps {
     pdfResult: any
     charts: { title: string; data: { label: string; value: number }[] }[]
     onSave: () => void
+    onSaveToLibrary?: () => void
+    onOpenLibrary?: () => void
+    isSavingCohort?: boolean
     onCopySQL: (sql: string) => Promise<void>
     onDownloadCSV: () => void
     setMessage: (msg: string) => void
@@ -164,6 +168,9 @@ export default function PdfResultPanel({
     pdfResult,
     charts,
     onSave,
+    onSaveToLibrary,
+    onOpenLibrary,
+    isSavingCohort = false,
     onCopySQL,
     onDownloadCSV,
     setMessage,
@@ -186,12 +193,17 @@ export default function PdfResultPanel({
     const extractionDetails = cd.extraction_details || {}
     const methodsSummary = cd.methods_summary || pdfResult.methods_summary || ""
     const baseline = cd.baseline_characteristics || {}
-    const features: any[] = pdfResult.features || []
+    const features: any[] = Array.isArray(pdfResult.features) ? pdfResult.features : []
+    const variables: any[] = Array.isArray(cd.variables) ? cd.variables : []
+    const cohortCriteria = extractionDetails?.cohort_criteria || {}
+    const populationCriteria: any[] = Array.isArray(cohortCriteria.population) ? cohortCriteria.population : []
 
     // v24 대응: db_result 또는 cohort_result 사용
     const cr = pdfResult.db_result || pdfResult.cohort_result || {}
     const sqls = pdfResult.generated_sql || {}
     const cohortSql = sqls.cohort_sql || pdfResult.cohort_sql || ""
+    const columns: string[] = Array.isArray(cr.columns) ? cr.columns.map((col: any) => String(col ?? "")) : []
+    const rows: any[] = Array.isArray(cr.rows) ? cr.rows : []
 
     // 에러 핸들링: 최신 db_result.error를 우선하고, 전체 레벨 error나 구형 필드도 확인
     const resultError = cr.error || pdfResult.error || ""
@@ -205,33 +217,47 @@ export default function PdfResultPanel({
         }
         return null
     }
+    const rawStepCounts: any[] = Array.isArray(cr.step_counts) ? cr.step_counts : []
+    const stepCounts = rawStepCounts
+        .map((step: any, idx: number) => {
+            if (Array.isArray(step)) {
+                const count = toNumber(step[1])
+                if (count == null) return null
+                return { name: String(step[0] ?? `step_${idx + 1}`), count }
+            }
+            if (step && typeof step === "object") {
+                const obj = step as Record<string, unknown>
+                const count = toNumber(obj.cnt ?? obj.count ?? obj.value ?? obj.n ?? obj.rows)
+                if (count == null) return null
+                return { name: String(obj.step_name ?? obj.name ?? obj.step ?? `step_${idx + 1}`), count }
+            }
+            return null
+        })
+        .filter((step): step is { name: string; count: number } => step !== null)
 
     let patientCount = 0
-    if (Array.isArray(cr.step_counts) && cr.step_counts.length > 0) {
-        const lastStep = cr.step_counts[cr.step_counts.length - 1]
-        const lastCount = Array.isArray(lastStep) ? toNumber(lastStep[1]) : null
-        patientCount = lastCount ?? 0
+    if (stepCounts.length > 0) {
+        patientCount = stepCounts[stepCounts.length - 1].count
     } else {
         const countFromResult = toNumber(pdfResult.count_result?.patient_count)
         if (countFromResult != null) {
             patientCount = countFromResult
         } else {
-            const columns = Array.isArray(cr.columns) ? cr.columns.map((c: any) => String(c || "").toUpperCase()) : []
-            const rows = Array.isArray(cr.rows) ? cr.rows : []
+            const upperColumns = columns.map((c) => c.toUpperCase())
             const firstRow = rows.length > 0 && Array.isArray(rows[0]) ? rows[0] : null
             const preferredCountColumns = ["TOTAL_COUNT", "PATIENT_COUNT", "COHORT_SIZE", "N_PATIENTS", "N"]
 
             if (firstRow) {
                 let extracted: number | null = null
                 for (const col of preferredCountColumns) {
-                    const idx = columns.indexOf(col)
+                    const idx = upperColumns.indexOf(col)
                     if (idx >= 0) {
                         extracted = toNumber(firstRow[idx])
                         if (extracted != null) break
                     }
                 }
                 if (extracted == null) {
-                    const genericIdx = columns.findIndex((col: string) => col.endsWith("_COUNT") || col === "COUNT" || col === "CNT")
+                    const genericIdx = upperColumns.findIndex((col: string) => col.endsWith("_COUNT") || col === "COUNT" || col === "CNT")
                     if (genericIdx >= 0) extracted = toNumber(firstRow[genericIdx])
                 }
                 patientCount = extracted ?? toNumber(cr.row_count) ?? 0
@@ -246,8 +272,9 @@ export default function PdfResultPanel({
     const totalElapsedSec = toNumber(perf.total_elapsed_sec) ?? 0
     const queueWaitSec = toNumber(perf.queue_wait_sec) ?? 0
     const pdfPageCount = toNumber(pdfResult.pdf_page_count)
-    const secPerPage = pdfPageCount > 0 && analysisDurationSec > 0 ? analysisDurationSec / pdfPageCount : null
-    const pagesPerSec = pdfPageCount > 0 && analysisDurationSec > 0 ? pdfPageCount / analysisDurationSec : null
+    const hasPdfPageCount = pdfPageCount != null && pdfPageCount > 0
+    const secPerPage = hasPdfPageCount && analysisDurationSec > 0 ? analysisDurationSec / pdfPageCount : null
+    const pagesPerSec = hasPdfPageCount && analysisDurationSec > 0 ? pdfPageCount / analysisDurationSec : null
 
     const fmtSec = (value: number) => value.toFixed(3)
     const fmtMaybe = (value: number | null, digits = 3) => (value == null ? "-" : value.toFixed(digits))
@@ -288,6 +315,24 @@ export default function PdfResultPanel({
                         </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
+                        <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-9 gap-2"
+                            onClick={onOpenLibrary}
+                        >
+                            <Database className="w-4 h-4" /> 저장된 코호트
+                        </Button>
+                        <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-9 gap-2"
+                            onClick={onSaveToLibrary}
+                            disabled={isSavingCohort}
+                        >
+                            {isSavingCohort ? <Loader2 className="w-4 h-4 animate-spin" /> : <Bookmark className="w-4 h-4" />}
+                            코호트 저장
+                        </Button>
                         <Button size="sm" className="h-9 gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm" onClick={onSave}>
                             <Sparkles className="w-4 h-4" /> 코호트 확정
                         </Button>
@@ -322,7 +367,7 @@ export default function PdfResultPanel({
                         </div>
                         <div className="rounded-lg border p-3 bg-muted/20">
                             <div className="text-[10px] text-muted-foreground mb-1">pages</div>
-                            <div className="text-sm font-bold">{pdfPageCount > 0 ? pdfPageCount : "-"}</div>
+                            <div className="text-sm font-bold">{hasPdfPageCount ? pdfPageCount : "-"}</div>
                         </div>
                         <div className="rounded-lg border p-3 bg-muted/20">
                             <div className="text-[10px] text-muted-foreground mb-1">분석시간/페이지(sec)</div>
@@ -375,7 +420,7 @@ export default function PdfResultPanel({
             </div>
 
             {/* ══ 세부 코호트 선정 근거 (Extraction Details) ══ */}
-            {extractionDetails.cohort_criteria?.population && (
+            {populationCriteria.length > 0 && (
                 <Card className="overflow-hidden border-0 shadow-sm animate-in fade-in slide-in-from-bottom-2 duration-500">
                     <CardHeader className="pb-4 bg-gradient-to-r from-purple-500/5 to-transparent border-b">
                         <CardTitle className="text-sm font-bold flex items-center gap-2.5">
@@ -385,7 +430,7 @@ export default function PdfResultPanel({
                     </CardHeader>
                     <CardContent className="pt-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {extractionDetails.cohort_criteria.population.map((item: any, idx: number) => (
+                            {populationCriteria.map((item: any, idx: number) => (
                                 <div key={idx} className="p-4 rounded-xl border bg-card/50 shadow-sm hover:shadow-md transition-shadow duration-300 space-y-3 flex flex-col justify-between">
                                     <div className="space-y-2">
                                         <div className="flex items-center justify-between">
@@ -435,7 +480,7 @@ export default function PdfResultPanel({
             </Card>
 
             {/* ══ 추출된 임상 변수 리스트 (Variables Used in PDF) ══ */}
-            {cd.variables?.length > 0 && (
+            {variables.length > 0 && (
                 <Card className="overflow-hidden border-0 shadow-sm">
                     <CardHeader className="pb-4 bg-gradient-to-r from-blue-500/5 to-transparent border-b">
                         <CardTitle className="text-base flex items-center gap-2.5">
@@ -450,7 +495,7 @@ export default function PdfResultPanel({
                     </CardHeader>
                     <CardContent className="pt-5">
                         <div className="space-y-3">
-                            {cd.variables.map((v: any, i: number) => (
+                            {variables.map((v: any, i: number) => (
                                 <div key={i} className="flex items-center justify-between p-3 rounded-lg border bg-muted/5 hover:bg-muted/10 transition-colors">
                                     <div className="flex flex-col gap-1">
                                         <span className="text-xs font-bold text-foreground">{v.signal_name}</span>
@@ -556,7 +601,7 @@ export default function PdfResultPanel({
             )}
 
             {/* ══ SQL 실행 결과 (접이식) ══ */}
-            {(cr.columns || resultError || (cr.step_counts && cr.step_counts.length > 0)) ? (
+            {(columns.length > 0 || resultError || stepCounts.length > 0) ? (
                 <Card className="overflow-hidden border-0 shadow-sm">
                     <details className="group" open>
                         <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-muted/30 transition-colors select-none">
@@ -568,7 +613,7 @@ export default function PdfResultPanel({
                                 </Badge>
                             </div>
                             <div className="flex items-center gap-2">
-                                {!resultError && cr.columns?.length > 0 && (
+                                {!resultError && columns.length > 0 && (
                                     <Button variant="outline" size="sm" className="h-7 text-[10px] gap-1" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDownloadCSV() }}>
                                         <Download className="w-3 h-3" /> CSV
                                     </Button>
@@ -578,20 +623,20 @@ export default function PdfResultPanel({
                         </summary>
                         <div className="px-4 pb-4">
                             {/* 단계별 필터링 카운트 (Funnel Chart 스타일) */}
-                            {cr.step_counts && cr.step_counts.length > 0 && (
+                            {stepCounts.length > 0 && (
                                 <div className="mb-6 p-4 rounded-xl border bg-muted/10">
                                     <div className="text-xs font-semibold mb-3 flex items-center gap-1.5 opacity-80">
                                         <Activity className="w-3.5 h-3.5 text-primary" /> 단계별 필터링 효과 (Funnel)
                                     </div>
                                     <div className="space-y-2">
-                                        {cr.step_counts.map((s: any[], idx: number) => {
-                                            const total = cr.step_counts[0][1] || 1
-                                            const pct = Math.round((s[1] / total) * 100)
+                                        {stepCounts.map((s, idx: number) => {
+                                            const total = stepCounts[0]?.count || 1
+                                            const pct = Math.round((s.count / total) * 100)
                                             return (
                                                 <div key={idx} className="space-y-1">
                                                     <div className="flex justify-between text-[10px] text-muted-foreground">
-                                                        <span className="font-medium text-foreground/70">{s[0]}</span>
-                                                        <span>{s[1].toLocaleString()}명 ({pct}%)</span>
+                                                        <span className="font-medium text-foreground/70">{s.name}</span>
+                                                        <span>{s.count.toLocaleString()}명 ({pct}%)</span>
                                                     </div>
                                                     <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
                                                         <div className="h-full bg-primary transition-all duration-500" style={{ width: `${pct}%` }} />
@@ -608,29 +653,34 @@ export default function PdfResultPanel({
                                     <div className="flex items-center gap-2 text-destructive text-sm font-medium mb-1"><AlertTriangle className="w-4 h-4" /> SQL 실행 또는 분석 오류</div>
                                     <pre className="text-xs text-destructive/80 whitespace-pre-wrap break-all">{resultError}</pre>
                                 </div>
-                            ) : cr.columns?.length > 0 ? (
+                            ) : columns.length > 0 ? (
                                 <div className="overflow-x-auto rounded-lg border">
                                     <table className="w-full text-xs">
                                         <thead className="bg-muted/40 border-b">
                                             <tr>
-                                                {cr.columns.map((col: string, i: number) => (
+                                                {columns.map((col: string, i: number) => (
                                                     <th key={i} className="text-left px-3 py-2.5 font-semibold text-muted-foreground whitespace-nowrap text-[11px] uppercase tracking-wider">{col}</th>
                                                 ))}
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-border/50">
-                                            {(cr.rows || []).slice(0, 50).map((row: any[], ri: number) => (
+                                            {rows.slice(0, 50).map((row: any, ri: number) => {
+                                                const cells = Array.isArray(row)
+                                                    ? row
+                                                    : columns.map((col) => (row && typeof row === "object" ? (row as Record<string, unknown>)[col] : ""))
+                                                return (
                                                 <tr key={ri} className={cn("transition-colors hover:bg-primary/5", ri % 2 === 0 ? "" : "bg-muted/15")}>
-                                                    {row.map((cell: any, ci: number) => (
+                                                    {cells.map((cell: any, ci: number) => (
                                                         <td key={ci} className="px-3 py-1.5 text-foreground/80 whitespace-nowrap">{cell == null ? "" : String(cell)}</td>
                                                     ))}
                                                 </tr>
-                                            ))}
+                                                )
+                                            })}
                                         </tbody>
                                     </table>
-                                    {((cr.rows?.length || 0) >= 100 || cr.row_count > 50) && (
+                                    {((rows.length || 0) >= 100 || (toNumber(cr.row_count) ?? 0) > 50) && (
                                         <div className="px-4 py-2 text-[10px] text-muted-foreground border-t bg-muted/20">
-                                            전체 검색 결과 중 상위 {cr.rows?.length || 0}행 표시
+                                            전체 검색 결과 중 상위 {rows.length || 0}행 표시
                                         </div>
                                     )}
                                 </div>

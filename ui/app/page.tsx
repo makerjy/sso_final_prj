@@ -1,6 +1,6 @@
 ﻿"use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, type ComponentType } from "react"
 import { useRouter } from "next/navigation"
 import { AppSidebar, type ViewType } from "@/components/app-sidebar"
 import { ConnectionView } from "@/components/views/connection-view"
@@ -13,10 +13,12 @@ import { PdfCohortView } from "@/components/views/pdf-cohort-view"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { useAuth } from "@/components/auth-provider"
 import { Badge } from "@/components/ui/badge"
-import { Database, Shield, Bell, Menu, LogOut } from "lucide-react"
+import { Database, Shield, Bell, Menu, LogOut, MessageSquare, LayoutDashboard, FileText, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import PageHeader from "@/components/layout/PageHeader"
+import { VIEW_META } from "@/lib/view-meta"
 
 const VIEW_STORAGE_PREFIX = "querylens.ui.lastView:"
 const VIEW_VALUES: ViewType[] = ["connection", "query", "dashboard", "audit", "cohort", "pdf-cohort"]
@@ -25,6 +27,14 @@ const isViewType = (value: string): value is ViewType =>
   VIEW_VALUES.includes(value as ViewType)
 
 const getViewStorageKey = (userId: string) => `${VIEW_STORAGE_PREFIX}${userId}`
+const VIEW_ICONS: Record<ViewType, ComponentType<{ className?: string }>> = {
+  connection: Database,
+  query: MessageSquare,
+  dashboard: LayoutDashboard,
+  audit: FileText,
+  cohort: Users,
+  "pdf-cohort": FileText,
+}
 
 export default function Home() {
   const router = useRouter()
@@ -34,7 +44,6 @@ export default function Home() {
   const [isViewRestored, setIsViewRestored] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [hasOpenedQueryView, setHasOpenedQueryView] = useState(false)
   const [hasOpenedCohortView, setHasOpenedCohortView] = useState(false)
   const [hasOpenedPdfCohortView, setHasOpenedPdfCohortView] = useState(false)
   const effectiveView: ViewType = currentView
@@ -78,14 +87,6 @@ export default function Home() {
       localStorage.setItem(getViewStorageKey(user.id), currentView)
     } catch {}
   }, [isHydrated, user, isViewRestored, currentView])
-
-  useEffect(() => {
-    if (effectiveView === "query") {
-      setHasOpenedQueryView(true)
-    }
-  }, [effectiveView])
-
-  const shouldRenderQueryView = hasOpenedQueryView || effectiveView === "query"
 
   useEffect(() => {
     if (effectiveView === "cohort") {
@@ -132,19 +133,6 @@ export default function Home() {
     }
   }
 
-  const getViewTitle = () => {
-    switch (effectiveView) {
-      case "connection": return "DB 연결/권한 설정"
-      // case "context": return "컨텍스트 편집"
-      case "query": return "쿼리 & 분석"
-      case "dashboard": return "결과 보드"
-      case "audit": return "감사 로그"
-      case "cohort": return "코호트 생성"
-      case "pdf-cohort": return "PDF 코호트 분석"
-      default: return ""
-    }
-  }
-
   const handleViewChange = (view: ViewType) => {
     setCurrentView(view)
     setMobileMenuOpen(false)
@@ -165,6 +153,9 @@ export default function Home() {
       </div>
     )
   }
+
+  const viewMeta = VIEW_META[effectiveView]
+  const ViewIcon = VIEW_ICONS[effectiveView]
 
   return (
     <div className="flex h-screen bg-background">
@@ -193,8 +184,9 @@ export default function Home() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="h-14 sm:h-16 border-b border-border bg-card/50 backdrop-blur-sm flex items-center justify-between px-3 sm:px-6 shrink-0">
-          <div className="flex items-center gap-2 sm:gap-4">
+        <header className="h-16 border-b border-border bg-card/50 px-3 backdrop-blur-sm sm:px-6 shrink-0">
+          <div className="flex h-full items-center justify-between gap-3 sm:gap-4">
+            <div className="flex min-w-0 items-center gap-2 sm:gap-4">
             {/* Mobile Menu Button */}
             <Button 
               variant="ghost" 
@@ -204,12 +196,13 @@ export default function Home() {
             >
               <Menu className="w-5 h-5" />
             </Button>
-            
-            <h1 className="text-sm sm:text-lg font-semibold text-foreground truncate">{getViewTitle()}</h1>
-            {effectiveView === "cohort" && (
-              <Badge variant="secondary" className="text-[10px] sm:text-xs hidden sm:inline-flex">부가 기능</Badge>
-            )}
-          </div>
+              <PageHeader
+                compact
+                title={viewMeta.title}
+                subtitle={viewMeta.subtitle}
+                icon={<ViewIcon className="h-3.5 w-3.5" />}
+              />
+            </div>
 
           <div className="flex items-center gap-2 sm:gap-4">
             {/* DB Status - Hidden on mobile */}
@@ -239,7 +232,7 @@ export default function Home() {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  className="flex items-center gap-2 pl-2 sm:pl-4 border-l border-border rounded-md py-1 pr-1 hover:bg-accent/50 transition-colors"
+                  className="ql-user-pill"
                 >
                   <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
                     <span className="text-xs font-medium text-primary">{userInitial}</span>
@@ -268,15 +261,14 @@ export default function Home() {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
+          </div>
         </header>
 
         {/* Content Area */}
         <main className="flex-1 overflow-auto">
-          {shouldRenderQueryView && (
-            <section className={effectiveView === "query" ? "block" : "hidden"} aria-hidden={effectiveView !== "query"}>
-              <QueryView />
-            </section>
-          )}
+          <section className={effectiveView === "query" ? "block" : "hidden"} aria-hidden={effectiveView !== "query"}>
+            <QueryView />
+          </section>
           {shouldRenderCohortView && (
             <section className={effectiveView === "cohort" ? "block" : "hidden"} aria-hidden={effectiveView !== "cohort"}>
               <CohortView />

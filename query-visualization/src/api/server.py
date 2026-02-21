@@ -35,6 +35,8 @@ MAX_SQL_TEXT_LENGTH = _env_int("VIS_MAX_SQL_TEXT_LENGTH", 12000, minimum=1)
 
 class VisualizeRequest(BaseModel):
     user_query: str = Field(..., min_length=1, max_length=MAX_QUERY_TEXT_LENGTH)
+    # Deprecated: ignore client-provided analysis_query to prevent conversational context leakage.
+    analysis_query: str | None = Field(default=None, max_length=MAX_QUERY_TEXT_LENGTH)
     sql: str = Field(..., min_length=1, max_length=MAX_SQL_TEXT_LENGTH)
     rows: List[Dict[str, Any]]
 
@@ -93,5 +95,10 @@ def visualize(req: VisualizeRequest) -> VisualizationResponse:
             detail={"code": "ANALYSIS_IMPORT_ERROR", "message": "analysis agent import failed"},
         ) from exc
 
-    return analyze_and_visualize(req.user_query, req.sql, df, request_id=request_id)
-
+    return analyze_and_visualize(
+        req.user_query,
+        req.sql,
+        df,
+        analysis_query=None,
+        request_id=request_id,
+    )

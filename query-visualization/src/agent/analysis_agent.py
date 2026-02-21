@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, List, Optional
@@ -19,6 +20,93 @@ from src.utils.logging import log_event
 
 _DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_DOTENV_PATH)
+_YEAR_TOKEN_RE = re.compile(r"(?<!\d)(1[6-9]\d{2}|20\d{2}|21\d{2}|22\d{2})(?!\d)")
+_YEAR_COLUMN_HINT_RE = re.compile(r"(year|yr|연도|년도|date|month|년|월)", re.IGNORECASE)
+
+
+def _coerce_year_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric != numeric:  # NaN guard
+            return None
+        rounded = int(round(numeric))
+        if abs(numeric - rounded) > 1e-6:
+            return None
+        if 1600 <= rounded <= 2200:
+            return rounded
+        return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _YEAR_TOKEN_RE.search(text)
+    if not match:
+        return None
+    year = int(match.group(1))
+    if 1600 <= year <= 2200:
+        return year
+    return None
+
+
+def _derive_year_bounds_from_df(df: pd.DataFrame) -> Dict[str, Dict[str, int]]:
+    bounds: Dict[str, Dict[str, int]] = {}
+    if df.empty:
+        return bounds
+    for column in df.columns:
+        col_name = str(column or "").strip()
+        if not col_name or not _YEAR_COLUMN_HINT_RE.search(col_name):
+            continue
+        series = df[column]
+        years: List[int] = []
+        if pdt.is_datetime64_any_dtype(series):
+            years = [
+                int(value)
+                for value in pd.to_datetime(series, errors="coerce").dt.year.dropna().astype(int).tolist()
+                if 1600 <= int(value) <= 2200
+            ]
+        else:
+            years = [
+                year
+                for year in (_coerce_year_value(value) for value in series.tolist())
+                if year is not None
+            ]
+        if not years:
+            continue
+        bounds[col_name] = {"min": int(min(years)), "max": int(max(years))}
+    return bounds
+
+
+def _contains_out_of_bounds_year(text: str, *, min_year: int, max_year: int) -> bool:
+    for match in _YEAR_TOKEN_RE.finditer(str(text or "")):
+        year = int(match.group(1))
+        if year < min_year or year > max_year:
+            return True
+    return False
+
+
+def _ground_insight_to_year_bounds(
+    insight: str,
+    *,
+    year_bounds: Dict[str, Dict[str, int]],
+) -> str:
+    normalized = str(insight or "").strip()
+    if not normalized or not year_bounds:
+        return normalized
+    mins = [int(item["min"]) for item in year_bounds.values() if isinstance(item, dict) and "min" in item]
+    maxs = [int(item["max"]) for item in year_bounds.values() if isinstance(item, dict) and "max" in item]
+    if not mins or not maxs:
+        return normalized
+    global_min_year = min(mins)
+    global_max_year = max(maxs)
+    if not _contains_out_of_bounds_year(normalized, min_year=global_min_year, max_year=global_max_year):
+        return normalized
+    bounded_column, bounded = sorted(year_bounds.items(), key=lambda item: item[0])[0]
+    bounded_min = int(bounded.get("min", global_min_year))
+    bounded_max = int(bounded.get("max", global_max_year))
+    if bounded_min == bounded_max:
+        return f"제공된 쿼리 결과 기준 {bounded_column}는 {bounded_min}년 값만 확인됩니다."
+    return f"제공된 쿼리 결과 기준 {bounded_column} 범위는 {bounded_min}년부터 {bounded_max}년까지입니다."
 
 
 def summarize_schema(df: pd.DataFrame) -> Dict[str, Any]:
@@ -187,6 +275,8 @@ def _build_analyses_from_plans(
                 chart_spec=chart_spec,
                 reason=reason,
                 figure_json=chart_result.get("figure_json"),
+                image_data_url=chart_result.get("image_data_url"),
+                render_engine=chart_result.get("render_engine"),
                 code=chart_result.get("code"),
             )
         )
@@ -263,6 +353,7 @@ def analyze_and_visualize(
     sql: str,
     df: pd.DataFrame,
     *,
+    analysis_query: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> VisualizationResponse:
     stage_latency_ms: Dict[str, float] = {}
@@ -275,7 +366,15 @@ def analyze_and_visualize(
     def _tick(stage: str, start: float) -> None:
         stage_latency_ms[stage] = round((perf_counter() - start) * 1000.0, 2)
 
-    log_event("analysis.start", {"request_id": request_id, "row_count": len(df), "sql_len": len(sql)})
+    log_event(
+        "analysis.start",
+        {
+            "request_id": request_id,
+            "row_count": len(df),
+            "sql_len": len(sql),
+            "analysis_query_len": len(str(analysis_query or "")),
+        },
+    )
 
     s = perf_counter()
     df = _add_elapsed_columns(df)
@@ -284,16 +383,26 @@ def analyze_and_visualize(
     s = perf_counter()
     df_schema = summarize_schema(df)
     _tick("schema_summary", s)
+    year_bounds = _derive_year_bounds_from_df(df)
+
+    def _generate_insight_with_fallback(analyses_for_insight: List[AnalysisCard]) -> str:
+        s_insight = perf_counter()
+        try:
+            insight_text = _llm_generate_insight(user_query, sql, df, analyses_for_insight, df_schema)
+        except Exception as exc:
+            log_event("analysis.insight.error", {"request_id": request_id, "error": str(exc)}, level="error")
+            _record_failure(failure_reasons, f"insight_error: {str(exc)}")
+            insight_text = _fallback_insight(user_query, df, analyses_for_insight)
+        insight_text = _ground_insight_to_year_bounds(insight_text, year_bounds=year_bounds)
+        _tick("insight", s_insight)
+        return insight_text
 
     s = perf_counter()
     column_count = len(df.columns)
     _tick("column_guard", s)
     if column_count < 2:
         _record_failure(failure_reasons, "insufficient_columns: visualization_skipped")
-        insight = (
-            "Visualization was skipped because the SQL result has only one column. "
-            "Please return at least two columns (for example, one category/time column and one numeric column)."
-        )
+        insight = _generate_insight_with_fallback([])
         total_latency_ms = round((perf_counter() - t0) * 1000.0, 2)
         log_event(
             "analysis.skip.insufficient_columns",
@@ -354,7 +463,12 @@ def analyze_and_visualize(
         )
 
     s = perf_counter()
-    rag = retrieval.retrieve_context(user_query, df_schema)
+    rag = retrieval.retrieve_context(
+        user_query,
+        df_schema,
+        sql=sql,
+        analysis_query=str(analysis_query or ""),
+    )
     rag_context = rag.get("context_text", "")
     _tick("rag_retrieve", s)
 
@@ -402,14 +516,7 @@ def analyze_and_visualize(
             _record_failure(failure_reasons, "relaxed: no_renderable_chart")
         _tick("plan_codegen_relaxed", s)
 
-    s = perf_counter()
-    try:
-        insight = _llm_generate_insight(user_query, sql, df, analyses, df_schema)
-    except Exception as exc:
-        log_event("analysis.insight.error", {"request_id": request_id, "error": str(exc)}, level="error")
-        _record_failure(failure_reasons, f"insight_error: {str(exc)}")
-        insight = _fallback_insight(user_query, df, analyses)
-    _tick("insight", s)
+    insight = _generate_insight_with_fallback(analyses)
 
     total_latency_ms = round((perf_counter() - t0) * 1000.0, 2)
     log_event(
@@ -437,4 +544,3 @@ def analyze_and_visualize(
         total_latency_ms=total_latency_ms,
         stage_latency_ms=stage_latency_ms,
     )
-

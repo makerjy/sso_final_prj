@@ -6,6 +6,7 @@ import logging
 import uuid
 import time
 from datetime import datetime
+from typing import Optional
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ async def process_pdf_task(
     relax_mode: bool = False,
     deterministic: bool = True,
     reuse_existing: bool = True,
+    accuracy_mode: Optional[bool] = None,
 ):
     """
     백그라운드에서 실행되는 PDF 처리 작업
@@ -44,13 +46,21 @@ async def process_pdf_task(
     started_perf = time.perf_counter()
 
     try:
-        logger.info(f"Starting PDF processing for task {task_id} (Relax: {relax_mode}, Deterministic: {deterministic}, Reuse: {reuse_existing})")
+        logger.info(
+            "Starting PDF processing for task %s (Relax: %s, Deterministic: %s, Reuse: %s, Accuracy: %s)",
+            task_id,
+            relax_mode,
+            deterministic,
+            reuse_existing,
+            accuracy_mode,
+        )
         jobs[task_id] = {
             "status": "processing",
             "message": "분석 중...",
             "task_id": task_id,
             "pdf_hash": file_hash,
             "filename": filename,
+            "accuracy_mode": accuracy_mode,
             "submitted_at_ts": submitted_at_ts,
             "submitted_at": _fmt_ts(submitted_at_ts),
             "started_at_ts": started_at_ts,
@@ -66,19 +76,33 @@ async def process_pdf_task(
             relax_mode=relax_mode,
             deterministic=deterministic,
             reuse_existing=reuse_existing,
+            accuracy_mode=accuracy_mode,
         )
+        result_status = str(result.get("status") or "completed").strip().lower()
+        job_status = "completed"
+        message = "분석 완료"
+        if result_status == "needs_user_input":
+            job_status = "needs_user_input"
+            message = "모호성 해결이 필요합니다"
+        elif result_status == "validation_failed":
+            job_status = "validation_failed"
+            message = "검증 실패 (리포트 확인 필요)"
+        elif result_status == "completed_with_ambiguities":
+            job_status = "completed_with_ambiguities"
+            message = "분석 완료 (모호성 포함)"
 
         completed_at_ts = int(time.time())
         analysis_duration_ms = max(0, int((time.perf_counter() - started_perf) * 1000))
         total_elapsed_ms = max(analysis_duration_ms, int((completed_at_ts - submitted_at_ts) * 1000))
         
         jobs[task_id] = {
-            "status": "completed", 
+            "status": job_status,
             "result": result,
-            "message": "분석 완료",
+            "message": message,
             "task_id": task_id,
             "pdf_hash": file_hash,
             "filename": filename,
+            "accuracy_mode": accuracy_mode,
             "submitted_at_ts": submitted_at_ts,
             "submitted_at": _fmt_ts(submitted_at_ts),
             "started_at_ts": started_at_ts,
@@ -95,13 +119,14 @@ async def process_pdf_task(
         append_event(get_settings().events_log_path, {
             "type": "audit",
             "event": "pdf_analysis",
-            "status": "success",
+            "status": "success" if job_status in {"completed", "completed_with_ambiguities"} else job_status,
             "task_id": task_id,
             "pdf_hash": file_hash,
             "filename": filename,
             "duration_ms": analysis_duration_ms,
             "queue_wait_ms": queue_wait_ms,
             "total_elapsed_ms": total_elapsed_ms,
+            "accuracy_mode": accuracy_mode,
             "rows_returned": int(((result.get("db_result") or {}).get("row_count") or 0)),
         })
         logger.info(f"Completed PDF processing for task {task_id}")
@@ -118,6 +143,7 @@ async def process_pdf_task(
             "task_id": task_id,
             "pdf_hash": file_hash,
             "filename": filename,
+            "accuracy_mode": accuracy_mode,
             "submitted_at_ts": submitted_at_ts,
             "submitted_at": _fmt_ts(submitted_at_ts),
             "started_at_ts": started_at_ts,
@@ -141,6 +167,7 @@ async def process_pdf_task(
             "duration_ms": analysis_duration_ms,
             "queue_wait_ms": queue_wait_ms,
             "total_elapsed_ms": total_elapsed_ms,
+            "accuracy_mode": accuracy_mode,
             "error": str(e),
         })
 
@@ -150,7 +177,8 @@ async def upload_pdf(
     file: UploadFile = File(...),
     relax_mode: bool = False,
     deterministic: bool = True,
-    reuse_existing: bool = True
+    reuse_existing: bool = True,
+    accuracy_mode: Optional[bool] = None,
 ):
     filename = str(file.filename or "").strip()
     if not filename.lower().endswith('.pdf'):
@@ -173,6 +201,7 @@ async def upload_pdf(
             "task_id": task_id,
             "pdf_hash": file_hash,
             "filename": filename or "uploaded.pdf",
+            "accuracy_mode": accuracy_mode,
             "file_size_bytes": len(content),
             "submitted_at_ts": submitted_at_ts,
             "submitted_at": _fmt_ts(submitted_at_ts),
@@ -188,6 +217,7 @@ async def upload_pdf(
             relax_mode,
             deterministic,
             reuse_existing,
+            accuracy_mode,
         )
         
         return {
@@ -195,6 +225,7 @@ async def upload_pdf(
             "status": "pending",
             "pdf_hash": file_hash,
             "filename": filename or "uploaded.pdf",
+            "accuracy_mode": accuracy_mode,
             "submitted_at": _fmt_ts(submitted_at_ts),
             "message": "PDF 분석이 시작되었습니다. 잠시 후 결과를 확인해주세요."
         }

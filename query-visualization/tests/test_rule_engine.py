@@ -127,3 +127,31 @@ def test_plan_analyses_keeps_bar_when_y_is_not_constant() -> None:
     chart_types = {str(p.get("chart_spec", {}).get("chart_type", "")).lower() for p in plans}
 
     assert any(chart_type.startswith("bar") for chart_type in chart_types)
+
+
+def test_plan_analyses_complex_multisplit_bar_slots() -> None:
+    df = pd.DataFrame(
+        {
+            "age_group": ["18-39", "18-39", "40-64", "40-64"],
+            "gender": ["M", "F", "M", "F"],
+            "survival_status": ["alive", "dead", "alive", "dead"],
+            "cnt": [12, 4, 9, 6],
+        }
+    )
+    intent_info = {
+        "analysis_intent": "comparison",
+        "primary_outcome": "cnt",
+        "time_var": None,
+        "group_var": "gender",
+        "user_query": "연령별 사망 생존을 성별분포를 나눠서 막대그래프로 보여줘",
+    }
+
+    plans = plan_analyses(intent_info, df)
+    has_multisplit_bar = any(
+        str((plan.get("chart_spec") or {}).get("chart_type", "")).startswith("bar")
+        and (plan.get("chart_spec") or {}).get("x") == "age_group"
+        and (plan.get("chart_spec") or {}).get("group") == "gender"
+        and (plan.get("chart_spec") or {}).get("secondary_group") == "survival_status"
+        for plan in plans
+    )
+    assert has_multisplit_bar

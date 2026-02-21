@@ -14,6 +14,7 @@ def dedupe_plans(plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             spec.get("x"),
             spec.get("y"),
             spec.get("group"),
+            spec.get("secondary_group"),
             spec.get("agg"),
             spec.get("size"),
             spec.get("animation_frame"),
@@ -91,4 +92,3 @@ def prioritize_requested_chart(
         return (0 if chart_type == preferred else 1,)
 
     return sorted(plans, key=_rank)
-
