@@ -27,11 +27,11 @@ interface AppSidebarProps {
 const navItems = [
   { id: "connection" as const, label: "DB 연결", icon: Database },
   // { id: "context" as const, label: "컨텍스트", icon: Settings2, description: "관리자 설정" },
-  { id: "query" as const, label: "쿼리", icon: MessageSquare },
+  { id: "query" as const, label: "채팅", icon: MessageSquare },
   { id: "dashboard" as const, label: "대시보드", icon: LayoutDashboard },
   { id: "audit" as const, label: "감사 로그", icon: FileText },
-  { id: "cohort" as const, label: "단면 연구 집단", icon: Users },
   { id: "pdf-cohort" as const, label: "PDF 코호트 분석", icon: FileText },
+  { id: "cohort" as const, label: "단면 연구 집단", icon: Users },
 ]
 
 export function AppSidebar({ currentView, onViewChange, collapsed, onToggleCollapse }: AppSidebarProps) {

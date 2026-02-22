@@ -61,6 +61,12 @@ import {
   toActiveCohortContext,
   toSavedCohort,
 } from "@/lib/cohort-library"
+import {
+  clearDashboardCache,
+  readDashboardCache,
+  updateDashboardCache,
+  writeDashboardCache,
+} from "@/lib/dashboard-cache"
 
 interface ChatMessage {
   id: string
@@ -1226,7 +1232,7 @@ export function QueryView() {
   const vizUrl = (path: string) => path
   const chatUser = (user?.name || "김연구원").trim() || "김연구원"
   const chatUserRole = (user?.role || "연구원").trim() || "연구원"
-  const chatHistoryUser = (user?.id || chatUser).trim() || chatUser
+  const chatHistoryUser = (user?.id || user?.username || user?.name || chatUser).trim() || chatUser
   const apiUrlWithUser = (path: string) => {
     const base = apiUrl(path)
     if (!chatHistoryUser) return base
@@ -4071,6 +4077,88 @@ export function QueryView() {
     return "전체"
   }
 
+  const saveQueryToFolder = async ({
+    entry,
+    folderForCache,
+    newFolderForDisk,
+  }: {
+    entry: Record<string, unknown>
+    folderForCache?: { id: string; name: string; createdAt?: string | null } | null
+    newFolderForDisk?: { id: string; name: string; createdAt?: string | null } | null
+  }) => {
+    const previousCache = readDashboardCache<Record<string, unknown>, Record<string, unknown>>(chatHistoryUser)
+    const normalizedEntryId = String(entry.id || "").trim()
+
+    updateDashboardCache<Record<string, unknown>, Record<string, unknown>>(chatHistoryUser, (snapshot) => {
+      const nextQueries = snapshot.queries.filter((item) => {
+        if (!item || typeof item !== "object") return true
+        return String((item as Record<string, unknown>).id || "").trim() !== normalizedEntryId
+      })
+      nextQueries.unshift(entry)
+
+      let nextFolders = [...snapshot.folders]
+      const normalizedFolderId = String(folderForCache?.id || "").trim()
+      const normalizedFolderName = String(folderForCache?.name || "").trim()
+      if (normalizedFolderId && normalizedFolderName) {
+        nextFolders = snapshot.folders.filter((item) => {
+          if (!item || typeof item !== "object") return true
+          return String((item as Record<string, unknown>).id || "").trim() !== normalizedFolderId
+        })
+        nextFolders.push({
+          id: normalizedFolderId,
+          name: normalizedFolderName,
+          createdAt: folderForCache?.createdAt || null,
+        })
+      }
+
+      return { queries: nextQueries, folders: nextFolders }
+    })
+
+    try {
+      const saveRes = await fetchWithTimeout(apiUrl("/dashboard/saveQuery"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user: chatHistoryUser || null,
+          question: String(entry.title || "").trim() || "저장된 쿼리",
+          sql: String(entry.query || "").trim(),
+          metadata: {
+            row_count: effectiveTotalRows ?? 0,
+            column_count: previewColumns.length,
+            row_cap: previewRowCap ?? null,
+            total_count: previewTotalCount,
+            summary: summary || "",
+            insight: String(entry.insight || "").trim(),
+            llm_summary: String(entry.llmSummary || "").trim(),
+            cohort: entry.cohort || null,
+            pdf_analysis: entry.pdfAnalysis || null,
+            stats: Array.isArray(entry.stats) ? entry.stats : [],
+            recommended_charts: Array.isArray(entry.recommendedCharts) ? entry.recommendedCharts : [],
+            primary_chart:
+              entry.primaryChart && typeof entry.primaryChart === "object" ? entry.primaryChart : null,
+            mode: mode || "",
+            entry,
+            new_folder: newFolderForDisk || null,
+          },
+        }),
+      }, 15000)
+      if (!saveRes.ok) {
+        throw new Error("save failed")
+      }
+      return saveRes
+    } catch (saveError) {
+      if (previousCache) {
+        writeDashboardCache(chatHistoryUser, {
+          queries: previousCache.queries,
+          folders: previousCache.folders,
+        })
+      } else {
+        clearDashboardCache(chatHistoryUser)
+      }
+      throw saveError
+    }
+  }
+
   const loadDashboardFolders = async () => {
     setSaveFoldersLoading(true)
     try {
@@ -4247,50 +4335,36 @@ export function QueryView() {
       metrics,
       chartType: resolvedChartType,
     }
+    const folderPayload =
+      folderId && folderName
+        ? {
+            id: folderId,
+            name: folderName,
+            createdAt: saveFolderMode === "new" ? nowIso : null,
+          }
+        : null
+    const newFolderPayload =
+      saveFolderMode === "new" && folderPayload
+        ? {
+            id: folderPayload.id,
+            name: folderPayload.name,
+            createdAt: folderPayload.createdAt,
+          }
+        : null
+
     setBoardSaving(true)
     setBoardMessage(null)
     try {
-      const saveRes = await fetchWithTimeout(apiUrl("/dashboard/saveQuery"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user: chatHistoryUser || null,
-          question: finalTitle,
-          sql: displaySql || currentSql,
-          metadata: {
-            row_count: effectiveTotalRows ?? 0,
-            column_count: previewColumns.length,
-            row_cap: previewRowCap ?? null,
-            total_count: previewTotalCount,
-            summary: summary || "",
-            insight: savedInsight || "",
-            llm_summary: savedInsight || "",
-            cohort: cohortProvenance,
-            pdf_analysis: pdfAnalysisPayload,
-            stats: statsPayload,
-            recommended_charts: recommendedChartsPayload,
-            primary_chart: primaryChartPayload,
-            mode: mode || "",
-            entry: newEntry,
-            new_folder:
-              saveFolderMode === "new"
-                ? {
-                    id: folderId,
-                    name: folderName,
-                    createdAt: nowIso,
-                  }
-                : null,
-          },
-        }),
-      }, 15000)
-      if (!saveRes.ok) {
-        throw new Error("save failed")
-      }
+      await saveQueryToFolder({
+        entry: newEntry as Record<string, unknown>,
+        folderForCache: folderPayload,
+        newFolderForDisk: newFolderPayload,
+      })
       updateActiveTab({ question: finalTitle })
       setLastQuestion(finalTitle)
       setBoardMessage("결과 보드에 저장했습니다.")
       setIsSaveDialogOpen(false)
-    } catch (err) {
+    } catch {
       setBoardMessage("결과 보드 저장에 실패했습니다.")
     } finally {
       setBoardSaving(false)
@@ -4519,10 +4593,14 @@ export function QueryView() {
       if (typeof window === "undefined") return false
       const raw =
         localStorage.getItem(pendingDashboardQueryKey) ||
-        localStorage.getItem("ql_pending_dashboard_query")
+        localStorage.getItem("ql_pending_dashboard_query") ||
+        sessionStorage.getItem(pendingDashboardQueryKey) ||
+        sessionStorage.getItem("ql_pending_dashboard_query")
       if (!raw) return false
       localStorage.removeItem(pendingDashboardQueryKey)
       localStorage.removeItem("ql_pending_dashboard_query")
+      sessionStorage.removeItem(pendingDashboardQueryKey)
+      sessionStorage.removeItem("ql_pending_dashboard_query")
 
       let parsed: { question?: string; sql?: string; chartType?: "line" | "bar" | "pie" } | null = null
       try {

@@ -28,8 +28,6 @@ import {
     Search,
     Loader2,
     Bookmark,
-    Clock3,
-    Gauge,
 } from "lucide-react"
 import {
     Table,
@@ -41,11 +39,15 @@ import {
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 
+const PDF_PANEL_BG = "bg-[#eceff3]"
+const PDF_PANEL_BG_SOFT = "bg-[#f3f5f8]"
+const PDF_PANEL_BORDER = "border-[#d3dae3]"
+
 /* ── tiny bar chart (copied for self-containment) ── */
 function MiniBarChart({ data, title, color = "bg-primary" }: { data: { label: string; value: number }[]; title: string; color?: string }) {
     const max = Math.max(...data.map((d) => d.value)) || 1
     return (
-        <div className="rounded-lg border border-border p-4 bg-card/50">
+        <div className={cn("rounded-lg border p-4", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
             <div className="text-xs font-semibold mb-3 flex items-center justify-between">
                 <span>{title} 분포</span>
                 <span className="text-muted-foreground font-normal">{data.length}개</span>
@@ -125,7 +127,7 @@ function MethodsSummaryRenderer({ summary }: { summary: any }) {
     // Handle legacy string format
     if (typeof summary === "string") {
         return (
-            <div className="p-5 rounded-xl border bg-card/50 leading-relaxed text-sm text-foreground/90 whitespace-pre-wrap">
+            <div className={cn("p-5 rounded-xl border leading-relaxed text-sm text-foreground/90 whitespace-pre-wrap", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                 {summary}
             </div>
         )
@@ -135,7 +137,7 @@ function MethodsSummaryRenderer({ summary }: { summary: any }) {
 
     if (!structuredSummary || Object.keys(structuredSummary).length === 0) {
         return (
-            <div className="flex flex-col items-center py-6 text-muted-foreground border rounded-xl bg-card/30">
+            <div className={cn("flex flex-col items-center py-6 text-muted-foreground border rounded-xl", PDF_PANEL_BG_SOFT, PDF_PANEL_BORDER)}>
                 <AlertTriangle className="w-6 h-6 mb-2 opacity-50" />
                 <div className="text-sm font-medium">분석된 세부 방법론 정보가 부족합니다.</div>
                 <div className="text-xs opacity-70 mt-1">논문 텍스트에서 연구 설계를 충분히 추출하지 못했습니다.</div>
@@ -148,7 +150,7 @@ function MethodsSummaryRenderer({ summary }: { summary: any }) {
             {/* Structured Summary Sections */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {Object.entries(structuredSummary).map(([key, value]) => (
-                    <div key={key} className="p-4 rounded-xl border bg-card/30 space-y-2 hover:border-amber-500/30 transition-colors">
+                    <div key={key} className={cn("p-4 rounded-xl border space-y-2 hover:border-amber-500/30 transition-colors", PDF_PANEL_BG_SOFT, PDF_PANEL_BORDER)}>
                         <div className="text-[10px] font-bold text-amber-600 uppercase tracking-tighter opacity-80 flex items-center gap-1.5">
                             <ChevronRight className="w-3 h-3" />
                             {key.replace(/_/g, " ")}
@@ -269,14 +271,11 @@ export default function PdfResultPanel({
 
     const perf = (pdfResult.performance || {}) as any
     const analysisDurationSec = toNumber(perf.analysis_duration_sec) ?? 0
-    const totalElapsedSec = toNumber(perf.total_elapsed_sec) ?? 0
-    const queueWaitSec = toNumber(perf.queue_wait_sec) ?? 0
     const pdfPageCount = toNumber(pdfResult.pdf_page_count)
     const hasPdfPageCount = pdfPageCount != null && pdfPageCount > 0
     const secPerPage = hasPdfPageCount && analysisDurationSec > 0 ? analysisDurationSec / pdfPageCount : null
     const pagesPerSec = hasPdfPageCount && analysisDurationSec > 0 ? pdfPageCount / analysisDurationSec : null
 
-    const fmtSec = (value: number) => value.toFixed(3)
     const fmtMaybe = (value: number | null, digits = 3) => (value == null ? "-" : value.toFixed(digits))
 
     /* 카테고리별 그룹 */
@@ -293,7 +292,7 @@ export default function PdfResultPanel({
         <div className="p-6 pb-20 space-y-6 animate-in fade-in-0 slide-in-from-bottom-4 duration-500">
 
             {/* ══ 상단 배너 ══ */}
-            <div className="relative overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-r from-primary/5 via-primary/10 to-transparent p-5">
+            <div className="relative overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-r from-primary/5 via-primary/10 to-primary/5 p-5">
                 <div className="absolute top-0 right-0 w-40 h-40 bg-primary/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-2xl" />
                 <div className="flex items-center justify-between relative z-10 flex-wrap gap-4">
                     <div className="flex items-center gap-4">
@@ -311,6 +310,13 @@ export default function PdfResultPanel({
                                 <span className="flex items-center gap-1"><FileCode className="w-3 h-3" />{pdfResult.filename || "논문 PDF"}</span>
                                 {patientCount > 0 && <span className="flex items-center gap-1"><Users className="w-3 h-3" />대상 환자 {Number(patientCount).toLocaleString()}명</span>}
                                 {features.length > 0 && <span className="flex items-center gap-1"><Activity className="w-3 h-3" />{features.length}개 변수</span>}
+                            </div>
+                            <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground/90 flex-wrap">
+                                <span>pages {hasPdfPageCount ? pdfPageCount : "-"}</span>
+                                <span>·</span>
+                                <span>분석시간/페이지 {fmtMaybe(secPerPage)} sec</span>
+                                <span>·</span>
+                                <span>처리속도 {fmtMaybe(pagesPerSec)} pages/sec</span>
                             </div>
                         </div>
                     </div>
@@ -340,62 +346,18 @@ export default function PdfResultPanel({
                 </div>
             </div>
 
-            {/* ══ 분석 성능 지표 ══ */}
-            <Card className="overflow-hidden border-0 shadow-sm">
-                <CardHeader className="pb-4 bg-gradient-to-r from-indigo-500/5 to-transparent border-b">
-                    <CardTitle className="text-sm font-bold flex items-center gap-2.5">
-                        <Clock3 className="w-4 h-4 text-indigo-500" />
-                        PDF 분석 성능 지표
-                    </CardTitle>
-                    <CardDescription className="text-xs">
-                        실제 분석시간, 총 소요시간, 대기시간 기준 요약
-                    </CardDescription>
-                </CardHeader>
-                <CardContent className="pt-4">
-                    <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-                        <div className="rounded-lg border p-3 bg-muted/20">
-                            <div className="text-[10px] text-muted-foreground mb-1">analysis_duration_sec</div>
-                            <div className="text-sm font-bold">{fmtSec(analysisDurationSec)}</div>
-                        </div>
-                        <div className="rounded-lg border p-3 bg-muted/20">
-                            <div className="text-[10px] text-muted-foreground mb-1">total_elapsed_sec</div>
-                            <div className="text-sm font-bold">{fmtSec(totalElapsedSec)}</div>
-                        </div>
-                        <div className="rounded-lg border p-3 bg-muted/20">
-                            <div className="text-[10px] text-muted-foreground mb-1">queue_wait_sec</div>
-                            <div className="text-sm font-bold">{fmtSec(queueWaitSec)}</div>
-                        </div>
-                        <div className="rounded-lg border p-3 bg-muted/20">
-                            <div className="text-[10px] text-muted-foreground mb-1">pages</div>
-                            <div className="text-sm font-bold">{hasPdfPageCount ? pdfPageCount : "-"}</div>
-                        </div>
-                        <div className="rounded-lg border p-3 bg-muted/20">
-                            <div className="text-[10px] text-muted-foreground mb-1">분석시간/페이지(sec)</div>
-                            <div className="text-sm font-bold">{fmtMaybe(secPerPage)}</div>
-                        </div>
-                        <div className="rounded-lg border p-3 bg-muted/20">
-                            <div className="text-[10px] text-muted-foreground mb-1">처리속도(pages/sec)</div>
-                            <div className="text-sm font-bold flex items-center gap-1">
-                                <Gauge className="w-3 h-3 text-muted-foreground" />
-                                {fmtMaybe(pagesPerSec)}
-                            </div>
-                        </div>
-                    </div>
-                </CardContent>
-            </Card>
-
             {/* ══ 섹션 1 · 논문 핵심 요약 ══ */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
                 {summaryKo && (
-                    <Card className="overflow-hidden border-0 shadow-sm">
-                        <CardHeader className="pb-4 bg-gradient-to-r from-blue-500/5 to-transparent border-b">
-                            <CardTitle className="text-sm font-bold flex items-center gap-2.5">
+                    <Card className={cn("overflow-hidden border shadow-sm !py-0 !pt-0 !pb-0 !gap-0 h-full", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
+                        <CardHeader className="rounded-t-[inherit] border-b !flex !flex-row !items-center !gap-2.5 !px-7 !pt-4 !pb-4 bg-gradient-to-r from-blue-500/5 via-blue-500/10 to-blue-500/5">
+                            <CardTitle className="text-sm font-bold leading-tight flex items-center gap-2.5">
                                 <BookOpen className="w-4 h-4 text-blue-500" />
                                 논문 핵심 요약
                             </CardTitle>
                         </CardHeader>
-                        <CardContent className="pt-4">
-                            <div className="p-4 rounded-xl border bg-card/50 leading-relaxed text-xs text-foreground/90 whitespace-pre-wrap min-h-[150px]">
+                        <CardContent className="!px-7 !pt-4 !pb-6">
+                            <div className={cn("p-4 rounded-xl border leading-relaxed text-sm text-foreground/90 whitespace-pre-wrap min-h-[156px] flex items-center", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                                 {summaryKo}
                             </div>
                         </CardContent>
@@ -403,15 +365,15 @@ export default function PdfResultPanel({
                 )}
 
                 {criteriaSummaryKo && (
-                    <Card className="overflow-hidden border-0 shadow-sm">
-                        <CardHeader className="pb-4 bg-gradient-to-r from-emerald-500/5 to-transparent border-b">
-                            <CardTitle className="text-sm font-bold flex items-center gap-2.5">
+                    <Card className={cn("overflow-hidden border shadow-sm !py-0 !pt-0 !pb-0 !gap-0 h-full", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
+                        <CardHeader className="rounded-t-[inherit] border-b !flex !flex-row !items-center !gap-2.5 !px-7 !pt-4 !pb-4 bg-gradient-to-r from-emerald-500/5 via-emerald-500/10 to-emerald-500/5">
+                            <CardTitle className="text-sm font-bold leading-tight flex items-center gap-2.5">
                                 <Search className="w-4 h-4 text-emerald-500" />
                                 코호트 추출 조건 상세
                             </CardTitle>
                         </CardHeader>
-                        <CardContent className="pt-4">
-                            <div className="p-4 rounded-xl border bg-card/50 leading-relaxed text-xs text-foreground/90 whitespace-pre-wrap min-h-[150px]">
+                        <CardContent className="!px-7 !pt-4 !pb-6">
+                            <div className={cn("p-4 rounded-xl border leading-relaxed text-sm text-foreground/90 whitespace-pre-wrap min-h-[156px] flex items-center", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                                 {criteriaSummaryKo}
                             </div>
                         </CardContent>
@@ -421,25 +383,25 @@ export default function PdfResultPanel({
 
             {/* ══ 세부 코호트 선정 근거 (Extraction Details) ══ */}
             {populationCriteria.length > 0 && (
-                <Card className="overflow-hidden border-0 shadow-sm animate-in fade-in slide-in-from-bottom-2 duration-500">
-                    <CardHeader className="pb-4 bg-gradient-to-r from-purple-500/5 to-transparent border-b">
-                        <CardTitle className="text-sm font-bold flex items-center gap-2.5">
+                <Card className={cn("overflow-hidden border shadow-sm !py-0 !pt-0 !pb-0 !gap-0 animate-in fade-in slide-in-from-bottom-2 duration-500", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
+                    <CardHeader className="rounded-t-[inherit] border-b !flex !flex-row !items-center !gap-2.5 !px-7 !pt-4 !pb-4 bg-gradient-to-r from-purple-500/5 via-purple-500/10 to-purple-500/5">
+                        <CardTitle className="text-sm font-bold leading-tight flex items-center gap-2.5">
                             <Target className="w-4 h-4 text-purple-500" />
                             세부 코호트 선정 및 DB 매칭 근거 (Inclusion/Exclusion)
                         </CardTitle>
                     </CardHeader>
-                    <CardContent className="pt-4">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <CardContent className="!px-7 !pt-4 !pb-6">
+                        <div className={cn("grid grid-cols-1 gap-4", populationCriteria.length > 1 && "md:grid-cols-2")}>
                             {populationCriteria.map((item: any, idx: number) => (
-                                <div key={idx} className="p-4 rounded-xl border bg-card/50 shadow-sm hover:shadow-md transition-shadow duration-300 space-y-3 flex flex-col justify-between">
+                                <div key={idx} className={cn("p-4 rounded-xl border shadow-sm hover:shadow-md transition-shadow duration-300 flex flex-col gap-3", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                                     <div className="space-y-2">
                                         <div className="flex items-center justify-between">
                                             <Badge variant="outline" className={cn("text-[9px] border-0 h-5", item.type === "inclusion" ? "bg-emerald-500/15 text-emerald-600" : "bg-rose-500/15 text-rose-600")}>
                                                 {item.type === "inclusion" ? "선정 기준" : "제외 기준"}
                                             </Badge>
-                                            <span className="text-[9px] text-muted-foreground font-mono bg-muted px-1.5 py-0.5 rounded">#{idx + 1}</span>
+                                            <span className={cn("text-[9px] text-muted-foreground font-mono px-1.5 py-0.5 rounded border", PDF_PANEL_BG_SOFT, PDF_PANEL_BORDER)}>#{idx + 1}</span>
                                         </div>
-                                        <p className="text-xs font-bold leading-snug text-foreground/90">{item.criterion}</p>
+                                        <p className="text-sm font-semibold leading-relaxed text-foreground/90">{item.criterion}</p>
                                     </div>
 
                                     <div className="space-y-2 pt-3 border-t border-border/50">
@@ -447,13 +409,13 @@ export default function PdfResultPanel({
                                             <div className="text-[9px] font-bold text-primary mb-1 flex items-center gap-1 uppercase tracking-tighter opacity-80">
                                                 <Database className="w-2.5 h-2.5" /> Operational Definition
                                             </div>
-                                            <p className="text-[10px] leading-relaxed text-foreground/80 font-medium">{item.operational_definition}</p>
+                                            <p className="text-xs leading-relaxed text-foreground/80 font-medium">{item.operational_definition}</p>
                                         </div>
                                         <div className="p-2.5 rounded-lg bg-amber-500/5 border border-amber-500/10">
                                             <div className="text-[9px] font-bold text-amber-600 mb-1 flex items-center gap-1 uppercase tracking-tighter opacity-80">
                                                 <BookOpen className="w-2.5 h-2.5" /> Evidence from Paper
                                             </div>
-                                            <p className="text-[10px] leading-relaxed text-amber-900/80 italic line-clamp-4">"{item.evidence}"</p>
+                                            <p className="text-xs leading-relaxed text-amber-900/80 italic line-clamp-4">"{item.evidence}"</p>
                                         </div>
                                     </div>
                                 </div>
@@ -464,9 +426,9 @@ export default function PdfResultPanel({
             )}
 
             {/* ══ 섹션 2 · 연구 방법론 (Methods) ══ */}
-            <Card className="overflow-hidden border-0 shadow-sm">
-                <CardHeader className="pb-4 bg-gradient-to-r from-amber-500/5 to-transparent border-b">
-                    <CardTitle className="text-base flex items-center gap-2.5">
+            <Card className={cn("overflow-hidden border shadow-sm !py-0 !pt-0 !pb-0 !gap-0", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
+                <CardHeader className="rounded-t-[inherit] border-b !flex !flex-col !gap-2 !px-7 !pt-4 !pb-4 bg-gradient-to-r from-amber-500/5 via-amber-500/10 to-amber-500/5">
+                    <CardTitle className="text-base leading-tight flex items-center gap-2.5">
                         <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500/10">
                             <ClipboardList className="w-4 h-4 text-amber-500" />
                         </div>
@@ -474,16 +436,16 @@ export default function PdfResultPanel({
                     </CardTitle>
                     <CardDescription className="text-xs">논문 본문을 분석하여 추출된 연구 설계 및 분석 방법 요약</CardDescription>
                 </CardHeader>
-                <CardContent className="pt-6">
+                <CardContent className="!px-7 !pt-5 !pb-6">
                     <MethodsSummaryRenderer summary={methodsSummary} />
                 </CardContent>
             </Card>
 
             {/* ══ 추출된 임상 변수 리스트 (Variables Used in PDF) ══ */}
             {variables.length > 0 && (
-                <Card className="overflow-hidden border-0 shadow-sm">
-                    <CardHeader className="pb-4 bg-gradient-to-r from-blue-500/5 to-transparent border-b">
-                        <CardTitle className="text-base flex items-center gap-2.5">
+                <Card className={cn("overflow-hidden border shadow-sm !py-0 !pt-0 !pb-0 !gap-0", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
+                    <CardHeader className="rounded-t-[inherit] border-b !flex !flex-col !gap-2 !px-7 !pt-4 !pb-4 bg-gradient-to-r from-blue-500/5 via-blue-500/10 to-blue-500/5">
+                        <CardTitle className="text-base leading-tight flex items-center gap-2.5">
                             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-500/10">
                                 <Database className="w-4 h-4 text-blue-500" />
                             </div>
@@ -493,10 +455,10 @@ export default function PdfResultPanel({
                             PDF 내에서 식별된 데이터 매핑 변수들입니다.
                         </CardDescription>
                     </CardHeader>
-                    <CardContent className="pt-5">
+                    <CardContent className="!px-7 !pt-5 !pb-6">
                         <div className="space-y-3">
                             {variables.map((v: any, i: number) => (
-                                <div key={i} className="flex items-center justify-between p-3 rounded-lg border bg-muted/5 hover:bg-muted/10 transition-colors">
+                                <div key={i} className={cn("flex items-center justify-between p-3 rounded-lg border transition-colors", PDF_PANEL_BG_SOFT, PDF_PANEL_BORDER, "hover:bg-[#e6ebf2]")}>
                                     <div className="flex flex-col gap-1">
                                         <span className="text-xs font-bold text-foreground">{v.signal_name}</span>
                                         <span className="text-[10px] text-muted-foreground">{v.description}</span>
@@ -518,16 +480,16 @@ export default function PdfResultPanel({
 
             {/* ══ Charts ══ */}
             {charts.length > 0 && (
-                <Card className="overflow-hidden border-0 shadow-sm">
-                    <CardHeader className="pb-4 bg-gradient-to-r from-cyan-500/5 to-transparent border-b">
-                        <CardTitle className="text-base flex items-center gap-2.5">
+                <Card className={cn("overflow-hidden border shadow-sm !py-0 !pt-0 !pb-0 !gap-0", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
+                    <CardHeader className="rounded-t-[inherit] border-b !flex !flex-row !items-center !gap-2.5 !px-7 !pt-4 !pb-4 bg-gradient-to-r from-cyan-500/5 via-cyan-500/10 to-cyan-500/5">
+                        <CardTitle className="text-base leading-tight flex items-center gap-2.5">
                             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-cyan-500/10">
                                 <BarChart2 className="w-4 h-4 text-cyan-500" />
                             </div>
                             데이터 분포 시각화
                         </CardTitle>
                     </CardHeader>
-                    <CardContent className="pt-5">
+                    <CardContent className="!px-7 !pt-5 !pb-6">
                         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                             {charts.map((c, i) => (
                                 <MiniBarChart key={i} title={c.title} data={c.data} color={i % 2 === 0 ? "bg-primary" : "bg-blue-500"} />
@@ -539,9 +501,9 @@ export default function PdfResultPanel({
 
             {/* ══ SQL 쿼리 (접이식) ══ */}
             {cohortSql && (
-                <Card className="overflow-hidden border-0 shadow-sm">
+                <Card className={cn("overflow-hidden border shadow-sm !py-0 !gap-0", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                     <details className="group">
-                        <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-muted/30 transition-colors select-none">
+                        <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-[#e6ebf2] transition-colors select-none">
                             <div className="flex items-center gap-2.5">
                                 <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-gray-500/10"><Code className="w-4 h-4 text-muted-foreground" /></div>
                                 <span className="text-sm font-semibold text-foreground">생성된 SQL 쿼리</span>
@@ -561,10 +523,10 @@ export default function PdfResultPanel({
                         <div className="px-4 pb-4">
                             {/* SQL Tabs Toggle */}
                             {(sqls.count_sql || sqls.debug_count_sql) && (
-                                <div className="flex gap-1 mb-3 p-1 bg-muted/50 rounded-lg w-fit">
+                                <div className={cn("flex gap-1 mb-3 p-1 rounded-lg w-fit border", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                                     <button
                                         type="button"
-                                        className={cn("px-3 py-1 text-[10px] font-medium rounded-md transition-all", activeSqlTab === "cohort" ? "bg-background text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")}
+                                        className={cn("px-3 py-1 text-[10px] font-medium rounded-md transition-all", activeSqlTab === "cohort" ? "bg-[#e2e8f0] text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")}
                                         onClick={() => setActiveSqlTab("cohort")}
                                     >
                                         코호트 추출 SQL
@@ -572,7 +534,7 @@ export default function PdfResultPanel({
                                     {sqls.count_sql && (
                                         <button
                                             type="button"
-                                            className={cn("px-3 py-1 text-[10px] font-medium rounded-md transition-all", activeSqlTab === "count" ? "bg-background text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")}
+                                            className={cn("px-3 py-1 text-[10px] font-medium rounded-md transition-all", activeSqlTab === "count" ? "bg-[#e2e8f0] text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")}
                                             onClick={() => setActiveSqlTab("count")}
                                         >
                                             단순 카운트 SQL
@@ -581,7 +543,7 @@ export default function PdfResultPanel({
                                     {sqls.debug_count_sql && (
                                         <button
                                             type="button"
-                                            className={cn("px-3 py-1 text-[10px] font-medium rounded-md transition-all", activeSqlTab === "debug" ? "bg-background text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")}
+                                            className={cn("px-3 py-1 text-[10px] font-medium rounded-md transition-all", activeSqlTab === "debug" ? "bg-[#e2e8f0] text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")}
                                             onClick={() => setActiveSqlTab("debug")}
                                         >
                                             단계별 디버그 SQL
@@ -590,7 +552,7 @@ export default function PdfResultPanel({
                                 </div>
                             )}
 
-                            <div className="max-h-[40vh] overflow-auto rounded-lg border bg-muted/30 p-4">
+                            <div className={cn("max-h-[40vh] overflow-auto rounded-lg border p-4", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                                 <pre className="text-xs leading-relaxed whitespace-pre-wrap break-all font-mono text-foreground/80">
                                     {activeSqlTab === "cohort" ? cohortSql : (activeSqlTab === "count" ? sqls.count_sql : sqls.debug_count_sql)}
                                 </pre>
@@ -602,9 +564,9 @@ export default function PdfResultPanel({
 
             {/* ══ SQL 실행 결과 (접이식) ══ */}
             {(columns.length > 0 || resultError || stepCounts.length > 0) ? (
-                <Card className="overflow-hidden border-0 shadow-sm">
+                <Card className={cn("overflow-hidden border shadow-sm !py-0 !gap-0", PDF_PANEL_BG, PDF_PANEL_BORDER)}>
                     <details className="group" open>
-                        <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-muted/30 transition-colors select-none">
+                        <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-[#e6ebf2] transition-colors select-none">
                             <div className="flex items-center gap-2.5">
                                 <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-gray-500/10"><TableIcon className="w-4 h-4 text-muted-foreground" /></div>
                                 <span className="text-sm font-semibold text-foreground">SQL 실행 결과</span>
@@ -624,7 +586,7 @@ export default function PdfResultPanel({
                         <div className="px-4 pb-4">
                             {/* 단계별 필터링 카운트 (Funnel Chart 스타일) */}
                             {stepCounts.length > 0 && (
-                                <div className="mb-6 p-4 rounded-xl border bg-muted/10">
+                                <div className={cn("mb-6 p-4 rounded-xl border", PDF_PANEL_BG_SOFT, PDF_PANEL_BORDER)}>
                                     <div className="text-xs font-semibold mb-3 flex items-center gap-1.5 opacity-80">
                                         <Activity className="w-3.5 h-3.5 text-primary" /> 단계별 필터링 효과 (Funnel)
                                     </div>
@@ -638,7 +600,7 @@ export default function PdfResultPanel({
                                                         <span className="font-medium text-foreground/70">{s.name}</span>
                                                         <span>{s.count.toLocaleString()}명 ({pct}%)</span>
                                                     </div>
-                                                    <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                                                    <div className="h-1.5 w-full bg-[#d9e0e9] rounded-full overflow-hidden">
                                                         <div className="h-full bg-primary transition-all duration-500" style={{ width: `${pct}%` }} />
                                                     </div>
                                                 </div>
@@ -654,9 +616,9 @@ export default function PdfResultPanel({
                                     <pre className="text-xs text-destructive/80 whitespace-pre-wrap break-all">{resultError}</pre>
                                 </div>
                             ) : columns.length > 0 ? (
-                                <div className="overflow-x-auto rounded-lg border">
+                                <div className={cn("overflow-x-auto rounded-lg border", PDF_PANEL_BORDER)}>
                                     <table className="w-full text-xs">
-                                        <thead className="bg-muted/40 border-b">
+                                        <thead className={cn("border-b", PDF_PANEL_BG)}>
                                             <tr>
                                                 {columns.map((col: string, i: number) => (
                                                     <th key={i} className="text-left px-3 py-2.5 font-semibold text-muted-foreground whitespace-nowrap text-[11px] uppercase tracking-wider">{col}</th>
@@ -669,7 +631,7 @@ export default function PdfResultPanel({
                                                     ? row
                                                     : columns.map((col) => (row && typeof row === "object" ? (row as Record<string, unknown>)[col] : ""))
                                                 return (
-                                                <tr key={ri} className={cn("transition-colors hover:bg-primary/5", ri % 2 === 0 ? "" : "bg-muted/15")}>
+                                                <tr key={ri} className={cn("transition-colors hover:bg-[#dfe5ee]", ri % 2 === 0 ? "" : "bg-[#e9edf3]")}>
                                                     {cells.map((cell: any, ci: number) => (
                                                         <td key={ci} className="px-3 py-1.5 text-foreground/80 whitespace-nowrap">{cell == null ? "" : String(cell)}</td>
                                                     ))}
@@ -679,7 +641,7 @@ export default function PdfResultPanel({
                                         </tbody>
                                     </table>
                                     {((rows.length || 0) >= 100 || (toNumber(cr.row_count) ?? 0) > 50) && (
-                                        <div className="px-4 py-2 text-[10px] text-muted-foreground border-t bg-muted/20">
+                                        <div className={cn("px-4 py-2 text-[10px] text-muted-foreground border-t", PDF_PANEL_BG_SOFT, PDF_PANEL_BORDER)}>
                                             전체 검색 결과 중 상위 {rows.length || 0}행 표시
                                         </div>
                                     )}

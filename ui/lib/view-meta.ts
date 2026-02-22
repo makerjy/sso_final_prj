@@ -6,7 +6,7 @@ export const VIEW_META: Record<ViewType, { title: string; subtitle?: string }> =
     subtitle: "데이터베이스 연결을 구성하고 접근 권한을 관리합니다.",
   },
   query: {
-    title: "쿼리",
+    title: "채팅",
     subtitle: "자연어 질문을 SQL로 변환하고 실행 결과를 확인합니다.",
   },
   dashboard: {

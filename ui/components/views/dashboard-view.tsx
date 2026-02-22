@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   Dialog,
   DialogContent,
@@ -17,7 +18,6 @@ import {
 import {
   Pin,
   Clock,
-  Share2,
   MoreHorizontal,
   Play,
   Calendar,
@@ -54,6 +54,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useAuth } from "@/components/auth-provider"
+import {
+  readDashboardCache,
+  writeDashboardCache,
+} from "@/lib/dashboard-cache"
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any
 
@@ -903,6 +907,9 @@ export function DashboardView() {
   const [visibleComparisonIds, setVisibleComparisonIds] = useState<Set<string>>(new Set())
   const [comparisonOrder, setComparisonOrder] = useState<string[]>([])
   const [isCompareSelectionMode, setIsCompareSelectionMode] = useState(false)
+  const [isDeleteQueriesOpen, setIsDeleteQueriesOpen] = useState(false)
+  const [deleteQueryIds, setDeleteQueryIds] = useState<string[]>([])
+  const [deletingQueries, setDeletingQueries] = useState(false)
   const [compareChartSelectionByQuery, setCompareChartSelectionByQuery] = useState<Record<string, string>>({})
   const [detailChartSelectionByQuery, setDetailChartSelectionByQuery] = useState<Record<string, string>>({})
   const [popupChartPayload, setPopupChartPayload] = useState<PopupChartPayload | null>(null)
@@ -911,6 +918,15 @@ export function DashboardView() {
   const listSectionRef = useRef<HTMLDivElement | null>(null)
 
   const folderMap = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders])
+
+  const applyDashboardSnapshot = (nextQueries: SavedQuery[], nextFolders: SavedFolder[]) => {
+    setQueries(nextQueries)
+    setFolders(nextFolders)
+    writeDashboardCache<SavedQuery, SavedFolder>(dashboardUser, {
+      queries: nextQueries,
+      folders: nextFolders,
+    })
+  }
 
   const persistDashboard = async (nextQueries: SavedQuery[], nextFolders: SavedFolder[], silent = false) => {
     if (!silent) {
@@ -922,13 +938,14 @@ export function DashboardView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user: dashboardUser || null, queries: nextQueries, folders: nextFolders }),
       })
-      if (!res.ok && !silent) {
-        setError("결과 보드 저장에 실패했습니다.")
+      if (!res.ok) {
+        throw new Error("dashboard_persist_failed")
       }
-    } catch {
+    } catch (persistError) {
       if (!silent) {
         setError("결과 보드 저장에 실패했습니다.")
       }
+      throw persistError
     } finally {
       if (!silent) {
         setSaving(false)
@@ -936,73 +953,101 @@ export function DashboardView() {
     }
   }
 
-  const schedulePersist = (nextQueries: SavedQuery[], nextFolders: SavedFolder[]) => {
+  const clearScheduledPersist = () => {
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current)
+      saveTimer.current = null
     }
+  }
+
+  const schedulePersist = (nextQueries: SavedQuery[], nextFolders: SavedFolder[]) => {
+    clearScheduledPersist()
     saveTimer.current = window.setTimeout(() => {
-      persistDashboard(nextQueries, nextFolders, true)
+      void persistDashboard(nextQueries, nextFolders, true).catch(() => {
+        setError("결과 보드 저장에 실패했습니다.")
+      })
     }, 400)
   }
 
+  const fetchFreshDashboard = async () => {
+    const res = await fetch(apiUrlWithUser("/dashboard/queries"))
+    if (!res.ok) {
+      throw new Error("Failed to fetch dashboard queries.")
+    }
+    const payload = await res.json()
+    const remoteQueries = Array.isArray(payload?.queries) ? payload.queries : []
+    const remoteFolders = Array.isArray(payload?.folders) ? payload.folders : []
+    const cleanedRemoteQueries = remoteQueries.filter((item: any) => !isLegacyDemoSeedQuery(item))
+    const removedLegacyDemo = cleanedRemoteQueries.length !== remoteQueries.length
+
+    const cleanedRemoteFolders = (() => {
+      if (!removedLegacyDemo) return remoteFolders
+      const usedFolderIds = new Set(
+        cleanedRemoteQueries
+          .map((item: any) => String(item?.folderId || "").trim())
+          .filter(Boolean)
+      )
+      return remoteFolders.filter((item: any) => {
+        const id = String(item?.id || "").trim()
+        const name = String(item?.name || "").trim()
+        if (!id) return false
+        if (usedFolderIds.has(id)) return true
+        const isSeedFolder = seedFolders.some((seed) => seed.id === id || seed.name === name)
+        return !isSeedFolder
+      })
+    })()
+
+    const useDemoFallback = cleanedRemoteQueries.length === 0 && Boolean(payload?.detail)
+    const baseQueries = useDemoFallback ? savedQueries : cleanedRemoteQueries
+    const baseFolders = useDemoFallback ? seedFolders : cleanedRemoteFolders
+
+    return {
+      normalized: normalizeDashboardData(baseQueries, baseFolders),
+      removedLegacyDemo,
+      useDemoFallback,
+    }
+  }
+
+  const restoreFreshAndCache = async () => {
+    const fresh = await fetchFreshDashboard()
+    applyDashboardSnapshot(fresh.normalized.queries, fresh.normalized.folders)
+    return fresh
+  }
+
   const loadQueries = async () => {
-    setLoading(true)
     setError(null)
+    const cached = readDashboardCache<SavedQuery, SavedFolder>(dashboardUser)
+    if (cached) {
+      const normalizedCached = normalizeDashboardData(cached.queries, cached.folders)
+      applyDashboardSnapshot(normalizedCached.queries, normalizedCached.folders)
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
+
     try {
-      const res = await fetch(apiUrlWithUser("/dashboard/queries"))
-      if (!res.ok) {
-        throw new Error("Failed to fetch dashboard queries.")
-      }
-      const payload = await res.json()
-      const remoteQueries = Array.isArray(payload?.queries) ? payload.queries : []
-      const remoteFolders = Array.isArray(payload?.folders) ? payload.folders : []
-      const cleanedRemoteQueries = remoteQueries.filter((item: any) => !isLegacyDemoSeedQuery(item))
-      const removedLegacyDemo = cleanedRemoteQueries.length !== remoteQueries.length
-
-      const cleanedRemoteFolders = (() => {
-        if (!removedLegacyDemo) return remoteFolders
-        const usedFolderIds = new Set(
-          cleanedRemoteQueries
-            .map((item: any) => String(item?.folderId || "").trim())
-            .filter(Boolean)
-        )
-        return remoteFolders.filter((item: any) => {
-          const id = String(item?.id || "").trim()
-          const name = String(item?.name || "").trim()
-          if (!id) return false
-          if (usedFolderIds.has(id)) return true
-          const isSeedFolder = seedFolders.some((seed) => seed.id === id || seed.name === name)
-          return !isSeedFolder
+      const fresh = await restoreFreshAndCache()
+      if (!fresh.useDemoFallback && (fresh.normalized.changed || fresh.removedLegacyDemo)) {
+        void persistDashboard(fresh.normalized.queries, fresh.normalized.folders, true).catch(() => {
+          setError("결과 보드 저장에 실패했습니다.")
         })
-      })()
-
-      const useDemoFallback = cleanedRemoteQueries.length === 0 && Boolean(payload?.detail)
-      const baseQueries = useDemoFallback ? savedQueries : cleanedRemoteQueries
-      const baseFolders = useDemoFallback ? seedFolders : cleanedRemoteFolders
-
-      const normalized = normalizeDashboardData(baseQueries, baseFolders)
-      setQueries(normalized.queries)
-      setFolders(normalized.folders)
-
-      if (!useDemoFallback && (normalized.changed || removedLegacyDemo)) {
-        persistDashboard(normalized.queries, normalized.folders, true)
       }
+      setError(null)
     } catch {
-      const normalized = normalizeDashboardData(savedQueries, seedFolders)
-      setQueries(normalized.queries)
-      setFolders(normalized.folders)
-      setError("결과 보드를 불러오지 못했습니다.")
+      if (!cached) {
+        const normalized = normalizeDashboardData(savedQueries, seedFolders)
+        applyDashboardSnapshot(normalized.queries, normalized.folders)
+        setError("결과 보드를 불러오지 못했습니다.")
+      }
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    loadQueries()
+    void loadQueries()
     return () => {
-      if (saveTimer.current) {
-        window.clearTimeout(saveTimer.current)
-      }
+      clearScheduledPersist()
     }
   }, [dashboardUser])
 
@@ -1021,9 +1066,51 @@ export function DashboardView() {
     }
   }, [folders, activeFolderId, openedFolderId])
 
+  useEffect(() => {
+    const validIds = new Set(queries.map((query) => query.id))
+    setSelectedQueryIds((prev) => {
+      const next = new Set(Array.from(prev).filter((id) => validIds.has(id)))
+      if (next.size === prev.size) {
+        let same = true
+        prev.forEach((id) => {
+          if (!next.has(id)) same = false
+        })
+        if (same) return prev
+      }
+      return next
+    })
+    setVisibleComparisonIds((prev) => {
+      const next = new Set(Array.from(prev).filter((id) => validIds.has(id)))
+      if (next.size === prev.size) {
+        let same = true
+        prev.forEach((id) => {
+          if (!next.has(id)) same = false
+        })
+        if (same) return prev
+      }
+      return next
+    })
+    setComparisonOrder((prev) => prev.filter((id) => validIds.has(id)))
+    setComparisonResults((prev) => {
+      const next: Record<string, { loading: boolean; error?: string; data?: any }> = {}
+      Object.keys(prev).forEach((id) => {
+        if (validIds.has(id)) {
+          next[id] = prev[id]
+        }
+      })
+      return next
+    })
+    setCompareChartSelectionByQuery((prev) => {
+      const next: Record<string, string> = {}
+      Object.keys(prev).forEach((id) => {
+        if (validIds.has(id)) next[id] = prev[id]
+      })
+      return next
+    })
+  }, [queries])
+
   const updateDashboardState = (nextQueries: SavedQuery[], nextFolders: SavedFolder[]) => {
-    setQueries(nextQueries)
-    setFolders(nextFolders)
+    applyDashboardSnapshot(nextQueries, nextFolders)
     schedulePersist(nextQueries, nextFolders)
   }
 
@@ -1126,7 +1213,16 @@ export function DashboardView() {
           ? (payload.bundles as Record<string, unknown>)
           : {}
       if (Object.keys(bundles).length > 0) {
-        setQueries((prev) => prev.map((query) => (bundles[query.id] ? mergeBundleIntoQuery(query, bundles[query.id]) : query)))
+        setQueries((prev) => {
+          const mergedQueries = prev.map((query) =>
+            bundles[query.id] ? mergeBundleIntoQuery(query, bundles[query.id]) : query
+          )
+          writeDashboardCache<SavedQuery, SavedFolder>(dashboardUser, {
+            queries: mergedQueries,
+            folders,
+          })
+          return mergedQueries
+        })
       }
       return bundles
     } catch {
@@ -1139,9 +1235,87 @@ export function DashboardView() {
     updateDashboardState(nextQueries, folders)
   }
 
+  const requestDeleteQueries = (ids: string[]) => {
+    const nextIds = Array.from(new Set(ids.map((id) => String(id || "").trim()).filter(Boolean)))
+    if (!nextIds.length) return
+    setDeleteQueryIds(nextIds)
+    setIsDeleteQueriesOpen(true)
+  }
+
   const handleDelete = (id: string) => {
-    const nextQueries = queries.filter((q) => q.id !== id)
-    updateDashboardState(nextQueries, folders)
+    requestDeleteQueries([id])
+  }
+
+  const handleSelectionModeToggle = () => {
+    if (isCompareSelectionMode) {
+      setIsCompareSelectionMode(false)
+      setSelectedQueryIds(new Set())
+      return
+    }
+    setIsCompareSelectionMode(true)
+  }
+
+  const deleteSelectedQueries = async (ids: string[]) => {
+    const nextIds = Array.from(new Set(ids.map((id) => String(id || "").trim()).filter(Boolean)))
+    if (!nextIds.length) return
+
+    const removingIdSet = new Set(nextIds)
+    const previousQueries = queries
+    const previousFolders = folders
+    const nextQueries = previousQueries.filter((query) => !removingIdSet.has(query.id))
+
+    clearScheduledPersist()
+    applyDashboardSnapshot(nextQueries, previousFolders)
+    setSelectedQueryIds((prev) => new Set(Array.from(prev).filter((id) => !removingIdSet.has(id))))
+    setComparisonOrder((prev) => prev.filter((id) => !removingIdSet.has(id)))
+    setVisibleComparisonIds((prev) => new Set(Array.from(prev).filter((id) => !removingIdSet.has(id))))
+    setComparisonResults((prev) => {
+      const next: Record<string, { loading: boolean; error?: string; data?: any }> = {}
+      Object.keys(prev).forEach((id) => {
+        if (!removingIdSet.has(id)) {
+          next[id] = prev[id]
+        }
+      })
+      return next
+    })
+    setCompareChartSelectionByQuery((prev) => {
+      const next: Record<string, string> = {}
+      Object.keys(prev).forEach((id) => {
+        if (!removingIdSet.has(id)) {
+          next[id] = prev[id]
+        }
+      })
+      return next
+    })
+
+    try {
+      await persistDashboard(nextQueries, previousFolders)
+    } catch {
+      const restored = await restoreFreshAndCache()
+        .then(() => true)
+        .catch(() => false)
+      if (!restored) {
+        applyDashboardSnapshot(previousQueries, previousFolders)
+      }
+      throw new Error("delete_selected_failed")
+    }
+  }
+
+  const confirmDeleteQueries = async () => {
+    if (!deleteQueryIds.length || deletingQueries) return
+    setDeletingQueries(true)
+    setError(null)
+    try {
+      await deleteSelectedQueries(deleteQueryIds)
+      setDeleteQueryIds([])
+      setIsDeleteQueriesOpen(false)
+      setIsCompareSelectionMode(false)
+      setSelectedQueryIds(new Set())
+    } catch {
+      setError("선택한 쿼리 삭제에 실패했습니다. 최신 데이터로 복구했습니다.")
+    } finally {
+      setDeletingQueries(false)
+    }
   }
 
   const handleDuplicate = (id: string) => {
@@ -1187,14 +1361,6 @@ export function DashboardView() {
       ...queries,
     ]
     updateDashboardState(nextQueries, folders)
-  }
-
-  const handleShare = async (query: SavedQuery) => {
-    try {
-      await navigator.clipboard.writeText(query.query || query.title)
-    } catch {
-      setError("클립보드 복사에 실패했습니다.")
-    }
   }
 
   const handleCreateFolder = (rawName: string) => {
@@ -1690,9 +1856,26 @@ export function DashboardView() {
       chartType: query.chartType,
       ts: Date.now(),
     }
-    localStorage.setItem(pendingDashboardQueryKey, JSON.stringify(payload))
+    const serialized = JSON.stringify(payload)
+    let stored = false
+    try {
+      localStorage.setItem(pendingDashboardQueryKey, serialized)
+      stored = true
+    } catch {}
+    if (!stored) {
+      try {
+        sessionStorage.setItem(pendingDashboardQueryKey, serialized)
+        stored = true
+      } catch {}
+    }
+    if (!stored) {
+      setError("브라우저 저장소에 실행 정보를 저장하지 못했습니다. 저장소를 정리한 뒤 다시 시도해주세요.")
+      return
+    }
     window.dispatchEvent(new Event("ql-open-query-view"))
   }
+
+  const isInitialLoading = loading && queries.length === 0 && folders.length === 0
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 w-full max-w-none">
@@ -1716,121 +1899,145 @@ export function DashboardView() {
         />
       </div>
 
-      <div>
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <h3 className="text-sm font-medium text-muted-foreground">폴더</h3>
-          <Button variant="outline" size="sm" className="h-8 gap-1" onClick={() => setIsCreateFolderOpen(true)}>
-            <FolderPlus className="w-3.5 h-3.5" />
-            폴더 생성
-          </Button>
-        </div>
-        <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
-          {folderCards.map((folder) => (
-            <FolderCard
-              key={folder.id}
-              folder={folder}
-              active={activeFolderId === folder.id}
-              onSelect={() => setActiveFolderId(folder.id)}
-              onOpen={() => handleOpenFolder(folder.id)}
-              onRename={folder.editable ? () => handleRenameFolder(folder.id) : undefined}
-              onDelete={folder.editable ? () => handleDeleteFolder(folder.id) : undefined}
-            />
-          ))}
-        </div>
-      </div>
-
-      <Card ref={listSectionRef}>
-        <CardHeader className="pb-3">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-            <div>
-              <CardTitle className="text-base">{selectedFolderName}</CardTitle>
-              <CardDescription>
-                {activeFolderId === ALL_FOLDER_ID
-                  ? "전체 쿼리를 리스트 형식으로 확인하고 관리합니다."
-                  : "선택한 폴더의 쿼리를 리스트 형식으로 확인하고 관리합니다."}
-              </CardDescription>
-            </div>
-            <Badge variant="secondary" className="w-fit">
-              {filteredQueries.length}개 쿼리
-            </Badge>
+      {isInitialLoading ? (
+        <div className="space-y-4">
+          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <Skeleton key={`folder-skeleton-${index}`} className="h-24 rounded-2xl" />
+            ))}
           </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="rounded-xl border border-border overflow-hidden bg-secondary/10 p-4 transition-all duration-300">
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-sm font-semibold flex items-center gap-2 text-foreground">
-                  <Scale className="w-4 h-4 text-primary" />
-                  비교할 쿼리 ({selectedQueryIds.size}/3)
-                </h3>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant={isCompareSelectionMode ? "default" : "outline"}
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={() => setIsCompareSelectionMode((prev) => !prev)}
-                  >
-                    {isCompareSelectionMode ? "선택 완료" : "선택하기"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setSelectedQueryIds(new Set())}
-                    className="h-7 text-xs text-muted-foreground hover:text-destructive"
-                  >
-                    <Trash2 className="w-3.5 h-3.5 mr-1" />
-                    모두 해제
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="h-7 text-xs gap-1"
-                    disabled={selectedQueryIds.size < 2}
-                    onClick={handleStartCompare}
-                  >
-                    비교하기
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </Button>
+          <Card>
+            <CardHeader className="pb-3 space-y-2">
+              <Skeleton className="h-5 w-40" />
+              <Skeleton className="h-4 w-72" />
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Skeleton className="h-24 w-full rounded-xl" />
+              <Skeleton className="h-16 w-full rounded-xl" />
+              <Skeleton className="h-16 w-full rounded-xl" />
+            </CardContent>
+          </Card>
+        </div>
+      ) : (
+        <>
+          <div>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-muted-foreground">폴더</h3>
+              <Button variant="outline" size="sm" className="h-8 gap-1" onClick={() => setIsCreateFolderOpen(true)}>
+                <FolderPlus className="w-3.5 h-3.5" />
+                폴더 생성
+              </Button>
+            </div>
+            <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
+              {folderCards.map((folder) => (
+                <FolderCard
+                  key={folder.id}
+                  folder={folder}
+                  active={activeFolderId === folder.id}
+                  onSelect={() => setActiveFolderId(folder.id)}
+                  onOpen={() => handleOpenFolder(folder.id)}
+                  onRename={folder.editable ? () => handleRenameFolder(folder.id) : undefined}
+                  onDelete={folder.editable ? () => handleDeleteFolder(folder.id) : undefined}
+                />
+              ))}
+            </div>
+          </div>
+
+          <Card ref={listSectionRef}>
+            <CardHeader className="pb-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <CardTitle className="text-base">{selectedFolderName}</CardTitle>
+                  <CardDescription>
+                    {activeFolderId === ALL_FOLDER_ID
+                      ? "전체 쿼리를 리스트 형식으로 확인하고 관리합니다."
+                      : "선택한 폴더의 쿼리를 리스트 형식으로 확인하고 관리합니다."}
+                  </CardDescription>
+                </div>
+                <Badge variant="secondary" className="w-fit">
+                  {filteredQueries.length}개 쿼리
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="rounded-xl border border-border overflow-hidden bg-secondary/10 p-4 transition-all duration-300">
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold flex items-center gap-2 text-foreground">
+                      <Scale className="w-4 h-4 text-primary" />
+                      비교할 쿼리 ({selectedQueryIds.size}/3)
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant={isCompareSelectionMode ? "default" : "outline"}
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={handleSelectionModeToggle}
+                      >
+                        {isCompareSelectionMode ? "선택 취소" : "선택 모드"}
+                      </Button>
+                      {isCompareSelectionMode && (
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          className="h-7 text-xs gap-1"
+                          disabled={selectedQueryIds.size === 0 || deletingQueries}
+                          onClick={() => requestDeleteQueries(Array.from(selectedQueryIds))}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          삭제
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        className="h-7 text-xs gap-1"
+                        disabled={selectedQueryIds.size < 2}
+                        onClick={handleStartCompare}
+                      >
+                        비교하기
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  {isCompareSelectionMode && (
+                    <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+                      리스트의 체크박스를 눌러 최대 3개까지 빠르게 선택할 수 있습니다.
+                    </div>
+                  )}
+
+                  {selectedQueryIds.size > 0 ? (
+                    <div className="flex flex-wrap gap-2 animate-in fade-in slide-in-from-top-2">
+                      {queries
+                        .filter((q) => selectedQueryIds.has(q.id))
+                        .map((q) => (
+                          <Badge
+                            key={q.id}
+                            variant="secondary"
+                            className="pl-2 pr-1 py-1 flex items-center gap-1 bg-background border shadow-sm"
+                          >
+                            {q.title}
+                            <button
+                              onClick={() => handleToggleCompare(q.id)}
+                              className="ml-1 hover:bg-muted-foreground/20 rounded-full p-0.5 transition-colors"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </Badge>
+                        ))}
+                </div>
+                  ) : (
+                    <div className="flex items-center text-sm text-muted-foreground gap-2 py-1">
+                      <Scale className="w-4 h-4 opacity-50" />
+                      <span>
+                        {isCompareSelectionMode
+                          ? "체크박스로 비교 대상을 선택하세요."
+                          : "선택 모드 버튼을 눌러 체크박스로 빠르게 선택하세요."}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
-
-              {isCompareSelectionMode && (
-                <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
-                  리스트의 체크박스를 눌러 최대 3개까지 빠르게 선택할 수 있습니다.
-                </div>
-              )}
-
-              {selectedQueryIds.size > 0 ? (
-                <div className="flex flex-wrap gap-2 animate-in fade-in slide-in-from-top-2">
-                  {queries
-                    .filter((q) => selectedQueryIds.has(q.id))
-                    .map((q) => (
-                      <Badge
-                        key={q.id}
-                        variant="secondary"
-                        className="pl-2 pr-1 py-1 flex items-center gap-1 bg-background border shadow-sm"
-                      >
-                        {q.title}
-                        <button
-                          onClick={() => handleToggleCompare(q.id)}
-                          className="ml-1 hover:bg-muted-foreground/20 rounded-full p-0.5 transition-colors"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </Badge>
-                    ))}
-                </div>
-              ) : (
-                <div className="flex items-center text-sm text-muted-foreground gap-2 py-1">
-                  <Scale className="w-4 h-4 opacity-50" />
-                  <span>
-                    {isCompareSelectionMode
-                      ? "체크박스로 비교 대상을 선택하세요."
-                      : "선택하기 버튼을 눌러 체크박스로 빠르게 선택하세요."}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
           {filteredQueries.length > 0 ? (
             <div className="rounded-xl border border-border overflow-hidden">
               <div className="hidden lg:grid grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)_130px_110px] gap-3 px-4 py-2 bg-secondary/40 text-[11px] font-medium text-muted-foreground">
@@ -1852,7 +2059,6 @@ export function DashboardView() {
                     onTogglePin={togglePin}
                     onDelete={handleDelete}
                     onDuplicate={handleDuplicate}
-                    onShare={handleShare}
                     getChartIcon={getChartIcon}
                     selected={selectedQueryIds.has(query.id)}
                     onToggleCompare={handleToggleCompare}
@@ -1870,7 +2076,9 @@ export function DashboardView() {
             </div>
           )}
         </CardContent>
-      </Card>
+          </Card>
+        </>
+      )}
 
       <Dialog
         open={isCompareOpen}
@@ -1883,20 +2091,14 @@ export function DashboardView() {
           }
         }}
       >
-        <DialogContent className="!w-[72vw] !max-w-[72vw] h-[min(92vh,980px)] p-0 gap-0 flex flex-col overflow-hidden">
+        <DialogContent className="!w-screen !max-w-screen h-screen !max-h-screen rounded-none border-0 p-0 gap-0 flex flex-col overflow-hidden">
           <DialogHeader className="px-6 pt-6 pb-4 border-b border-border shrink-0">
             <DialogTitle>상세 비교 분석</DialogTitle>
             <DialogDescription>선택한 항목의 실행 결과를 비교합니다.</DialogDescription>
           </DialogHeader>
           <div className="flex-1 min-h-0 flex flex-col px-6 pb-6 pt-4 overflow-hidden">
-            <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex items-center gap-2 mb-3">
               <Badge variant="secondary">{comparisonOrder.length}개 쿼리</Badge>
-              <div className="flex items-center gap-2">
-                <Button variant="ghost" size="sm" onClick={() => setIsCompareOpen(false)}>
-                  <X className="w-4 h-4 mr-1" />
-                  닫기
-                </Button>
-              </div>
             </div>
 
             {comparisonOrder.length > 0 ? (
@@ -1973,6 +2175,8 @@ export function DashboardView() {
                       .map((q) => {
                       const result = comparisonResults[q.id] || { loading: false }
                       const records = result.data ? result.data.records : []
+                      const normalizedRecords = Array.isArray(records) ? records : []
+                      const visibleRecords = normalizedRecords.slice(0, 10)
                       const columns = result.data ? result.data.columns : []
                       const recommendedCharts = getRecommendedChartsForQuery(q, "compare")
                       const selectedRecommendedId = compareChartSelectionByQuery[q.id]
@@ -2034,7 +2238,7 @@ export function DashboardView() {
                               </div>
                             ) : result.data ? (
                               <div className="flex flex-col h-full min-h-0 divide-y divide-border">
-                                <div className="h-[250px] p-2 bg-white flex flex-col gap-2">
+                                <div className="h-[380px] md:h-[420px] p-2 bg-white flex flex-col gap-2">
                                   {recommendedCharts.length > 0 && (
                                     <div className="flex flex-wrap gap-1.5">
                                       {recommendedCharts.map((chart, index) => {
@@ -2261,6 +2465,9 @@ export function DashboardView() {
                                 </div>
 
                                 <div className="flex-1 min-h-0 overflow-auto bg-white relative border-t border-border/50">
+                                  <div className="border-b border-border/60 bg-secondary/30 px-2 py-1 text-[10px] text-muted-foreground">
+                                    {`쿼리 결과 상위 ${visibleRecords.length.toLocaleString()}개 표시 / 전체 ${normalizedRecords.length.toLocaleString()}개`}
+                                  </div>
                                   <table className="w-full text-xs text-left border-separate border-spacing-0">
                                     <thead className="bg-white">
                                       <tr>
@@ -2275,7 +2482,7 @@ export function DashboardView() {
                                       </tr>
                                     </thead>
                                     <tbody>
-                                      {records.map((row: any, idx: number) => (
+                                      {visibleRecords.map((row: any, idx: number) => (
                                         <tr key={idx} className="hover:bg-secondary/5">
                                           {columns.map((col: string) => (
                                             <td key={`${idx}-${col}`} className="p-2 truncate max-w-[120px] border-b border-border/50">
@@ -2313,7 +2520,7 @@ export function DashboardView() {
         setIsFolderDialogOpen(open)
         if (!open) setOpenedFolderId(null)
       }}>
-        <DialogContent className="!w-[72vw] !max-w-[72vw] h-[min(92vh,980px)] p-0 gap-0 flex flex-col overflow-hidden">
+        <DialogContent className="!w-screen !max-w-screen h-screen !max-h-screen rounded-none border-0 p-0 gap-0 flex flex-col overflow-hidden">
           <DialogHeader className="px-6 pt-6 pb-4 border-b border-border shrink-0">
             <DialogTitle>{openedFolderName || "폴더"}</DialogTitle>
             <DialogDescription>폴더 안 쿼리를 한눈에 확인합니다.</DialogDescription>
@@ -2671,6 +2878,43 @@ export function DashboardView() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={isDeleteQueriesOpen}
+        onOpenChange={(open: boolean) => {
+          if (deletingQueries) return
+          setIsDeleteQueriesOpen(open)
+          if (!open) {
+            setDeleteQueryIds([])
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>쿼리 삭제</DialogTitle>
+            <DialogDescription>
+              {deleteQueryIds.length > 0
+                ? `선택한 쿼리를 삭제할까요? 총 ${deleteQueryIds.length}개 쿼리가 폴더에서 제거되며 복구할 수 없습니다.`
+                : "선택한 쿼리를 삭제할까요?"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              variant="ghost"
+              disabled={deletingQueries}
+              onClick={() => {
+                setIsDeleteQueriesOpen(false)
+                setDeleteQueryIds([])
+              }}
+            >
+              취소
+            </Button>
+            <Button variant="destructive" disabled={deletingQueries} onClick={confirmDeleteQueries}>
+              삭제
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isCreateFolderOpen} onOpenChange={(open: boolean) => {
         setIsCreateFolderOpen(open)
         if (!open) {
@@ -2792,8 +3036,10 @@ function FolderCard({ folder, active, onSelect, onOpen, onRename, onDelete }: Fo
   return (
     <Card
       className={cn(
-        "relative overflow-hidden rounded-2xl border bg-card transition-colors aspect-[3.5/1] w-full gap-0 py-0",
-        active ? "border-primary/50 bg-primary/5" : "hover:border-primary/30"
+        "relative overflow-hidden rounded-2xl border bg-card aspect-[3.5/1] w-full gap-0 py-0 transform-gpu transition-[transform,box-shadow,border-color,background-color] duration-200 ease-out",
+        active
+          ? "border-primary/50 bg-primary/5 hover:scale-[1.015] hover:shadow-md"
+          : "hover:scale-[1.015] hover:shadow-md"
       )}
     >
       <CardContent className="p-4 h-full flex items-center">
@@ -2869,7 +3115,6 @@ interface DashboardQueryRowProps {
   onTogglePin: (id: string) => void
   onDelete: (id: string) => void
   onDuplicate: (id: string) => void
-  onShare: (query: SavedQuery) => void
   getChartIcon: (type: string) => ReactNode
   selected: boolean
   onToggleCompare: (id: string) => void
@@ -2885,7 +3130,6 @@ function DashboardQueryRow({
   onTogglePin,
   onDelete,
   onDuplicate,
-  onShare,
   getChartIcon,
   selected,
   onToggleCompare,
@@ -3001,17 +3245,9 @@ function DashboardQueryRow({
                 ))}
               </DropdownMenuSubContent>
             </DropdownMenuSub>
-            <DropdownMenuItem onClick={() => onShare(query)}>
-              <Share2 className="w-4 h-4 mr-2" />
-              공유
-            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onDuplicate(query.id)}>
               <Copy className="w-4 h-4 mr-2" />
               복제
-            </DropdownMenuItem>
-            <DropdownMenuItem>
-              <Calendar className="w-4 h-4 mr-2" />
-              스케줄 설정
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem className="text-destructive" onClick={() => onDelete(query.id)}>

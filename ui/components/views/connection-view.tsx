@@ -70,6 +70,7 @@ const DEFAULT_TABLE_SCOPES: TableScope[] = [
 
 export function ConnectionView() {
   const { user } = useAuth()
+  const connectionPlaceholderClass = "placeholder:text-muted-foreground/60"
   const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/, "")
   const apiUrl = (path: string) => (apiBaseUrl ? `${apiBaseUrl}${path}` : path)
   const stateUser = (user?.id || user?.username || user?.name || "").trim()
@@ -429,6 +430,7 @@ export function ConnectionView() {
                   value={connectionConfig.host}
                   onChange={(e) => setConnectionConfig(prev => ({ ...prev, host: e.target.value }))}
                   placeholder="예: db.example.com"
+                  className={connectionPlaceholderClass}
                 />
               </div>
               <div className="space-y-2">
@@ -437,7 +439,8 @@ export function ConnectionView() {
                   id="port" 
                   value={connectionConfig.port}
                   onChange={(e) => setConnectionConfig(prev => ({ ...prev, port: e.target.value }))}
-                  placeholder="예: 1521"
+                  placeholder="예: 1234"
+                  className={connectionPlaceholderClass}
                 />
               </div>
             </div>
@@ -448,6 +451,7 @@ export function ConnectionView() {
                 value={connectionConfig.database}
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, database: e.target.value }))}
                 placeholder="예: ORCLPDB1"
+                className={connectionPlaceholderClass}
               />
             </div>
             <div className="space-y-2">
@@ -457,6 +461,7 @@ export function ConnectionView() {
                 value={connectionConfig.username}
                 onChange={(e) => setConnectionConfig(prev => ({ ...prev, username: e.target.value }))}
                 placeholder="예: oracle_app_user (앱 로그인 ID 아님)"
+                className={connectionPlaceholderClass}
               />
               <p className="text-xs text-muted-foreground">앱 로그인 아이디가 아니라 Oracle DB 계정을 입력하세요.</p>
             </div>
